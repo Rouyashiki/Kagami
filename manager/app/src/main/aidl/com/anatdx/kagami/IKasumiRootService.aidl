@@ -1,7 +1,7 @@
 package com.anatdx.kagami;
 
 interface IKasumiRootService {
-    String snapshotJson(boolean ignoreProtocolMismatch);
+    String snapshotJson();
     String setEnabled(boolean enabled);
     String setDebug(boolean enabled);
     String setMountHide(boolean enabled);

@@ -98,12 +98,11 @@
     <string name="label_policy_effective_owner">实际 owner</string>
     <string name="label_policy_flags">策略 flags</string>
     <string name="label_policy_roots">检测到的 root</string>
-    <string name="label_policy_owner_input">Owner：auto、kernelsu、apatch、magisk、manual、disabled</string>
+    <string name="label_policy_owner_input">Owner：auto、kernelsu、apatch、manual、disabled</string>
     <string name="label_policy_allow_uids">Allow UIDs</string>
     <string name="label_policy_deny_uids">Deny UIDs</string>
     <string name="control_kasumi_runtime">Kasumi 运行时</string>
     <string name="control_kernel_log">内核调试日志</string>
-    <string name="control_ignore_protocol">忽略协议不匹配</string>
     <string name="control_mount_hide">挂载隐藏</string>
     <string name="control_maps_spoof">Maps 伪装</string>
     <string name="control_statfs_spoof">Statfs 伪装</string>

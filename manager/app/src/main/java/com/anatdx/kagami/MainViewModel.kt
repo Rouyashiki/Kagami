@@ -32,7 +32,6 @@ data class ManagerUiState(
     val snapshot: KagamiSnapshot = KagamiSnapshot(),
     val nativeSnapshot: NativeKasumiSnapshot = NativeKasumiSnapshot(),
     val nativePath: String = "",
-    val ignoreProtocolMismatch: Boolean = false,
     val kernelDebugEnabled: Boolean = false,
     val mapsTargetIno: String = "",
     val mapsTargetDev: String = "0",
@@ -40,10 +39,10 @@ data class ManagerUiState(
     val mapsSpoofedDev: String = "",
     val mapsSpoofedPath: String = "",
     val mapsResolve: MapsResolveState = MapsResolveState(),
-    val policyOwner: String = "manual",
+    val policyOwner: String = "auto",
     val policyAllowUids: String = "",
     val policyDenyUids: String = "",
-    val policyIncludeIsolated: Boolean = true,
+    val policyIncludeIsolated: Boolean = false,
     val appPicker: AppPickerState = AppPickerState(),
     val kernelLog: String = "",
     val command: String = "api system",
@@ -66,12 +65,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refresh() {
         viewModelScope.launch {
             mutableState.value = mutableState.value.copy(loading = true, error = null)
-            val nativeSnapshot = nativeClient.snapshot(mutableState.value.ignoreProtocolMismatch)
-            mutableState.value = mutableState.value.copy(
+            val nativeSnapshot = nativeClient.snapshot()
+            mutableState.value = syncPolicyEditor(mutableState.value.copy(
                 loading = false,
-                nativeSnapshot = nativeSnapshot,
                 error = nativeSnapshot.error,
-            )
+            ), nativeSnapshot)
         }
     }
 
@@ -166,11 +164,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSelinuxGuard(enabled: Boolean) {
         runNativeAction { nativeClient.setSelinuxGuard(enabled) }
-    }
-
-    fun setIgnoreProtocolMismatch(enabled: Boolean) {
-        mutableState.value = mutableState.value.copy(ignoreProtocolMismatch = enabled)
-        refresh()
     }
 
     fun setNativePath(path: String) {
@@ -427,24 +420,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             mutableState.value = current.copy(error = "Policy UID list contains invalid values")
             return
         }
-        val flags = (if (allow.isNotEmpty()) POLICY_FLAG_USE_ALLOW_UIDS else 0) or
-            (if (deny.isNotEmpty()) POLICY_FLAG_USE_DENY_UIDS else 0) or
-            (if (current.policyIncludeIsolated) POLICY_FLAG_INCLUDE_ISOLATED_UIDS else 0)
+        val owner = current.policyOwner.trim().lowercase()
+        if (owner !in setOf("auto", "kernelsu", "ksu", "apatch", "manual", "disabled", "off")) {
+            mutableState.value = current.copy(error = "Policy owner is invalid")
+            return
+        }
+        persistAndApplyPolicy(owner, allow, deny, current.policyIncludeIsolated)
+    }
+
+    private fun persistAndApplyPolicy(owner: String, allow: List<Int>, deny: List<Int>, includeIsolated: Boolean) {
+        val allowCsv = allow.joinToString(",").ifBlank { "-" }
+        val denyCsv = deny.joinToString(",").ifBlank { "-" }
+        val isolated = if (includeIsolated) "on" else "off"
         runNativeAction {
-            val ownerResult = nativeClient.setPolicy(current.policyOwner.trim().ifBlank { "manual" }, flags)
-            if (!ownerResult.ok) return@runNativeAction ownerResult
-            val allowResult = if (allow.isNotEmpty()) nativeClient.setPolicyUids("allow", allow.toIntArray()) else nativeClient.clearPolicyUids("allow")
-            if (!allowResult.ok) return@runNativeAction allowResult
-            if (deny.isNotEmpty()) nativeClient.setPolicyUids("deny", deny.toIntArray()) else nativeClient.clearPolicyUids("deny")
+            val persisted = bridge.run("config policy set $owner $allowCsv $denyCsv $isolated")
+            if (persisted.exitCode != 0) {
+                return@runNativeAction NativeActionResult(
+                    ok = false,
+                    errno = persisted.exitCode,
+                    error = persisted.stderr.ifBlank { persisted.stdout },
+                )
+            }
+            val applied = bridge.run("config apply")
+            NativeActionResult(
+                ok = applied.exitCode == 0,
+                errno = applied.exitCode,
+                error = applied.stderr.ifBlank { if (applied.exitCode == 0) "" else applied.stdout },
+            )
         }
     }
 
     fun clearManualPolicy() {
-        runNativeAction {
-            val clearResult = nativeClient.clearPolicyUids("all")
-            if (!clearResult.ok) return@runNativeAction clearResult
-            nativeClient.setPolicy("auto", 0)
-        }
+        persistAndApplyPolicy("auto", emptyList(), emptyList(), false)
     }
 
     fun refreshKernelLog() {
@@ -459,18 +466,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             mutableState.value = mutableState.value.copy(loading = true, error = null)
             val result = action()
-            val nativeSnapshot = nativeClient.snapshot(mutableState.value.ignoreProtocolMismatch)
-            mutableState.value = mutableState.value.copy(
+            val nativeSnapshot = nativeClient.snapshot()
+            mutableState.value = syncPolicyEditor(mutableState.value.copy(
                 loading = false,
-                nativeSnapshot = nativeSnapshot,
                 nativeActionResult = result,
                 error = when {
                     result.ok -> nativeSnapshot.error
                     result.error.isNotBlank() -> result.error
                     else -> "Native action failed"
                 },
-            )
+            ), nativeSnapshot)
         }
+    }
+
+    private fun syncPolicyEditor(state: ManagerUiState, snapshot: NativeKasumiSnapshot): ManagerUiState {
+        if (!snapshot.policy.ok) {
+            return state.copy(nativeSnapshot = snapshot)
+        }
+        val policy = snapshot.policy
+        return state.copy(
+            nativeSnapshot = snapshot,
+            policyOwner = policy.owner,
+            policyAllowUids = policy.allowUids.joinToString(","),
+            policyDenyUids = policy.denyUids.joinToString(","),
+            policyIncludeIsolated = (policy.flags and POLICY_FLAG_INCLUDE_ISOLATED_UIDS) != 0,
+        )
     }
 
     private fun parseUidList(value: String): List<Int>? {

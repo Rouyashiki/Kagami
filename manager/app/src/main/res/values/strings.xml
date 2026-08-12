@@ -98,12 +98,11 @@
     <string name="label_policy_effective_owner">Effective owner</string>
     <string name="label_policy_flags">Policy flags</string>
     <string name="label_policy_roots">Detected roots</string>
-    <string name="label_policy_owner_input">Owner: auto, kernelsu, apatch, magisk, manual, disabled</string>
+    <string name="label_policy_owner_input">Owner: auto, kernelsu, apatch, manual, disabled</string>
     <string name="label_policy_allow_uids">Allow UIDs</string>
     <string name="label_policy_deny_uids">Deny UIDs</string>
     <string name="control_kasumi_runtime">Kasumi runtime</string>
     <string name="control_kernel_log">Kernel debug log</string>
-    <string name="control_ignore_protocol">Ignore protocol mismatch</string>
     <string name="control_mount_hide">Mount hide</string>
     <string name="control_maps_spoof">Maps spoof</string>
     <string name="control_statfs_spoof">Statfs spoof</string>

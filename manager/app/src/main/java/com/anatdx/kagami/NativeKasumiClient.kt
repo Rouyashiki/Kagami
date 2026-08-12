@@ -25,7 +25,6 @@ data class NativeKasumiSnapshot(
     val lastError: String = "",
     val modulesVisible: Boolean = false,
     val mountBase: String = "",
-    val protocolIgnored: Boolean = false,
     val featureBitmask: Int = 0,
     val featureNames: List<String> = emptyList(),
     val hooks: String = "",
@@ -39,6 +38,7 @@ data class NativeKasumiPolicy(
     val errno: Int = 0,
     val err: Int = 0,
     val apiVersion: Int = 0,
+    val generation: Long = 0,
     val owner: String = "auto",
     val effectiveOwner: String = "auto",
     val flags: Int = 0,
@@ -74,8 +74,8 @@ class NativeKasumiClient(
     private var service: IKasumiRootService? = null
     private var connection: ServiceConnection? = null
 
-    suspend fun snapshot(ignoreProtocolMismatch: Boolean): NativeKasumiSnapshot = withContext(Dispatchers.IO) {
-        runCatching { parseSnapshot(rootService().snapshotJson(ignoreProtocolMismatch)) }
+    suspend fun snapshot(): NativeKasumiSnapshot = withContext(Dispatchers.IO) {
+        runCatching { parseSnapshot(rootService().snapshotJson()) }
             .getOrElse { NativeKasumiSnapshot(error = it.message ?: it::class.java.simpleName) }
     }
 
@@ -215,7 +215,6 @@ class NativeKasumiClient(
             lastError = root.optString("last_error"),
             modulesVisible = root.optBoolean("modules_visible", false),
             mountBase = root.optString("mount_base", ""),
-            protocolIgnored = root.optBoolean("protocol_ignored", false),
             featureBitmask = features?.optInt("bitmask", 0) ?: 0,
             featureNames = features?.optJSONArray("names").orEmptyStrings(),
             hooks = root.optString("hooks", ""),
@@ -224,6 +223,7 @@ class NativeKasumiClient(
                 errno = policy?.optInt("errno", 0) ?: 0,
                 err = policy?.optInt("err", 0) ?: 0,
                 apiVersion = policy?.optInt("api_version", 0) ?: 0,
+                generation = policy?.optLong("generation", 0L) ?: 0L,
                 owner = policy?.optString("owner", "auto") ?: "auto",
                 effectiveOwner = policy?.optString("effective_owner", "auto") ?: "auto",
                 flags = policy?.optInt("flags", 0) ?: 0,

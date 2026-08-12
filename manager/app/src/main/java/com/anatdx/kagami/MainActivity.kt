@@ -216,7 +216,6 @@ private fun KagamiApp(viewModel: MainViewModel = viewModel()) {
                         onSetMapsSpoof = viewModel::setMapsSpoof,
                         onSetStatfsSpoof = viewModel::setStatfsSpoof,
                         onSetSelinuxGuard = viewModel::setSelinuxGuard,
-                        onSetIgnoreProtocolMismatch = viewModel::setIgnoreProtocolMismatch,
                         onNativePathChange = viewModel::setNativePath,
                         onHideNativePath = viewModel::hideNativePath,
                         onDeleteNativeRule = viewModel::deleteNativeRule,
@@ -452,7 +451,6 @@ private fun OverviewCard(
                 stringResource(R.string.label_mirror) to native.mountBase.ifBlank { daemon.mountBase.ifBlank { stringResource(R.string.value_unknown) } },
                 stringResource(R.string.label_protocol) to "${native.kernelProtocol}/${native.expectedProtocol}",
                 stringResource(R.string.label_uid) to "${native.uid} / ${native.euid}",
-                stringResource(R.string.label_protocol_override) to if (native.protocolIgnored) stringResource(R.string.value_on) else stringResource(R.string.value_off),
                 stringResource(R.string.label_autoload) to if (lkm.autoload) stringResource(R.string.value_on) else stringResource(R.string.value_off),
             ),
         )
@@ -468,7 +466,6 @@ private fun ControlScreen(
     onSetMapsSpoof: (Boolean) -> Unit,
     onSetStatfsSpoof: (Boolean) -> Unit,
     onSetSelinuxGuard: (Boolean) -> Unit,
-    onSetIgnoreProtocolMismatch: (Boolean) -> Unit,
     onNativePathChange: (String) -> Unit,
     onHideNativePath: () -> Unit,
     onDeleteNativeRule: () -> Unit,
@@ -500,7 +497,6 @@ private fun ControlScreen(
                 native = state.nativeSnapshot,
                 actionResult = state.nativeActionResult,
                 error = state.error,
-                ignoreProtocolMismatch = state.ignoreProtocolMismatch,
                 kernelDebugEnabled = state.kernelDebugEnabled,
                 nativePath = state.nativePath,
                 onSetKasumiEnabled = onSetKasumiEnabled,
@@ -509,7 +505,6 @@ private fun ControlScreen(
                 onSetMapsSpoof = onSetMapsSpoof,
                 onSetStatfsSpoof = onSetStatfsSpoof,
                 onSetSelinuxGuard = onSetSelinuxGuard,
-                onSetIgnoreProtocolMismatch = onSetIgnoreProtocolMismatch,
                 onNativePathChange = onNativePathChange,
                 onHideNativePath = onHideNativePath,
                 onDeleteNativeRule = onDeleteNativeRule,
@@ -627,7 +622,6 @@ private fun DirectKasumiCard(
     native: NativeKasumiSnapshot,
     actionResult: NativeActionResult?,
     error: String?,
-    ignoreProtocolMismatch: Boolean,
     kernelDebugEnabled: Boolean,
     nativePath: String,
     onSetKasumiEnabled: (Boolean) -> Unit,
@@ -636,7 +630,6 @@ private fun DirectKasumiCard(
     onSetMapsSpoof: (Boolean) -> Unit,
     onSetStatfsSpoof: (Boolean) -> Unit,
     onSetSelinuxGuard: (Boolean) -> Unit,
-    onSetIgnoreProtocolMismatch: (Boolean) -> Unit,
     onNativePathChange: (String) -> Unit,
     onHideNativePath: () -> Unit,
     onDeleteNativeRule: () -> Unit,
@@ -651,7 +644,6 @@ private fun DirectKasumiCard(
         InfoRow(stringResource(R.string.label_status), nativeStatusLabel(native.status))
         InfoRow(stringResource(R.string.label_get_fd), nativeGetFdLabel(native))
         Spacer(Modifier.height(8.dp))
-        SettingsSwitchRow(stringResource(R.string.control_ignore_protocol), ignoreProtocolMismatch, onSetIgnoreProtocolMismatch)
         NativeControlRow(stringResource(R.string.control_kasumi_runtime), onEnable = { onSetKasumiEnabled(true) }, onDisable = { onSetKasumiEnabled(false) })
         SettingsSwitchRow(stringResource(R.string.control_kernel_log), kernelDebugEnabled, onSetDebug)
         SettingsSwitchRow(stringResource(R.string.control_mount_hide), native.featureBitmask hasFeature FEATURE_MOUNT_HIDE, onSetMountHide)
