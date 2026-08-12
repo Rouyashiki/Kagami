@@ -4,4 +4,4 @@ name=Kagami
 version=v0.1.0
 versionCode=7
 author=Anatdx
-description=Kasumi-first metamodule with Magic Mount and OverlayFS fallback backends
+description=OverlayFS-first metamodule with Magic Mount fallback and opt-in Kasumi

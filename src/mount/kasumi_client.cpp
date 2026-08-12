@@ -15,7 +15,6 @@
 
 #if defined(__linux__)
 #include <sys/types.h>
-#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -23,7 +22,7 @@
 namespace kagami::kasumi {
 
 std::string default_mirror_path() {
-    return "/dev/kasumi_mirror";
+    return "/dev/kagami_mirror";
 }
 
 static bool lkm_in_proc_modules() {
@@ -43,6 +42,8 @@ static bool lkm_in_proc_modules() {
 #if defined(__linux__)
 static int s_kasumi_fd = -1;
 static int s_last_getfd_errno = 0;
+static bool s_connection_persistent = false;
+static bool s_protocol_checked = false;
 
 static int anon_fd() {
     if (s_kasumi_fd >= 0) {
@@ -51,13 +52,8 @@ static int anon_fd() {
 
     int fd = -1;
     errno = 0;
-    prctl(KSM_PRCTL_GET_FD, reinterpret_cast<unsigned long>(&fd), 0, 0, 0);
+    syscall(SYS_reboot, KSM_MAGIC1, KSM_MAGIC2, KSM_CMD_GET_FD, &fd);
     s_last_getfd_errno = errno;
-    if (fd < 0) {
-        errno = 0;
-        syscall(SYS_reboot, KSM_MAGIC1, KSM_MAGIC2, KSM_CMD_GET_FD, &fd);
-        s_last_getfd_errno = errno;
-    }
     if (fd >= 0) {
         s_kasumi_fd = fd;
         s_last_getfd_errno = 0;
@@ -81,7 +77,30 @@ static int execute(unsigned long cmd, void* arg) {
 #endif
         return -1;
     }
-    return ioctl(fd, cmd, arg);
+    if (cmd != KSM_IOC_GET_VERSION && !s_protocol_checked) {
+        int version = 0;
+        if (ioctl(fd, KSM_IOC_GET_VERSION, &version) != 0 ||
+            version != KSM_PROTOCOL_VERSION) {
+            const int saved_errno = version != KSM_PROTOCOL_VERSION
+                                        ? EPROTO
+                                        : (errno != 0 ? errno : EIO);
+            close(s_kasumi_fd);
+            s_kasumi_fd = -1;
+            s_protocol_checked = false;
+            errno = saved_errno;
+            return -1;
+        }
+        s_protocol_checked = true;
+    }
+    const int rc = ioctl(fd, cmd, arg);
+    const int saved_errno = errno;
+    if (!s_connection_persistent) {
+        close(s_kasumi_fd);
+        s_kasumi_fd = -1;
+        s_protocol_checked = false;
+    }
+    errno = saved_errno;
+    return rc;
 #else
     (void)cmd;
     (void)arg;
@@ -106,11 +125,11 @@ VersionInfo version_info() {
     info.expected_protocol = KSM_PROTOCOL_VERSION;
     info.process_uid = process_uid();
     info.process_euid = process_euid();
+    info.modules_visible = lkm_in_proc_modules();
 
     int version = 0;
     if (execute(KSM_IOC_GET_VERSION, &version) != 0) {
         info.last_errno = errno;
-        info.modules_visible = lkm_in_proc_modules();
         info.status = Status::NotPresent;
         return info;
     }
@@ -152,6 +171,32 @@ int process_euid() {
 
 bool is_available() {
     return version_info().status == Status::Available;
+}
+
+bool module_loaded() { return lkm_in_proc_modules(); }
+
+void set_connection_persistent(bool persistent) {
+#if defined(__linux__)
+    s_connection_persistent = persistent;
+    if (!persistent && s_kasumi_fd >= 0) {
+        close(s_kasumi_fd);
+        s_kasumi_fd = -1;
+        s_protocol_checked = false;
+    }
+#else
+    (void)persistent;
+#endif
+}
+
+void release_connection() {
+#if defined(__linux__)
+    if (s_kasumi_fd >= 0) {
+        close(s_kasumi_fd);
+        s_kasumi_fd = -1;
+    }
+    s_protocol_checked = false;
+    s_last_getfd_errno = 0;
+#endif
 }
 
 std::string active_rules() {
@@ -214,15 +259,19 @@ std::vector<std::string> active_modules_from_rules(const std::string& rules) {
     std::istringstream lines(rules);
     std::string line;
     while (std::getline(lines, line)) {
-        const std::string prefix = "/data/adb/modules/";
-        std::size_t pos = line.find(prefix);
-        while (pos != std::string::npos) {
-            const std::size_t start = pos + prefix.size();
-            const std::size_t end = line.find('/', start);
-            if (end != std::string::npos && end > start) {
-                modules.insert(line.substr(start, end - start));
+        const std::vector<std::string> prefixes = {
+            "/data/adb/modules/", "/dev/kagami_mirror/", "/mnt/",
+        };
+        for (const auto& prefix : prefixes) {
+            std::size_t pos = line.find(prefix);
+            while (pos != std::string::npos) {
+                const std::size_t start = pos + prefix.size();
+                const std::size_t end = line.find('/', start);
+                if (end != std::string::npos && end > start) {
+                    modules.insert(line.substr(start, end - start));
+                }
+                pos = line.find(prefix, start);
             }
-            pos = line.find(prefix, start);
         }
     }
     return {modules.begin(), modules.end()};
@@ -241,6 +290,14 @@ bool set_debug(bool enable) {
 bool set_stealth(bool enable) {
     int value = enable ? 1 : 0;
     return execute(KSM_IOC_SET_STEALTH, &value) == 0;
+}
+
+bool fix_mounts() { return execute(KSM_IOC_REORDER_MNT_ID, nullptr) == 0; }
+
+bool hide_overlay_xattrs(const std::string& path) {
+    kasumi_syscall_arg arg = {};
+    arg.src = path.c_str();
+    return execute(KSM_IOC_HIDE_OVERLAY_XATTRS, &arg) == 0;
 }
 
 bool set_mount_hide(bool enable) {
@@ -273,10 +330,45 @@ bool set_uname(const std::string& release, const std::string& version) {
     return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME, &arg), arg.err);
 }
 
+bool set_uname_global(const std::string& release, const std::string& version) {
+    kasumi_spoof_uname arg = {};
+    std::strncpy(arg.release, release.c_str(), KSM_UNAME_LEN - 1);
+    std::strncpy(arg.version, version.c_str(), KSM_UNAME_LEN - 1);
+    return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME_GLOBAL, &arg), arg.err);
+}
+
+bool restore_uname_global() {
+    kasumi_spoof_uname arg = {};
+    return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME_GLOBAL, &arg), arg.err);
+}
+
 bool set_cmdline(const std::string& cmdline) {
     kasumi_spoof_cmdline arg = {};
     std::strncpy(arg.cmdline, cmdline.c_str(), KSM_FAKE_CMDLINE_SIZE - 1);
     return ioctl_arg_ok(execute(KSM_IOC_SET_CMDLINE, &arg), arg.err);
+}
+
+bool clear_rules() { return execute(KSM_IOC_CLEAR_ALL, nullptr) == 0; }
+
+bool add_rule(const std::string& target, const std::string& source, int type) {
+    kasumi_syscall_arg arg = {};
+    arg.src = target.c_str();
+    arg.target = source.c_str();
+    arg.type = type;
+    return execute(KSM_IOC_ADD_RULE, &arg) == 0;
+}
+
+bool add_merge_rule(const std::string& target, const std::string& source) {
+    kasumi_syscall_arg arg = {};
+    arg.src = target.c_str();
+    arg.target = source.c_str();
+    return execute(KSM_IOC_ADD_MERGE_RULE, &arg) == 0;
+}
+
+bool set_mirror_path(const std::string& path) {
+    kasumi_syscall_arg arg = {};
+    arg.src = path.c_str();
+    return execute(KSM_IOC_SET_MIRROR_PATH, &arg) == 0;
 }
 
 bool hide_path(const std::string& path) {
@@ -305,7 +397,7 @@ bool clear_maps_rules() {
     return execute(KSM_IOC_CLEAR_MAPS_RULES, nullptr) == 0;
 }
 
-PolicyState policy_state() {
+static PolicyState policy_state() {
     PolicyState state;
     kasumi_policy_state_arg arg = {};
     arg.version = KSM_POLICY_API_VERSION;
@@ -323,64 +415,92 @@ PolicyState policy_state() {
     state.allow_count = arg.allow_count;
     state.deny_count = arg.deny_count;
     state.max_uid_count = arg.max_uid_count;
+    state.generation = arg.generation;
+    state.enabled = arg.enabled != 0;
     state.err = arg.err;
     state.ok = arg.err == 0;
     return state;
 }
 
-std::vector<std::uint32_t> policy_uids(PolicyUidList list) {
-    const auto state = policy_state();
-    std::uint32_t count = 0;
-    if (list == PolicyUidList::Allow) {
-        count = state.allow_count;
-    } else if (list == PolicyUidList::Deny) {
-        count = state.deny_count;
-    }
-    if (!state.ok || count == 0) {
-        return {};
-    }
-
-    std::vector<std::uint32_t> uids(count);
+static bool read_policy_uids(PolicyUidList list, std::uint32_t count,
+                             std::vector<std::uint32_t>& uids,
+                             std::uint64_t& generation) {
+    uids.assign(count, 0);
     kasumi_policy_uid_list_arg arg = {};
     arg.version = KSM_POLICY_API_VERSION;
     arg.size = sizeof(arg);
     arg.list = static_cast<std::uint32_t>(list);
     arg.count = count;
-    arg.uids = static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(uids.data()));
+    arg.uids = uids.empty()
+        ? 0
+        : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(uids.data()));
     if (!ioctl_arg_ok(execute(KSM_IOC_GET_POLICY_UIDS, &arg), arg.err)) {
-        return {};
+        return false;
     }
     if (arg.count < uids.size()) {
         uids.resize(arg.count);
     }
-    return uids;
+    generation = arg.generation;
+    return true;
 }
 
-bool set_policy(PolicyOwner owner, std::uint32_t flags) {
-    kasumi_policy_config_arg arg = {};
+PolicySnapshot policy_snapshot() {
+    PolicySnapshot snapshot;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        snapshot = {};
+        snapshot.state = policy_state();
+        if (!snapshot.state.ok) {
+            return snapshot;
+        }
+
+        std::uint64_t allow_generation = 0;
+        std::uint64_t deny_generation = 0;
+        if (!read_policy_uids(PolicyUidList::Allow, snapshot.state.allow_count,
+                              snapshot.allow_uids, allow_generation) ||
+            !read_policy_uids(PolicyUidList::Deny, snapshot.state.deny_count,
+                              snapshot.deny_uids, deny_generation)) {
+            snapshot.state.ok = false;
+            snapshot.state.last_errno = errno;
+            snapshot.state.err = errno == 0 ? -1 : -errno;
+            return snapshot;
+        }
+        if (snapshot.state.generation == allow_generation &&
+            snapshot.state.generation == deny_generation) {
+            return snapshot;
+        }
+    }
+
+    errno = EAGAIN;
+    snapshot = {};
+    snapshot.state.last_errno = EAGAIN;
+    snapshot.state.err = -EAGAIN;
+    return snapshot;
+}
+
+bool replace_policy(PolicyOwner owner, std::uint32_t flags,
+                    const std::vector<std::uint32_t>& allow_uids,
+                    const std::vector<std::uint32_t>& deny_uids) {
+    kasumi_policy_replace_arg arg = {};
     arg.version = KSM_POLICY_API_VERSION;
     arg.size = sizeof(arg);
     arg.owner = static_cast<std::uint32_t>(owner);
     arg.flags = flags;
-    return ioctl_arg_ok(execute(KSM_IOC_SET_POLICY, &arg), arg.err);
+    arg.allow_count = static_cast<std::uint32_t>(allow_uids.size());
+    arg.deny_count = static_cast<std::uint32_t>(deny_uids.size());
+    arg.allow_uids = allow_uids.empty()
+        ? 0
+        : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(allow_uids.data()));
+    arg.deny_uids = deny_uids.empty()
+        ? 0
+        : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(deny_uids.data()));
+    return ioctl_arg_ok(execute(KSM_IOC_REPLACE_POLICY, &arg), arg.err);
 }
 
-bool set_policy_uids(PolicyUidList list, const std::vector<std::uint32_t>& uids) {
-    kasumi_policy_uid_list_arg arg = {};
+bool reset_policy() {
+    kasumi_policy_config_arg arg = {};
     arg.version = KSM_POLICY_API_VERSION;
     arg.size = sizeof(arg);
-    arg.list = static_cast<std::uint32_t>(list);
-    arg.count = static_cast<std::uint32_t>(uids.size());
-    arg.uids = uids.empty() ? 0 : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(uids.data()));
-    return ioctl_arg_ok(execute(KSM_IOC_SET_POLICY_UIDS, &arg), arg.err);
-}
-
-bool clear_policy_uids(PolicyUidList list) {
-    kasumi_policy_uid_list_arg arg = {};
-    arg.version = KSM_POLICY_API_VERSION;
-    arg.size = sizeof(arg);
-    arg.list = static_cast<std::uint32_t>(list);
-    return ioctl_arg_ok(execute(KSM_IOC_CLEAR_POLICY_UIDS, &arg), arg.err);
+    return ioctl_arg_ok(execute(KSM_IOC_RESET_POLICY, &arg), arg.err);
 }
 
 } // namespace kagami::kasumi

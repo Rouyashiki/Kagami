@@ -1,5 +1,7 @@
 #include "mount/mount_fs.hpp"
 
+#include "core/log.hpp"
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -13,7 +15,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <iostream>
 
 // Older bionic headers may not expose every propagation flag.
@@ -33,10 +34,7 @@ const std::vector<std::string> kManagedPartitions = {
 };
 
 void mlog(const std::string& msg) {
-    char ts[32] = {};
-    const std::time_t now = std::time(nullptr);
-    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-    std::cerr << ts << " [kagami-mount] " << msg << "\n";
+    logging::append("mount", msg);
 }
 
 bool get_context(const std::string& path, std::string& out) {

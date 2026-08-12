@@ -50,11 +50,22 @@ struct PolicyState {
     std::uint32_t allow_count = 0;
     std::uint32_t deny_count = 0;
     std::uint32_t max_uid_count = 0;
+    std::uint64_t generation = 0;
+    bool enabled = false;
+};
+
+struct PolicySnapshot {
+    PolicyState state;
+    std::vector<std::uint32_t> allow_uids;
+    std::vector<std::uint32_t> deny_uids;
 };
 
 std::string default_mirror_path();
 VersionInfo version_info();
 bool is_available();
+bool module_loaded();
+void set_connection_persistent(bool persistent);
+void release_connection();
 std::string active_rules();
 std::string hooks();
 int features();
@@ -64,21 +75,29 @@ std::vector<std::string> active_modules_from_rules(const std::string& rules);
 bool set_enabled(bool enable);
 bool set_debug(bool enable);
 bool set_stealth(bool enable);
+bool fix_mounts();
+bool hide_overlay_xattrs(const std::string& path);
 bool set_mount_hide(bool enable);
 bool set_maps_spoof(bool enable);
 bool set_statfs_spoof(bool enable);
 bool set_selinux_guard(bool enable);
 bool set_uname(const std::string& release, const std::string& version);
+bool set_uname_global(const std::string& release, const std::string& version);
+bool restore_uname_global();
 bool set_cmdline(const std::string& cmdline);
+bool clear_rules();
+bool add_rule(const std::string& target, const std::string& source, int type);
+bool add_merge_rule(const std::string& target, const std::string& source);
+bool set_mirror_path(const std::string& path);
 bool hide_path(const std::string& path);
 bool delete_rule(const std::string& path);
 bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned long spoofed_ino, unsigned long spoofed_dev, const std::string& spoofed_path);
 bool clear_maps_rules();
-PolicyState policy_state();
-std::vector<std::uint32_t> policy_uids(PolicyUidList list);
-bool set_policy(PolicyOwner owner, std::uint32_t flags);
-bool set_policy_uids(PolicyUidList list, const std::vector<std::uint32_t>& uids);
-bool clear_policy_uids(PolicyUidList list);
+PolicySnapshot policy_snapshot();
+bool replace_policy(PolicyOwner owner, std::uint32_t flags,
+                    const std::vector<std::uint32_t>& allow_uids,
+                    const std::vector<std::uint32_t>& deny_uids);
+bool reset_policy();
 int last_getfd_errno();
 int process_uid();
 int process_euid();

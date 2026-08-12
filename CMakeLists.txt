@@ -23,9 +23,11 @@ set(KAGAMI_SOURCES
     src/main.cpp
     src/core/command.cpp
     src/core/daemon.cpp
+    src/core/log.cpp
     src/core/config.cpp
     src/core/runtime.cpp
     src/core/json_value.cpp
+    src/core/lkm.cpp
     src/mount/backend.cpp
     src/mount/mount_fs.cpp
     src/mount/kasumi.cpp

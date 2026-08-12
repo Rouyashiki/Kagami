@@ -11,6 +11,8 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -102,12 +104,54 @@ static void finalize(const std::string& dir) {
     }
 }
 
+// Return the filesystem type when `path` is an exact mountpoint in this mount
+// namespace. A later backend must reuse the mirror acquired by the first one;
+// blindly detaching it would invalidate the other backend's lower trees.
+static bool mounted_mode(const std::string& path, Mode& mode) {
+    std::ifstream in("/proc/self/mountinfo");
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto sep = line.find(" - ");
+        if (sep == std::string::npos) {
+            continue;
+        }
+        std::istringstream pre(line.substr(0, sep));
+        std::vector<std::string> fields;
+        std::string field;
+        while (pre >> field) {
+            fields.push_back(field);
+        }
+        if (fields.size() < 5 || fields[4] != path) {
+            continue;
+        }
+        std::istringstream post(line.substr(sep + 3));
+        std::string fstype;
+        post >> fstype;
+        if (fstype == "tmpfs") {
+            mode = Mode::Tmpfs;
+            return true;
+        }
+        if (fstype == "ext4") {
+            mode = Mode::Ext4;
+            return true;
+        }
+        if (fstype == "erofs") {
+            mode = Mode::Erofs;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 Handle setup(const Config& config) {
     Handle h;
-    const std::string base = config.overlay_dir; // mount point, off /data
-    h.content_dir = base + "/mnt";
-    const std::string img = config.overlay_img; // backing image persists on /data
-    std::string erofs_img = config.overlay_img;
+    const std::string base = config.mirror_dir; // shared mount point, off /data
+    // The mirror root is the mountpoint itself: module trees live directly at
+    // /dev/kagami_mirror/<module-id>, matching hymo's /dev/hymo_mirror layout.
+    h.content_dir = base;
+    const std::string img = config.mirror_img; // backing image persists on /data
+    std::string erofs_img = config.mirror_img;
     const auto dot = erofs_img.rfind(".img");
     if (dot != std::string::npos) {
         erofs_img.replace(dot, 4, ".erofs");
@@ -117,11 +161,36 @@ Handle setup(const Config& config) {
 
     std::error_code ec;
     fs::create_directories(h.content_dir, ec);
-    umount2(h.content_dir.c_str(), MNT_DETACH); // clear any stale mount
 
     const std::string& mode = config.fs_type;
     const bool want_auto = mode == "auto" || mode.empty();
     const bool writable = config.overlay_writable; // upper/work layer is opt-in
+
+    if (mounted_mode(h.content_dir, h.mode)) {
+        if (writable) {
+            h.rw_dir = h.mode == Mode::Erofs ? base + ".rw" : h.content_dir + "/.rw";
+            fs::create_directories(h.rw_dir, ec);
+            if (ec) {
+                mlog("storage: failed to create shared writable layer: " + ec.message());
+                return Handle{};
+            }
+            if (h.mode == Mode::Erofs) {
+                Mode rw_mode;
+                if (!mounted_mode(h.rw_dir, rw_mode)) {
+                    if (::mount(config.mount_source.c_str(), h.rw_dir.c_str(), "tmpfs", 0, nullptr) != 0) {
+                        mlog("storage: shared erofs writable tmpfs failed: " +
+                             std::string(std::strerror(errno)));
+                        return Handle{};
+                    }
+                    finalize(h.rw_dir);
+                }
+            }
+        }
+        h.ok = true;
+        mlog(std::string("storage: reusing shared ") + mode_name(h.mode) + " mirror");
+        return h;
+    }
+    umount2(h.content_dir.c_str(), MNT_DETACH); // clear an unrecognised stale mount
 
     // erofs: read-only content image, plus a separate tmpfs writable layer if opted in.
     if (mode == "erofs") {
@@ -134,7 +203,9 @@ Handle setup(const Config& config) {
             return h;
         }
         if (writable) {
-            h.rw_dir = base + "/rw";
+            // EROFS mounts the root read-only, so its optional OverlayFS
+            // upper/work tmpfs must be a sibling rather than a child.
+            h.rw_dir = base + ".rw";
             fs::create_directories(h.rw_dir, ec);
             umount2(h.rw_dir.c_str(), MNT_DETACH);
             if (::mount(config.mount_source.c_str(), h.rw_dir.c_str(), "tmpfs", 0, nullptr) != 0) {
@@ -175,7 +246,7 @@ Handle setup(const Config& config) {
     }
 
     // ext4 loop image (forced, or the auto fallback). Writable layer lives inside.
-    if (!fs::exists(img) && !make_ext4_image(img, config.overlay_img_size_mb)) {
+    if (!fs::exists(img) && !make_ext4_image(img, config.mirror_img_size_mb)) {
         return h;
     }
     run_tool({"chcon", "u:object_r:ksu_file:s0", img}); // best-effort label on the image
@@ -202,6 +273,14 @@ void teardown(const Handle& handle) {
         umount2(handle.rw_dir.c_str(), MNT_DETACH);
     }
     umount2(handle.content_dir.c_str(), MNT_DETACH);
+}
+
+void teardown_shared(const Config& config) {
+    const std::string base = config.mirror_dir;
+    // rw is only separately mounted in EROFS mode; detaching it is harmless in
+    // tmpfs/ext4 mode, where the writable layer lives inside the mirror root.
+    umount2((base + ".rw").c_str(), MNT_DETACH);
+    umount2(base.c_str(), MNT_DETACH);
 }
 
 } // namespace kagami::mount::storage

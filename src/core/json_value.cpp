@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 
@@ -310,6 +311,97 @@ private:
 bool parse_json(const std::string& input, JsonValue& out, std::string& error) {
     JsonParser parser(input);
     return parser.parse(out, error);
+}
+
+namespace {
+
+void append_quoted_json_string(std::ostringstream& out, const std::string& value) {
+    out << '"';
+    static constexpr char hex[] = "0123456789abcdef";
+    for (const unsigned char c : value) {
+        switch (c) {
+        case '\\': out << "\\\\"; break;
+        case '"': out << "\\\""; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (c < 0x20) {
+                out << "\\u00" << hex[(c >> 4) & 0x0f] << hex[c & 0x0f];
+            } else {
+                out << static_cast<char>(c);
+            }
+        }
+    }
+    out << '"';
+}
+
+void append_json(std::ostringstream& out, const JsonValue& value, int indent, int depth) {
+    const bool pretty = indent > 0;
+    const auto newline_indent = [&]() {
+        if (pretty) {
+            out << '\n' << std::string(static_cast<std::size_t>(indent * depth), ' ');
+        }
+    };
+
+    switch (value.type) {
+    case JsonValue::Type::Null:
+        out << "null";
+        break;
+    case JsonValue::Type::Bool:
+        out << (value.bool_value ? "true" : "false");
+        break;
+    case JsonValue::Type::Number:
+        out << std::setprecision(17) << value.number_value;
+        break;
+    case JsonValue::Type::String:
+        append_quoted_json_string(out, value.string_value);
+        break;
+    case JsonValue::Type::Array:
+        out << '[';
+        for (std::size_t i = 0; i < value.array_value.size(); ++i) {
+            if (i > 0) {
+                out << ',';
+            }
+            if (pretty) {
+                newline_indent();
+            }
+            append_json(out, value.array_value[i], indent, depth + 1);
+        }
+        if (pretty && !value.array_value.empty()) {
+            out << '\n' << std::string(static_cast<std::size_t>(indent * (depth - 1)), ' ');
+        }
+        out << ']';
+        break;
+    case JsonValue::Type::Object:
+        out << '{';
+        for (auto it = value.object_value.begin(); it != value.object_value.end(); ++it) {
+            if (it != value.object_value.begin()) {
+                out << ',';
+            }
+            if (pretty) {
+                newline_indent();
+            }
+            append_quoted_json_string(out, it->first);
+            out << (pretty ? ": " : ":");
+            append_json(out, it->second, indent, depth + 1);
+        }
+        if (pretty && !value.object_value.empty()) {
+            out << '\n' << std::string(static_cast<std::size_t>(indent * (depth - 1)), ' ');
+        }
+        out << '}';
+        break;
+    }
+}
+
+} // namespace
+
+std::string stringify_json(const JsonValue& value, int indent) {
+    std::ostringstream out;
+    append_json(out, value, indent, 1);
+    return out.str();
 }
 
 } // namespace kagami

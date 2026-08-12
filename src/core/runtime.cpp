@@ -33,4 +33,12 @@ std::filesystem::path runtime_pid_file() {
     return runtime_data_dir() / "kagamid.pid";
 }
 
+std::filesystem::path runtime_daemon_lock_file() {
+    return std::filesystem::path(kDataDir) / "kagamid.lock";
+}
+
+std::filesystem::path runtime_lkm_owner_file() {
+    return std::filesystem::path(kDataDir) / "run" / "kasumi_lkm.owner";
+}
+
 } // namespace kagami

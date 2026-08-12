@@ -2,11 +2,13 @@
 
 #include "core/daemon.hpp"
 #include "core/json.hpp"
+#include "core/lkm.hpp"
 #include "core/runtime.hpp"
 #include "kagami/config.hpp"
 #include "kagami/kasumi_client.hpp"
 #include "kagami/kasumi_uapi_compat.hpp"
 #include "mount/backend.hpp"
+#include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
 #include "mount/mount_fs.hpp"
 
@@ -53,14 +55,6 @@ static fs::path user_hide_rules_file() {
     return data_dir() / "user_hide_rules.json";
 }
 
-static fs::path lkm_autoload_file() {
-    return data_dir() / "lkm_autoload";
-}
-
-static fs::path lkm_kmi_override_file() {
-    return data_dir() / "lkm_kmi_override";
-}
-
 static void print_usage() {
     std::cout
         << "Kagami " << KAGAMI_VERSION << "\n"
@@ -69,11 +63,13 @@ static void print_usage() {
         << "  kagamid config show\n"
         << "  kagamid config gen [-o PATH]\n"
         << "  kagamid config apply [PATH]\n"
+        << "  kagamid config policy set <owner> <allow-csv|-> <deny-csv|-> <isolated:on|off>\n"
         << "  kagamid daemon status|serve|call|ping|stop\n"
-        << "  kagamid api system|storage|lkm|features|hooks|backends|meta\n"
-        << "  kagamid module list|check-conflicts|mount-all|unmount|normalize\n"
+        << "  kagamid api system|storage|lkm|kasumi|features|hooks|policy|backends|meta\n"
+        << "  kagamid module list|add|delete|set-mode|add-rule|remove-rule|hot-mount|hot-unmount|check-conflicts|mount-all|unmount|normalize\n"
         << "  kagamid recovery status|boot-completed|reset\n"
-        << "  kagamid kasumi version|list|enable|disable|policy\n";
+        << "  kagamid kasumi version|list|enable|disable|clear|set-mirror|fix-mounts|hide-overlay-xattrs|maps|policy\n"
+        << "  kagamid lkm load|unload|status|autoload|set-autoload|set-kmi|clear-kmi\n";
 }
 
 static std::string arg_or_default(const std::vector<std::string>& args, std::size_t index, const std::string& fallback) {
@@ -152,6 +148,31 @@ static bool is_builtin_partition(const std::string& name) {
     return std::find(kBuiltinPartitions.begin(), kBuiltinPartitions.end(), name) != kBuiltinPartitions.end();
 }
 
+static bool valid_module_id(const std::string& id) {
+    return !id.empty() && std::all_of(id.begin(), id.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '_' || c == '-' || c == '.';
+    });
+}
+
+static bool valid_module_mode(const std::string& mode) {
+    return mode == "auto" || mode == "kasumi" || mode == "overlay" || mode == "magic" ||
+           mode == "none" || mode == "hide";
+}
+
+static bool parse_unsigned_long(const std::string& value, unsigned long& out) {
+    try {
+        std::size_t parsed = 0;
+        const unsigned long result = std::stoul(value, &parsed, 0);
+        if (parsed != value.size()) {
+            return false;
+        }
+        out = result;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 static bool module_has_partition_content(const fs::path& module_path, const std::string& partition) {
     const fs::path root = module_path / partition;
     if (!fs::is_directory(root)) {
@@ -195,15 +216,6 @@ static std::vector<std::string> parse_json_string_array(const std::string& json)
         value.push_back(c);
     }
     return values;
-}
-
-static std::map<std::string, std::string> parse_json_string_map(const std::string& json) {
-    const auto tokens = parse_json_string_array(json);
-    std::map<std::string, std::string> map;
-    for (std::size_t i = 0; i + 1 < tokens.size(); i += 2) {
-        map[tokens[i]] = tokens[i + 1];
-    }
-    return map;
 }
 
 static std::vector<std::string> load_user_hide_rules() {
@@ -347,16 +359,17 @@ static Config current_config() {
 
 static int print_storage_json() {
     const Config config = current_config();
-    const std::string overlay_base = config.overlay_dir + "/mnt";
+    const std::string mirror_base = config.mirror_dir;
 
-    // Report the active backend's storage base (our mount source, fs tmpfs/ext4/
-    // erofs): the overlay base if mounted, else the magic-mount work tmpfs, else
-    // fall back to the host /data filesystem.
+    // Report the active backend's storage base (tmpfs/ext4/erofs): the shared
+    // mirror root if mounted, else the Magic Mount work tmpfs, else fall back
+    // to the host /data filesystem. Loop-backed ext4/EROFS uses a loop-device
+    // source, so the mirror is identified by mountpoint rather than source.
     std::string mode = "host";
     fs::path target = data_dir();
     for (const auto& m : read_mountinfo()) {
-        if (m.source == config.mount_source &&
-            (m.mount_point == overlay_base || m.mount_point == config.work_dir)) {
+        if (m.mount_point == mirror_base ||
+            (m.source == config.mount_source && m.mount_point == config.work_dir)) {
             mode = m.fstype;
             target = m.mount_point;
             break;
@@ -439,8 +452,6 @@ static bool parse_policy_owner(const std::string& value, kasumi::PolicyOwner& ow
         owner = kasumi::PolicyOwner::KernelSU;
     } else if (value == "apatch") {
         owner = kasumi::PolicyOwner::APatch;
-    } else if (value == "magisk") {
-        owner = kasumi::PolicyOwner::Magisk;
     } else if (value == "manual") {
         owner = kasumi::PolicyOwner::Manual;
     } else if (value == "disabled" || value == "off") {
@@ -471,6 +482,38 @@ static bool parse_policy_uid_list(const std::string& value, kasumi::PolicyUidLis
     } else if (value == "all") {
         list = kasumi::PolicyUidList::All;
     } else {
+        return false;
+    }
+    return true;
+}
+
+template <typename Mutation>
+static bool mutate_policy_preserving_enabled(const kasumi::PolicyState& state,
+                                              const std::string& operation,
+                                              Mutation&& mutation) {
+    if (state.enabled && !kasumi::set_enabled(false)) {
+        std::cerr << "failed to disable Kasumi before policy update: "
+                  << std::strerror(errno) << "\n";
+        return false;
+    }
+
+    const bool changed = mutation();
+    const int mutation_errno = errno;
+    if (state.enabled && !kasumi::set_enabled(true)) {
+        const int restore_errno = errno;
+        if (!changed) {
+            std::cerr << "failed to " << operation << ": "
+                      << std::strerror(mutation_errno) << "\n";
+        }
+        std::cerr << "failed to re-enable Kasumi after policy update: "
+                  << std::strerror(restore_errno) << "\n";
+        errno = restore_errno;
+        return false;
+    }
+    if (!changed) {
+        errno = mutation_errno;
+        std::cerr << "failed to " << operation << ": "
+                  << std::strerror(mutation_errno) << "\n";
         return false;
     }
     return true;
@@ -510,6 +553,30 @@ static bool parse_uid_values(const std::vector<std::string>& args, std::size_t s
     return true;
 }
 
+static bool parse_uid_csv(const std::string& value, std::vector<std::uint32_t>& uids) {
+    uids.clear();
+    if (value.empty() || value == "-") {
+        return true;
+    }
+    std::stringstream input(value);
+    std::string item;
+    while (std::getline(input, item, ',')) {
+        if (item.empty()) {
+            return false;
+        }
+        char* end = nullptr;
+        errno = 0;
+        const unsigned long uid = std::strtoul(item.c_str(), &end, 10);
+        if (errno != 0 || end == item.c_str() || *end != '\0' || uid == 0 || uid > UINT32_MAX) {
+            return false;
+        }
+        uids.push_back(static_cast<std::uint32_t>(uid));
+    }
+    std::sort(uids.begin(), uids.end());
+    uids.erase(std::unique(uids.begin(), uids.end()), uids.end());
+    return true;
+}
+
 static void print_roots_json(std::uint32_t roots) {
     std::vector<std::string> names;
     if (roots & (1U << 0)) {
@@ -545,15 +612,16 @@ static void print_policy_flags_json(std::uint32_t flags) {
 }
 
 static int print_policy_json() {
-    const auto state = kasumi::policy_state();
-    const auto allow_uids = state.ok ? kasumi::policy_uids(kasumi::PolicyUidList::Allow) : std::vector<std::uint32_t>{};
-    const auto deny_uids = state.ok ? kasumi::policy_uids(kasumi::PolicyUidList::Deny) : std::vector<std::uint32_t>{};
+    const auto snapshot = kasumi::policy_snapshot();
+    const auto& state = snapshot.state;
 
     std::cout << "{"
               << "\"ok\":" << (state.ok ? "true" : "false") << ","
               << "\"errno\":" << state.last_errno << ","
               << "\"err\":" << state.err << ","
               << "\"api_version\":" << state.version << ","
+              << "\"generation\":" << state.generation << ","
+			  << "\"enabled\":" << (state.enabled ? "true" : "false") << ","
               << "\"owner\":" << json_quote(policy_owner_name(state.owner)) << ","
               << "\"effective_owner\":" << json_quote(policy_owner_name(state.effective_owner)) << ","
               << "\"flags\":";
@@ -564,52 +632,58 @@ static int print_policy_json() {
               << ",\"deny_count\":" << state.deny_count
               << ",\"max_uid_count\":" << state.max_uid_count
               << ",\"allow_uids\":";
-    print_u32_array(allow_uids);
+    print_u32_array(snapshot.allow_uids);
     std::cout << ",\"deny_uids\":";
-    print_u32_array(deny_uids);
+    print_u32_array(snapshot.deny_uids);
     std::cout << "}\n";
     return state.ok ? 0 : 1;
 }
 
-static bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
-    kasumi::PolicyOwner owner = kasumi::PolicyOwner::Auto;
-    if (!parse_policy_owner(policy.owner, owner)) {
-        error = "invalid policy owner: " + policy.owner;
-        return false;
-    }
+static int print_kasumi_snapshot_json() {
+    const auto version = kasumi::version_info();
+    const bool available = version.status == kasumi::Status::Available;
+    const int bitmask = available ? kasumi::features() : 0;
+    const std::string hook_text = available ? kasumi::hooks() : "";
+    const auto policy_snapshot = available ? kasumi::policy_snapshot() : kasumi::PolicySnapshot{};
+    const auto& policy = policy_snapshot.state;
+    const Config config = current_config();
 
-    std::uint32_t flags = 0;
-    if (policy.use_allow_uids || !policy.allow_uids.empty()) {
-        flags |= KSM_POLICY_FLAG_USE_ALLOW_UIDS;
-    }
-    if (policy.use_deny_uids || !policy.deny_uids.empty()) {
-        flags |= KSM_POLICY_FLAG_USE_DENY_UIDS;
-    }
-    if (policy.include_isolated_uids) {
-        flags |= KSM_POLICY_FLAG_INCLUDE_ISOLATED_UIDS;
-    }
-
-    if (!kasumi::set_policy(owner, flags)) {
-        error = "failed to set Kasumi policy owner";
-        return false;
-    }
-    if ((flags & KSM_POLICY_FLAG_USE_ALLOW_UIDS) && !kasumi::set_policy_uids(kasumi::PolicyUidList::Allow, policy.allow_uids)) {
-        error = "failed to set Kasumi policy allow uid list";
-        return false;
-    }
-    if (!(flags & KSM_POLICY_FLAG_USE_ALLOW_UIDS) && !kasumi::clear_policy_uids(kasumi::PolicyUidList::Allow)) {
-        error = "failed to clear Kasumi policy allow uid list";
-        return false;
-    }
-    if ((flags & KSM_POLICY_FLAG_USE_DENY_UIDS) && !kasumi::set_policy_uids(kasumi::PolicyUidList::Deny, policy.deny_uids)) {
-        error = "failed to set Kasumi policy deny uid list";
-        return false;
-    }
-    if (!(flags & KSM_POLICY_FLAG_USE_DENY_UIDS) && !kasumi::clear_policy_uids(kasumi::PolicyUidList::Deny)) {
-        error = "failed to clear Kasumi policy deny uid list";
-        return false;
-    }
-    return true;
+    std::cout << "{"
+              << "\"transport\":\"daemon\","
+              << "\"available\":" << (available ? "true" : "false") << ","
+              << "\"status\":" << static_cast<int>(version.status) << ","
+              << "\"expected_protocol\":" << version.expected_protocol << ","
+              << "\"kernel_protocol\":" << version.kernel_protocol << ","
+              << "\"uid\":" << version.process_uid << ","
+              << "\"euid\":" << version.process_euid << ","
+              << "\"last_errno\":" << version.last_errno << ","
+              << "\"last_error\":"
+              << json_quote(version.last_errno == 0 ? "" : std::strerror(version.last_errno)) << ","
+              << "\"modules_visible\":" << (version.modules_visible ? "true" : "false") << ","
+              << "\"mount_base\":" << json_quote(config.mirror_dir) << ","
+              << "\"features\":{\"bitmask\":" << bitmask << ",\"names\":";
+    print_string_array(kasumi::feature_names(bitmask));
+    std::cout << "},\"hooks\":" << json_quote(hook_text) << ","
+              << "\"policy\":{"
+              << "\"ok\":" << (policy.ok ? "true" : "false") << ","
+              << "\"errno\":" << policy.last_errno << ","
+              << "\"err\":" << policy.err << ","
+              << "\"api_version\":" << policy.version << ","
+              << "\"generation\":" << policy.generation << ","
+			  << "\"enabled\":" << (policy.enabled ? "true" : "false") << ","
+              << "\"owner\":" << json_quote(policy_owner_name(policy.owner)) << ","
+              << "\"effective_owner\":" << json_quote(policy_owner_name(policy.effective_owner)) << ","
+              << "\"flags\":" << policy.flags << ","
+              << "\"detected_roots\":" << policy.detected_roots << ","
+              << "\"allow_count\":" << policy.allow_count << ","
+              << "\"deny_count\":" << policy.deny_count << ","
+              << "\"max_uid_count\":" << policy.max_uid_count << ","
+              << "\"allow_uids\":";
+    print_u32_array(policy_snapshot.allow_uids);
+    std::cout << ",\"deny_uids\":";
+    print_u32_array(policy_snapshot.deny_uids);
+    std::cout << "}}\n";
+    return 0;
 }
 
 static int apply_config_file(const fs::path& path) {
@@ -619,8 +693,19 @@ static int apply_config_file(const fs::path& path) {
         std::cerr << error << "\n";
         return 1;
     }
-    if (!apply_policy_config(config.policy, error)) {
+    const auto current = kasumi::policy_snapshot();
+    if (!mount::kasumi::apply_policy_config(config.policy, error)) {
+        if (current.state.ok && current.state.enabled &&
+            !kasumi::set_enabled(true)) {
+            error += "; failed to restore Kasumi enabled state: ";
+            error += std::strerror(errno);
+        }
         std::cerr << error << "\n";
+        return 1;
+    }
+    if (current.state.ok && current.state.enabled && !kasumi::set_enabled(true)) {
+        std::cerr << "failed to restore Kasumi enabled state after policy apply: "
+                  << std::strerror(errno) << "\n";
         return 1;
     }
     return print_policy_json();
@@ -668,7 +753,7 @@ static int print_system_json() {
         << "{"
         << "\"kernel\":" << json_quote(kernel_release()) << ","
         << "\"selinux\":" << json_quote(selinux_status()) << ","
-        << "\"mount_base\":" << json_quote(kasumi::default_mirror_path()) << ","
+        << "\"mount_base\":" << json_quote(config.mirror_dir) << ","
         << "\"kasumi_available\":" << (version.status == kasumi::Status::Available ? "true" : "false") << ","
         << "\"kasumi_status\":" << static_cast<int>(version.status) << ","
         << "\"hooks\":" << json_quote(hook_text) << ","
@@ -712,6 +797,7 @@ static int print_kasumi_version_json() {
     const bool mismatch = version.status == kasumi::Status::KernelTooOld ||
                           version.status == kasumi::Status::ClientTooOld;
 
+    const Config config = current_config();
     std::cout
         << "{"
         << "\"backend\":\"kasumi\","
@@ -723,7 +809,7 @@ static int print_kasumi_version_json() {
         << json_quote(mismatch ? "Kasumi protocol mismatch" : "") << ","
         << "\"active_modules\":";
     print_string_array(modules);
-    std::cout << ",\"mount_base\":" << json_quote(kasumi::default_mirror_path()) << "}\n";
+    std::cout << ",\"mount_base\":" << json_quote(config.mirror_dir) << "}\n";
     return 0;
 }
 
@@ -812,6 +898,38 @@ static int handle_config(const std::vector<std::string>& args) {
     if (sub == "apply") {
         return apply_config_file(arg_or_default(args, 2, config_file().string()));
     }
+    if (sub == "policy") {
+        if (arg_or_default(args, 2, "") != "set" || args.size() != 7) {
+            std::cerr << "usage: kagamid config policy set <owner> <allow-csv|-> <deny-csv|-> <isolated:on|off>\n";
+            return 1;
+        }
+        kasumi::PolicyOwner parsed_owner = kasumi::PolicyOwner::Auto;
+        if (!parse_policy_owner(args[3], parsed_owner)) {
+            std::cerr << "policy owner must be auto|kernelsu|apatch|manual|disabled\n";
+            return 1;
+        }
+        PolicyConfig policy;
+        policy.owner = policy_owner_name(parsed_owner);
+        if (!parse_uid_csv(args[4], policy.allow_uids) || !parse_uid_csv(args[5], policy.deny_uids)) {
+            std::cerr << "policy UID values must be positive decimal integers separated by commas\n";
+            return 1;
+        }
+        const std::string isolated = args[6];
+        if (isolated != "on" && isolated != "off") {
+            std::cerr << "policy isolated value must be on|off\n";
+            return 1;
+        }
+        policy.use_allow_uids = !policy.allow_uids.empty();
+        policy.use_deny_uids = !policy.deny_uids.empty();
+        policy.include_isolated_uids = isolated == "on";
+        std::string error;
+        if (!update_policy_config(config_file().string(), policy, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        std::cout << "{\"ok\":true,\"persisted\":true}\n";
+        return 0;
+    }
     if (sub == "sync-partitions") {
         std::set<std::string> partitions;
         const fs::path module_root = modules_dir();
@@ -853,12 +971,18 @@ static int handle_api(const std::vector<std::string>& args) {
     }
     if (sub == "lkm") {
         const auto version = kasumi::version_info();
-        const std::string autoload = read_first_line(lkm_autoload_file().string());
-        const std::string kmi = read_first_line(lkm_kmi_override_file().string());
-        std::cout << "{\"loaded\":" << (version.status != kasumi::Status::NotPresent ? "true" : "false")
-                  << ",\"autoload\":" << (autoload == "0" ? "false" : "true")
-                  << ",\"kmi_override\":" << json_quote(kmi) << "}\n";
+        const bool builtin = version.status == kasumi::Status::Available && !lkm::is_loaded();
+        std::cout << "{\"loaded\":" << (lkm::is_loaded() ? "true" : "false")
+                  << ",\"builtin\":" << (builtin ? "true" : "false")
+                  << ",\"autoload\":" << (lkm::get_autoload() ? "true" : "false")
+                  << ",\"kmi_override\":" << json_quote(lkm::get_kmi_override())
+                  << ",\"detected_kmi\":" << json_quote(lkm::current_kmi())
+                  << ",\"asset\":" << json_quote(lkm::find_asset())
+                  << ",\"last_error\":" << json_quote(lkm::last_error()) << "}\n";
         return 0;
+    }
+    if (sub == "kasumi") {
+        return print_kasumi_snapshot_json();
     }
     if (sub == "features") {
         const auto version = kasumi::version_info();
@@ -890,11 +1014,12 @@ static int handle_api(const std::vector<std::string>& args) {
 static int handle_module(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "list") {
-        const auto modes = parse_json_string_map(read_file(data_dir() / "module_mode.json"));
+        const auto modes = mount::load_module_modes();
+        const auto rule_map = mount::load_module_rules();
         const Config cfg = current_config();
+        const fs::path module_root = cfg.module_dir.empty() ? modules_dir() : fs::path(cfg.module_dir);
         std::cout << "{\"modules\":[";
         bool first = true;
-        const fs::path module_root = modules_dir();
         if (fs::is_directory(module_root)) {
             for (const auto& entry : fs::directory_iterator(module_root)) {
                 if (!entry.is_directory()) {
@@ -904,13 +1029,17 @@ static int handle_module(const std::vector<std::string>& args) {
                 std::error_code mec;
                 if (fs::exists(entry.path() / "disable", mec) ||
                     fs::exists(entry.path() / "remove", mec) ||
-                    fs::exists(entry.path() / "skip_mount", mec)) {
+                    fs::exists(entry.path() / "skip_mount", mec) ||
+                    fs::exists(data_dir() / "run" / "hot_unmounted" / entry.path().filename(), mec) ||
+                    !fs::exists(entry.path() / "module.prop", mec)) {
                     continue;
                 }
                 // Only list modules that contribute mounts (have a managed
                 // partition tree); skip plain modules (zygisk, etc.).
                 bool has_mount_content = false;
-                for (const auto& part : mount::fsutil::kManagedPartitions) {
+                const std::vector<std::string>& parts =
+                    cfg.partitions.empty() ? mount::fsutil::kManagedPartitions : cfg.partitions;
+                for (const auto& part : parts) {
                     std::error_code ec;
                     if (fs::is_directory(entry.path() / part, ec)) {
                         has_mount_content = true;
@@ -928,6 +1057,7 @@ static int handle_module(const std::vector<std::string>& args) {
                 first = false;
                 const auto mode_it = modes.find(id);
                 const std::string mode = mode_it == modes.end() ? "auto" : mode_it->second;
+                const auto rules_it = rule_map.find(id);
                 // strategy = the actual resolved backend (overlay/magic/kasumi/none)
                 const std::string strategy =
                     mount::resolve_module_backend(mount::ModuleEntry{id, entry.path()}, cfg, modes);
@@ -940,15 +1070,170 @@ static int handle_module(const std::vector<std::string>& args) {
                           << "\"mode\":" << json_quote(mode) << ","
                           << "\"strategy\":" << json_quote(strategy) << ","
                           << "\"path\":" << json_quote(entry.path().string()) << ","
-                          << "\"rules\":[]"
-                          << "}";
+                          << "\"rules\":[";
+                if (rules_it != rule_map.end()) {
+                    for (std::size_t i = 0; i < rules_it->second.size(); ++i) {
+                        if (i > 0) {
+                            std::cout << ",";
+                        }
+                        std::cout << "{\"path\":" << json_quote(rules_it->second[i].path)
+                                  << ",\"mode\":" << json_quote(rules_it->second[i].mode) << "}";
+                    }
+                }
+                std::cout << "]}";
             }
         }
         std::cout << "]}\n";
         return 0;
     }
+    if (sub == "set-mode") {
+        const std::string id = arg_or_default(args, 2, "");
+        const std::string mode = arg_or_default(args, 3, "");
+        if (!valid_module_id(id) || (mode != "auto" && mode != "kasumi" && mode != "overlay" &&
+                                    mode != "magic" && mode != "none")) {
+            std::cerr << "usage: kagamid module set-mode <id> auto|kasumi|overlay|magic|none\n";
+            return 1;
+        }
+        auto modes = mount::load_module_modes();
+        if (mode == "auto") {
+            modes.erase(id);
+        } else {
+            modes[id] = mode;
+        }
+        if (!mount::save_module_modes(modes)) {
+            std::cerr << "failed to save module modes\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "add-rule") {
+        const std::string id = arg_or_default(args, 2, "");
+        const std::string path = arg_or_default(args, 3, "");
+        const std::string mode = arg_or_default(args, 4, "");
+        if (!valid_module_id(id) || path.empty() || path.front() != '/' || !valid_module_mode(mode)) {
+            std::cerr << "usage: kagamid module add-rule <id> <absolute-path> kasumi|overlay|magic|none|hide\n";
+            return 1;
+        }
+        auto rules = mount::load_module_rules();
+        auto& module_rules = rules[id];
+        const auto existing = std::find_if(module_rules.begin(), module_rules.end(), [&](const auto& rule) {
+            return rule.path == path;
+        });
+        if (existing == module_rules.end()) {
+            module_rules.push_back({path, mode});
+        } else {
+            existing->mode = mode;
+        }
+        if (!mount::save_module_rules(rules)) {
+            std::cerr << "failed to save module rules\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "remove-rule") {
+        const std::string id = arg_or_default(args, 2, "");
+        const std::string path = arg_or_default(args, 3, "");
+        if (!valid_module_id(id) || path.empty() || path.front() != '/') {
+            std::cerr << "usage: kagamid module remove-rule <id> <absolute-path>\n";
+            return 1;
+        }
+        auto rules = mount::load_module_rules();
+        const auto rules_it = rules.find(id);
+        if (rules_it == rules.end()) {
+            return 0;
+        }
+        auto& module_rules = rules_it->second;
+        module_rules.erase(std::remove_if(module_rules.begin(), module_rules.end(), [&](const auto& rule) {
+            return rule.path == path;
+        }), module_rules.end());
+        if (module_rules.empty()) {
+            rules.erase(rules_it);
+        }
+        if (!mount::save_module_rules(rules)) {
+            std::cerr << "failed to save module rules\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "hot-mount" || sub == "hot-unmount" || sub == "add" || sub == "delete") {
+        const std::string id = arg_or_default(args, 2, "");
+        if (!valid_module_id(id)) {
+            std::cerr << "usage: kagamid module " << sub << " <id>\n";
+            return 1;
+        }
+        const Config cfg = current_config();
+        const fs::path module_root = cfg.module_dir.empty() ? modules_dir() : fs::path(cfg.module_dir);
+        const fs::path module_path = module_root / id;
+        if (!fs::is_directory(module_path) || !fs::exists(module_path / "module.prop")) {
+            std::cerr << "module not found: " << id << "\n";
+            return 1;
+        }
+        const auto modes = mount::load_module_modes();
+        if (mount::resolve_module_backend({id, module_path}, cfg, modes) != "kasumi") {
+            std::cerr << "hot module control is only available for an active Kasumi backend\n";
+            return 1;
+        }
+        const fs::path marker = data_dir() / "run" / "hot_unmounted" / id;
+        std::error_code ec;
+        const bool unmounting = sub == "hot-unmount" || sub == "delete";
+        const bool existed = fs::exists(marker, ec);
+        fs::create_directories(marker.parent_path(), ec);
+        if (ec) {
+            std::cerr << "failed to prepare hot-mount state: " << ec.message() << "\n";
+            return 1;
+        }
+        if (unmounting) {
+            std::ofstream(marker, std::ios::trunc).put('\n');
+        } else {
+            fs::remove(marker, ec);
+        }
+        if (!mount::refresh_kasumi_modules(cfg)) {
+            if (unmounting && !existed) {
+                fs::remove(marker, ec);
+            } else if (!unmounting && existed) {
+                std::ofstream(marker, std::ios::trunc).put('\n');
+            }
+            std::cerr << "failed to refresh Kasumi mappings\n";
+            return 1;
+        }
+        std::cout << "{\"ok\":true,\"module\":" << json_quote(id)
+                  << ",\"action\":" << json_quote(sub) << "}\n";
+        return 0;
+    }
     if (sub == "check-conflicts") {
-        std::cout << "[]\n";
+        const Config cfg = current_config();
+        const auto modules = mount::enumerate_mountable_modules(cfg);
+        const std::vector<std::string>& parts =
+            cfg.partitions.empty() ? mount::fsutil::kManagedPartitions : cfg.partitions;
+        std::map<std::string, std::vector<std::string>> owners;
+        for (const auto& module : modules) {
+            for (const auto& part : parts) {
+                const fs::path root = module.path / part;
+                std::error_code ec;
+                auto it = fs::recursive_directory_iterator(root, ec);
+                const auto end = fs::recursive_directory_iterator();
+                for (; it != end && !ec; it.increment(ec)) {
+                    if (it->is_regular_file(ec) || it->is_symlink(ec)) {
+                        owners[(fs::path("/") / part / fs::relative(it->path(), root, ec)).string()].push_back(module.id);
+                    }
+                }
+            }
+        }
+        std::cout << "[";
+        bool first = true;
+        for (const auto& [path, ids] : owners) {
+            if (ids.size() < 2) {
+                continue;
+            }
+            if (!first) {
+                std::cout << ",";
+            }
+            first = false;
+            std::cout << "{\"file\":" << json_quote(path) << ",\"modules\":";
+            print_string_array(ids);
+            std::cout << "}";
+        }
+        std::cout << "]\n";
         return 0;
     }
     if (sub == "mount-all") {
@@ -1008,6 +1293,38 @@ static int handle_kasumi(const std::vector<std::string>& args) {
         const auto version = kasumi::version_info();
         return print_features_json(version.status == kasumi::Status::Available ? kasumi::features() : 0);
     }
+    if (sub == "maps") {
+        const std::string op = arg_or_default(args, 2, "");
+        if (op == "clear") {
+            if (!kasumi::clear_maps_rules()) {
+                std::cerr << "failed to clear Kasumi maps rules\n";
+                return 1;
+            }
+            return 0;
+        }
+        if (op == "add") {
+            if (args.size() < 8) {
+                std::cerr << "usage: kagamid kasumi maps add <target-ino> <target-dev> <spoof-ino> <spoof-dev> <spoof-path>\n";
+                return 1;
+            }
+            unsigned long target_ino = 0;
+            unsigned long target_dev = 0;
+            unsigned long spoof_ino = 0;
+            unsigned long spoof_dev = 0;
+            if (!parse_unsigned_long(args[3], target_ino) || !parse_unsigned_long(args[4], target_dev) ||
+                !parse_unsigned_long(args[5], spoof_ino) || !parse_unsigned_long(args[6], spoof_dev)) {
+                std::cerr << "Kasumi maps values must be unsigned integers\n";
+                return 1;
+            }
+            if (!kasumi::add_maps_rule(target_ino, target_dev, spoof_ino, spoof_dev, args[7])) {
+                std::cerr << "failed to add Kasumi maps rule\n";
+                return 1;
+            }
+            return 0;
+        }
+        std::cerr << "usage: kagamid kasumi maps clear|add ...\n";
+        return 1;
+    }
     if (sub == "policy") {
         const auto op = arg_or_default(args, 2, "show");
         if (op == "show" || op == "state") {
@@ -1016,16 +1333,29 @@ static int handle_kasumi(const std::vector<std::string>& args) {
         if (op == "owner" || op == "set") {
             kasumi::PolicyOwner owner = kasumi::PolicyOwner::Auto;
             if (!parse_policy_owner(arg_or_default(args, 3, ""), owner)) {
-                std::cerr << "policy owner must be auto|kernelsu|apatch|magisk|manual|disabled\n";
+                std::cerr << "policy owner must be auto|kernelsu|apatch|manual|disabled\n";
                 return 1;
             }
-            const auto current = kasumi::policy_state();
-            const std::uint32_t flags = parse_policy_flags(args, 4, current.ok ? current.flags : 0);
-            if (!kasumi::set_policy(owner, flags)) {
-                std::cerr << "failed to set Kasumi policy owner\n";
+            const auto current = kasumi::policy_snapshot();
+            if (!current.state.ok) {
+                std::cerr << "failed to read current Kasumi policy\n";
                 return 1;
             }
-            return 0;
+            const std::uint32_t flags = parse_policy_flags(args, 4, current.state.flags);
+            const auto allow_uids = (flags & KSM_POLICY_FLAG_USE_ALLOW_UIDS)
+                                        ? current.allow_uids
+                                        : std::vector<std::uint32_t>{};
+            const auto deny_uids = (flags & KSM_POLICY_FLAG_USE_DENY_UIDS)
+                                       ? current.deny_uids
+                                       : std::vector<std::uint32_t>{};
+            return mutate_policy_preserving_enabled(
+                       current.state, "set Kasumi policy owner",
+                       [&]() {
+                           return kasumi::replace_policy(owner, flags,
+                                                         allow_uids, deny_uids);
+                       })
+                       ? 0
+                       : 1;
         }
         if (op == "allow" || op == "deny") {
             std::vector<std::uint32_t> uids;
@@ -1033,12 +1363,27 @@ static int handle_kasumi(const std::vector<std::string>& args) {
                 std::cerr << "policy " << op << " requires numeric uid values\n";
                 return 1;
             }
-            const auto list = op == "allow" ? kasumi::PolicyUidList::Allow : kasumi::PolicyUidList::Deny;
-            if (!kasumi::set_policy_uids(list, uids)) {
-                std::cerr << "failed to set Kasumi policy " << op << " uid list\n";
+            auto current = kasumi::policy_snapshot();
+            if (!current.state.ok) {
+                std::cerr << "failed to read current Kasumi policy\n";
                 return 1;
             }
-            return 0;
+            if (op == "allow") {
+                current.state.flags |= KSM_POLICY_FLAG_USE_ALLOW_UIDS;
+                current.allow_uids = std::move(uids);
+            } else {
+                current.state.flags |= KSM_POLICY_FLAG_USE_DENY_UIDS;
+                current.deny_uids = std::move(uids);
+            }
+            return mutate_policy_preserving_enabled(
+                       current.state, "set Kasumi policy " + op + " uid list",
+                       [&]() {
+                           return kasumi::replace_policy(
+                               current.state.owner, current.state.flags,
+                               current.allow_uids, current.deny_uids);
+                       })
+                       ? 0
+                       : 1;
         }
         if (op == "clear") {
             kasumi::PolicyUidList list = kasumi::PolicyUidList::All;
@@ -1046,16 +1391,50 @@ static int handle_kasumi(const std::vector<std::string>& args) {
                 std::cerr << "policy clear target must be allow|deny|all\n";
                 return 1;
             }
-            if (!kasumi::clear_policy_uids(list)) {
-                std::cerr << "failed to clear Kasumi policy " << policy_uid_list_name(list) << " uid list\n";
+            auto current = kasumi::policy_snapshot();
+            if (!current.state.ok) {
+                std::cerr << "failed to read current Kasumi policy\n";
                 return 1;
             }
-            return 0;
+            if (list == kasumi::PolicyUidList::Allow || list == kasumi::PolicyUidList::All) {
+				current.state.flags &= ~KSM_POLICY_FLAG_INCLUDE_ISOLATED_UIDS;
+				if (current.state.owner != kasumi::PolicyOwner::Manual) {
+					current.state.flags &= ~KSM_POLICY_FLAG_USE_ALLOW_UIDS;
+				}
+                current.allow_uids.clear();
+            }
+            if (list == kasumi::PolicyUidList::Deny || list == kasumi::PolicyUidList::All) {
+                current.state.flags &= ~KSM_POLICY_FLAG_USE_DENY_UIDS;
+                current.deny_uids.clear();
+            }
+            return mutate_policy_preserving_enabled(
+                       current.state,
+                       "clear Kasumi policy " + policy_uid_list_name(list) +
+                           " uid list",
+                       [&]() {
+                           return kasumi::replace_policy(
+                               current.state.owner, current.state.flags,
+                               current.allow_uids, current.deny_uids);
+                       })
+                       ? 0
+                       : 1;
         }
         if (op == "apply") {
             return apply_config_file(arg_or_default(args, 3, config_file().string()));
         }
-        std::cerr << "usage: kagamid kasumi policy [show|owner OWNER [allow] [deny] [isolated]|allow UID...|deny UID...|clear allow|deny|all]\n";
+        if (op == "reset") {
+            const auto current = kasumi::policy_snapshot();
+            if (!current.state.ok) {
+                std::cerr << "failed to read current Kasumi policy\n";
+                return 1;
+            }
+            return mutate_policy_preserving_enabled(
+                       current.state, "reset Kasumi policy",
+                       []() { return kasumi::reset_policy(); })
+                       ? 0
+                       : 1;
+        }
+        std::cerr << "usage: kagamid kasumi policy [show|owner OWNER [allow] [deny] [isolated]|allow UID...|deny UID...|clear allow|deny|all|reset|apply [config]]\n";
         return 1;
     }
     if (sub == "enable" || sub == "disable") {
@@ -1065,15 +1444,70 @@ static int handle_kasumi(const std::vector<std::string>& args) {
         }
         return 0;
     }
-    if (sub == "mount-hide" || sub == "maps-spoof" || sub == "statfs-spoof") {
+    if (sub == "clear") {
+        if (!kasumi::clear_rules()) {
+            std::cerr << "failed to clear Kasumi rules\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "hide-path" || sub == "delete-rule") {
+        const std::string path = arg_or_default(args, 2, "");
+        if (path.empty() || path.front() != '/') {
+            std::cerr << "Kasumi path must be absolute\n";
+            return 1;
+        }
+        const bool ok = sub == "hide-path" ? kasumi::hide_path(path)
+                                             : kasumi::delete_rule(path);
+        if (!ok) {
+            std::cerr << "failed to update Kasumi path rule\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "fix-mounts") {
+        if (!kasumi::fix_mounts()) {
+            std::cerr << "failed to reorder Kasumi mount ids\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "set-mirror") {
+        const std::string path = arg_or_default(args, 2, "");
+        if (path.empty() || path.front() != '/') {
+            std::cerr << "kasumi set-mirror requires an absolute path\n";
+            return 1;
+        }
+        if (!kasumi::set_mirror_path(path)) {
+            std::cerr << "failed to set Kasumi mirror path\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "hide-overlay-xattrs") {
+        const std::string path = arg_or_default(args, 2, "");
+        if (path.empty() || path.front() != '/') {
+            std::cerr << "kasumi hide-overlay-xattrs requires an absolute path\n";
+            return 1;
+        }
+        if (!kasumi::hide_overlay_xattrs(path)) {
+            std::cerr << "failed to hide overlay xattrs for " << path << "\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (sub == "mount-hide" || sub == "maps-spoof" || sub == "statfs-spoof" ||
+        sub == "selinux-fix") {
         const bool on = arg_or_default(args, 2, "off") == "on";
         bool ok = false;
         if (sub == "mount-hide") {
             ok = kasumi::set_mount_hide(on);
         } else if (sub == "maps-spoof") {
             ok = kasumi::set_maps_spoof(on);
-        } else {
+        } else if (sub == "statfs-spoof") {
             ok = kasumi::set_statfs_spoof(on);
+        } else {
+            ok = kasumi::set_selinux_guard(on);
         }
         if (!ok) {
             std::cerr << "failed to set Kasumi " << sub << "\n";
@@ -1088,27 +1522,66 @@ static int handle_kasumi(const std::vector<std::string>& args) {
 static int handle_lkm(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "set-autoload") {
-        const bool on = arg_or_default(args, 2, "on") != "off";
-        return write_file(lkm_autoload_file(), on ? "1\n" : "0\n") ? 0 : 1;
+        const std::string value = arg_or_default(args, 2, "");
+        if (value != "on" && value != "off" && value != "1" && value != "0" &&
+            value != "true" && value != "false") {
+            std::cerr << "usage: kagamid lkm set-autoload on|off\n";
+            return 1;
+        }
+        const bool on = value == "on" || value == "1" || value == "true";
+        if (!lkm::set_autoload(on)) {
+            std::cerr << lkm::last_error() << "\n";
+            return 1;
+        }
+        std::cout << "autoload=" << (on ? "on" : "off") << "\n";
+        return 0;
     }
     if (sub == "set-kmi") {
         const std::string kmi = arg_or_default(args, 2, "");
-        return write_file(lkm_kmi_override_file(), kmi + "\n") ? 0 : 1;
+        if (!lkm::set_kmi_override(kmi)) {
+            std::cerr << lkm::last_error() << "\n";
+            return 1;
+        }
+        return 0;
     }
     if (sub == "clear-kmi") {
-        std::error_code ec;
-        fs::remove(lkm_kmi_override_file(), ec);
-        return ec ? 1 : 0;
+        if (!lkm::clear_kmi_override()) {
+            std::cerr << lkm::last_error() << "\n";
+            return 1;
+        }
+        return 0;
     }
-    if (sub == "load" || sub == "unload") {
-        if ((sub == "load" && kasumi::is_available()) ||
-            (sub == "unload" && !kasumi::is_available())) {
+    if (sub == "load") {
+        if (lkm::load()) {
             return 0;
         }
-        std::cerr << "Kasumi LKM management is not implemented in this skeleton\n";
+        std::cerr << "failed to load Kasumi LKM: " << lkm::last_error() << "\n";
         return 1;
     }
-    print_usage();
+    if (sub == "unload" || sub == "force-unload") {
+        if (lkm::unload(sub != "force-unload")) {
+            return 0;
+        }
+        std::cerr << "failed to unload Kasumi LKM: " << lkm::last_error() << "\n";
+        return 1;
+    }
+    if (sub == "autoload") {
+        if (lkm::autoload()) {
+            return 0;
+        }
+        std::cerr << "Kasumi LKM autoload failed: " << lkm::last_error() << "\n";
+        return 1;
+    }
+    if (sub == "status") {
+        std::cout << "{\"loaded\":" << (lkm::is_loaded() ? "true" : "false")
+                  << ",\"autoload\":" << (lkm::get_autoload() ? "true" : "false")
+                  << ",\"kmi_override\":" << json_quote(lkm::get_kmi_override())
+                  << ",\"detected_kmi\":" << json_quote(lkm::current_kmi())
+                  << ",\"asset\":" << json_quote(lkm::find_asset())
+                  << ",\"last_error\":" << json_quote(lkm::last_error()) << "}\n";
+        return 0;
+    }
+    std::cerr << "usage: kagamid lkm load|unload|force-unload|status|autoload|set-autoload|set-kmi|clear-kmi\n";
     return 1;
 }
 
@@ -1206,7 +1679,18 @@ int run_command(const std::vector<std::string>& args) {
             return kasumi::set_stealth(args[2] == "enable") ? 0 : 1;
         }
         if (args.size() >= 2 && args[1] == "set-uname") {
-            return kasumi::set_uname(arg_or_default(args, 2, ""), arg_or_default(args, 3, "")) ? 0 : 1;
+            const bool global = arg_or_default(args, 2, "") == "global";
+            const bool scoped = arg_or_default(args, 2, "") == "scoped";
+            const std::size_t offset = (global || scoped) ? 3 : 2;
+            const bool ok = global
+                                ? kasumi::set_uname_global(arg_or_default(args, offset, ""),
+                                                           arg_or_default(args, offset + 1, ""))
+                                : kasumi::set_uname(arg_or_default(args, offset, ""),
+                                                    arg_or_default(args, offset + 1, ""));
+            return ok ? 0 : 1;
+        }
+        if (args.size() >= 2 && args[1] == "restore-uname") {
+            return kasumi::restore_uname_global() ? 0 : 1;
         }
         if (args.size() >= 2 && args[1] == "set-cmdline") {
             return kasumi::set_cmdline(arg_or_default(args, 2, "")) ? 0 : 1;
@@ -1235,10 +1719,12 @@ CommandResult run_command_capture(const std::vector<std::string>& args) {
     std::ostringstream stderr_buffer;
     auto* old_stdout = std::cout.rdbuf(stdout_buffer.rdbuf());
     auto* old_stderr = std::cerr.rdbuf(stderr_buffer.rdbuf());
+    errno = 0;
     const int exit_code = run_command(args);
+    const int error_number = exit_code == 0 ? 0 : (errno != 0 ? errno : EIO);
     std::cout.rdbuf(old_stdout);
     std::cerr.rdbuf(old_stderr);
-    return {exit_code, stdout_buffer.str(), stderr_buffer.str()};
+    return {exit_code, error_number, stdout_buffer.str(), stderr_buffer.str()};
 }
 
 } // namespace kagami

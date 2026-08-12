@@ -7,6 +7,7 @@ namespace kagami {
 
 struct CommandResult {
     int exit_code = 0;
+    int error_number = 0;
     std::string stdout_text;
     std::string stderr_text;
 };

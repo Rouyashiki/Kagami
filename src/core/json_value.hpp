@@ -39,5 +39,6 @@ public:
 };
 
 bool parse_json(const std::string& input, JsonValue& out, std::string& error);
+std::string stringify_json(const JsonValue& value, int indent = 0);
 
 } // namespace kagami

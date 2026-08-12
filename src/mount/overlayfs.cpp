@@ -1,5 +1,6 @@
 #include "mount/overlayfs.hpp"
 
+#include "kagami/kasumi_client.hpp"
 #include "mount/backend.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/storage.hpp"
@@ -491,6 +492,11 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         }
         if (mount_overlay(target, layers, "", "", config.mount_source)) {
             ++n;
+            if (config.kasumi_enabled && config.enable_hidexattr &&
+                ::kagami::kasumi::is_available() &&
+                !::kagami::kasumi::hide_overlay_xattrs(target)) {
+                mlog("overlay: failed to hide xattrs for " + target);
+            }
         }
     }
     mlog("overlay: mounted " + std::to_string(n) + " leaf overlay(s)");
@@ -502,9 +508,8 @@ bool unmount_all(const Config& config) {
     for (auto it = overlays.rbegin(); it != overlays.rend(); ++it) {
         umount2(it->c_str(), MNT_DETACH);
     }
-    // Detach the storage base (content + any separate writable layer).
-    umount2((config.overlay_dir + "/mnt").c_str(), MNT_DETACH);
-    umount2((config.overlay_dir + "/rw").c_str(), MNT_DETACH);
+    // The shared mirror is detached by backend::unmount_all() only after both
+    // OverlayFS and Kasumi have released their references.
     return true;
 }
 

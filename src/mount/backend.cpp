@@ -1,20 +1,27 @@
 #include "mount/backend.hpp"
 
+#include "core/json.hpp"
 #include "core/json_value.hpp"
+#include "core/lkm.hpp"
 #include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
+#include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/overlayfs.hpp"
+#include "mount/storage.hpp"
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
+#include <dirent.h>
 #include <sys/system_properties.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -62,6 +69,21 @@ static int count_committed_mounts() {
     return n;
 }
 
+// Policy is API17 kernel state, not a static LKM setting. Reapply it whenever
+// Kagami prepares rules so AUTO remains tied to KernelSU's live denylist after
+// every module load and hot refresh.
+static bool apply_kasumi_policy(const Config& config) {
+    if (!config.kasumi_enabled || !::kagami::kasumi::is_available()) {
+        return true;
+    }
+    std::string error;
+    if (kasumi::apply_policy_config(config.policy, error)) {
+        return true;
+    }
+    fsutil::mlog("kasumi: policy apply failed: " + error);
+    return false;
+}
+
 // --- bootloop protection state ---
 constexpr int kMaxBootAttempts = 3;
 
@@ -100,6 +122,26 @@ static void spawn_boot_completed_watcher() {
     if (fork() != 0) {
         _exit(0); // intermediate child exits; grandchild reparents to init
     }
+    // The daemon may already own its Kasumi capability FD, listening socket,
+    // and lifetime lock. This long-lived watcher must not retain any of them.
+    std::vector<int> inherited_fds;
+    DIR* dir = opendir("/proc/self/fd");
+    if (!dir) {
+        _exit(0); // boot-completed.sh remains the non-watcher fallback
+    }
+    const int scan_fd = dirfd(dir);
+    while (dirent* entry = readdir(dir)) {
+        char* end = nullptr;
+        const long fd = std::strtol(entry->d_name, &end, 10);
+        if (end != entry->d_name && *end == '\0' && fd > STDERR_FILENO &&
+            fd != scan_fd) {
+            inherited_fds.push_back(static_cast<int>(fd));
+        }
+    }
+    closedir(dir);
+    for (const int fd : inherited_fds) {
+        close(fd);
+    }
     for (int i = 0; i < 150; ++i) { // ~5 min ceiling
         char buf[PROP_VALUE_MAX] = {};
         if (__system_property_get("sys.boot_completed", buf) > 0 && buf[0] == '1') {
@@ -112,8 +154,8 @@ static void spawn_boot_completed_watcher() {
 }
 
 std::vector<BackendStatus> backend_statuses() {
-    const auto version = kasumi::version_info();
-    const bool kasumi_available = version.status == kasumi::Status::Available;
+    const auto version = ::kagami::kasumi::version_info();
+    const bool kasumi_available = version.status == ::kagami::kasumi::Status::Available;
     std::ostringstream kasumi_detail;
     kasumi_detail << "protocol expected=" << version.expected_protocol
                   << " kernel=" << version.kernel_protocol
@@ -151,7 +193,8 @@ std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config) {
             continue;
         }
         if (fs::exists(p / "disable", ec) || fs::exists(p / "remove", ec) ||
-            fs::exists(p / "skip_mount", ec)) {
+            fs::exists(p / "skip_mount", ec) ||
+            fs::exists(runtime_data_dir() / "run" / "hot_unmounted" / p.filename(), ec)) {
             continue;
         }
         out.push_back({p.filename().string(), p});
@@ -161,10 +204,10 @@ std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config) {
     return out;
 }
 
-// Read per-module mount modes from module_mode.json:
-// {"<id>": "auto|overlay|magic|kasumi|none"}.
-static std::map<std::string, std::string> read_module_modes() {
-    std::map<std::string, std::string> out;
+// Per-module control-plane state is separate from module files so the manager
+// can select backends without modifying another module's contents.
+ModuleModeMap load_module_modes() {
+    ModuleModeMap out;
     std::ifstream in((runtime_data_dir() / "module_mode.json").string());
     if (!in) {
         return out;
@@ -183,6 +226,93 @@ static std::map<std::string, std::string> read_module_modes() {
     return out;
 }
 
+bool save_module_modes(const ModuleModeMap& modes) {
+    std::error_code ec;
+    fs::create_directories(runtime_data_dir(), ec);
+    if (ec) {
+        return false;
+    }
+    std::ofstream out(runtime_data_dir() / "module_mode.json", std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out << "{\n";
+    for (auto it = modes.begin(); it != modes.end(); ++it) {
+        out << "  " << json_quote(it->first) << ": " << json_quote(it->second);
+        if (std::next(it) != modes.end()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "}\n";
+    return out.good();
+}
+
+ModuleRuleMap load_module_rules() {
+    ModuleRuleMap out;
+    std::ifstream in(runtime_data_dir() / "module_rules.json");
+    if (!in) {
+        return out;
+    }
+    std::stringstream buf;
+    buf << in.rdbuf();
+    JsonValue root;
+    std::string error;
+    if (!parse_json(buf.str(), root, error) || !root.is_object()) {
+        return out;
+    }
+    for (const auto& [id, entries] : root.object_value) {
+        if (!entries.is_array()) {
+            continue;
+        }
+        for (const auto& entry : entries.array_value) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            const JsonValue* path = entry.find("path");
+            const JsonValue* mode = entry.find("mode");
+            if (path && mode && path->is_string() && mode->is_string()) {
+                out[id].push_back({path->string_value, mode->string_value});
+            }
+        }
+    }
+    return out;
+}
+
+bool save_module_rules(const ModuleRuleMap& rules) {
+    std::error_code ec;
+    fs::create_directories(runtime_data_dir(), ec);
+    if (ec) {
+        return false;
+    }
+    std::ofstream out(runtime_data_dir() / "module_rules.json", std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out << "{\n";
+    for (auto module = rules.begin(); module != rules.end(); ++module) {
+        out << "  " << json_quote(module->first) << ": [";
+        for (std::size_t i = 0; i < module->second.size(); ++i) {
+            const auto& rule = module->second[i];
+            if (i > 0) {
+                out << ",";
+            }
+            out << "\n    {\"path\": " << json_quote(rule.path) << ", \"mode\": "
+                << json_quote(rule.mode) << "}";
+        }
+        if (!module->second.empty()) {
+            out << "\n  ";
+        }
+        out << "]";
+        if (std::next(module) != rules.end()) {
+            out << ",";
+        }
+        out << "\n";
+    }
+    out << "}\n";
+    return out.good();
+}
+
 static bool dir_has_direct_files(const fs::path& dir) {
     std::error_code ec;
     if (!fs::is_directory(dir, ec)) {
@@ -199,11 +329,21 @@ static bool dir_has_direct_files(const fs::path& dir) {
 // A module needs magic mount when it places files directly at a partition root
 // (e.g. system/build.prop): overlay only stacks on leaf subdirs, never on a
 // partition root. Everything else can be overlaid.
-static bool module_needs_magic(const ModuleEntry& m) {
+static std::vector<std::string> managed_partitions(const Config& config) {
+    std::vector<std::string> parts = fsutil::kManagedPartitions;
+    for (const auto& part : config.partitions) {
+        if (!part.empty() && std::find(parts.begin(), parts.end(), part) == parts.end()) {
+            parts.push_back(part);
+        }
+    }
+    return parts;
+}
+
+static bool module_needs_magic(const ModuleEntry& m, const Config& config) {
     if (dir_has_direct_files(m.path / "system")) {
         return true;
     }
-    for (const auto& part : fsutil::kManagedPartitions) {
+    for (const auto& part : managed_partitions(config)) {
         if (part == "system") {
             continue;
         }
@@ -216,8 +356,8 @@ static bool module_needs_magic(const ModuleEntry& m) {
 }
 
 // True if the module has any managed-partition tree (i.e. contributes mounts).
-static bool module_has_content(const ModuleEntry& m) {
-    for (const auto& part : fsutil::kManagedPartitions) {
+static bool module_has_content(const ModuleEntry& m, const Config& config) {
+    for (const auto& part : managed_partitions(config)) {
         std::error_code ec;
         if (fs::is_directory(m.path / part, ec)) {
             return true;
@@ -226,9 +366,21 @@ static bool module_has_content(const ModuleEntry& m) {
     return false;
 }
 
+static bool kasumi_usable() {
+    const auto version = ::kagami::kasumi::version_info();
+    return version.status == ::kagami::kasumi::Status::Available;
+}
+
+static std::string fallback_backend(const ModuleEntry& m, const Config& config) {
+    if (config.overlayfs_enabled && proc_filesystems_has("overlay") && !module_needs_magic(m, config)) {
+        return "overlay";
+    }
+    return config.magic_mount_enabled ? "magic" : "none";
+}
+
 std::string resolve_module_backend(const ModuleEntry& m, const Config& config,
-                                   const std::map<std::string, std::string>& modes) {
-    if (!module_has_content(m)) {
+                                   const ModuleModeMap& modes) {
+    if (!module_has_content(m, config)) {
         return "none"; // no managed-partition tree → contributes no mounts
     }
     std::string mode = "auto";
@@ -241,11 +393,24 @@ std::string resolve_module_backend(const ModuleEntry& m, const Config& config,
             mode = it->second;
         }
     }
-    if (mode == "auto") {
-        const bool can_overlay = proc_filesystems_has("overlay");
-        mode = (can_overlay && !module_needs_magic(m)) ? "overlay" : "magic";
+    // Kasumi is deliberately opt-in. `auto` preserves Kagami's established
+    // OverlayFS -> Magic Mount fallback path; only an explicit module/global
+    // "kasumi" selection reaches the LKM backend.
+    if (mode == "kasumi") {
+        return config.kasumi_enabled && kasumi_usable() ? "kasumi"
+                                                              : fallback_backend(m, config);
     }
-    return mode;
+    if (mode == "auto") {
+        return fallback_backend(m, config);
+    }
+    if (mode == "overlay") {
+        return config.overlayfs_enabled && proc_filesystems_has("overlay") ? "overlay"
+                                                                              : fallback_backend(m, config);
+    }
+    if (mode == "magic") {
+        return config.magic_mount_enabled ? "magic" : fallback_backend(m, config);
+    }
+    return mode == "none" ? "none" : fallback_backend(m, config);
 }
 
 // Rewrite Kagami's own module.prop description so the manager's module list shows
@@ -283,6 +448,13 @@ static void update_self_status(bool ok, std::size_t overlay, std::size_t magic,
 MountReport mount_all_enabled(const Config& config) {
     MountReport report;
 
+    // An LKM is an explicit boot-time choice. A packaged .ko must not load just
+    // because Kagami itself runs, and this is the only automatic-load call site.
+    if (config.kasumi_enabled && config.lkm_autoload && !lkm::autoload()) {
+        fsutil::mlog("Kasumi LKM autoload failed: " + lkm::last_error());
+    }
+
+    const bool policy_ok = apply_kasumi_policy(config);
     const auto modules = enumerate_mountable_modules(config);
     report.modules = static_cast<int>(modules.size());
 
@@ -308,8 +480,10 @@ MountReport mount_all_enabled(const Config& config) {
 
     // Orchestrate per module: a global override (config.mount_backend != "auto")
     // forces every module; otherwise each module's mode (module_mode.json, default
-    // "auto") decides, with auto falling back overlay -> magic -> none.
-    const auto modes = read_module_modes();
+    // "auto") decides, with auto following OverlayFS -> Magic Mount -> none.
+    // Kasumi is selected only by an explicit module/global setting.
+    const auto modes = load_module_modes();
+    const auto rules = load_module_rules();
     std::vector<ModuleEntry> overlay_set;
     std::vector<ModuleEntry> magic_set;
     std::vector<ModuleEntry> kasumi_set;
@@ -329,8 +503,8 @@ MountReport mount_all_enabled(const Config& config) {
                  " magic=" + std::to_string(magic_set.size()) +
                  " kasumi=" + std::to_string(kasumi_set.size()));
 
-    bool ok = true;
-    if (!overlay_set.empty() || !magic_set.empty()) {
+    bool ok = policy_ok;
+    if (!overlay_set.empty() || !magic_set.empty() || !kasumi_set.empty()) {
         ok = fsutil::run_in_init_mount_ns([&]() {
             bool r = true;
             // Magic first: magic::mount_modules clears stale KSU mounts at start,
@@ -342,13 +516,11 @@ MountReport mount_all_enabled(const Config& config) {
             if (!overlay_set.empty()) {
                 r = overlay::mount_modules(overlay_set, config) && r;
             }
+            if (!kasumi_set.empty()) {
+                r = kasumi::mount_modules(kasumi_set, config, rules) && r;
+            }
             return r;
         });
-    }
-    if (!kasumi_set.empty()) {
-        // Per-module kasumi (LKM) dispatch is a follow-up; flag it for now.
-        fsutil::mlog("orchestrator: " + std::to_string(kasumi_set.size()) +
-                     " module(s) set to kasumi; LKM per-module wiring pending");
     }
 
     report.backend = "hybrid(overlay=" + std::to_string(overlay_set.size()) +
@@ -369,10 +541,32 @@ bool unmount_all(const Config& config) {
     // source-gated no-op when it owns nothing).
     return fsutil::run_in_init_mount_ns([&]() {
         bool r = true;
+        r = kasumi::unmount_all(config) && r;
         r = overlay::unmount_all(config) && r;
         r = magic::unmount_all(config) && r;
+        storage::teardown_shared(config);
         return r;
     });
+}
+
+bool refresh_kasumi_modules(const Config& config) {
+    if (!config.kasumi_enabled || !kasumi_usable()) {
+        return false;
+    }
+    if (!apply_kasumi_policy(config)) {
+        return false;
+    }
+    const auto all = enumerate_mountable_modules(config);
+    const auto modes = load_module_modes();
+    std::vector<ModuleEntry> selected;
+    for (const auto& module : all) {
+        if (resolve_module_backend(module, config, modes) == "kasumi") {
+            selected.push_back(module);
+        }
+    }
+    const auto rules = load_module_rules();
+    return fsutil::run_in_init_mount_ns(
+        [&]() { return kasumi::mount_modules(selected, config, rules); });
 }
 
 void recovery_boot_completed() {

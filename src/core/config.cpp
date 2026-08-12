@@ -44,20 +44,21 @@ std::string default_config_json() {
   "tempdir": "",
   "mountsource": "KSU",
   "work_dir": "/dev/kagami",
-  "overlay_dir": "/dev/kagami_overlay",
-  "overlay_img": "/data/adb/kagami/modules.img",
-  "overlay_img_size_mb": 2048,
+  "mirror_dir": "/dev/kagami_mirror",
+  "mirror_img": "/data/adb/kagami/mirror.img",
+  "mirror_img_size_mb": 2048,
   "overlay_writable": false,
   "logfile": "/data/adb/kagami/daemon.log",
   "debug": false,
   "verbose": false,
+  "lkm_autoload": false,
   "fs_type": "auto",
   "disable_umount": false,
   "enable_nuke": true,
-  "ignore_protocol_mismatch": false,
   "enable_kernel_debug": false,
   "enable_stealth": true,
   "enable_hidexattr": false,
+  "enable_selinux_fix": false,
   "kasumi_enabled": true,
   "overlayfs_enabled": true,
   "magic_mount_enabled": true,
@@ -72,6 +73,7 @@ std::string default_config_json() {
   },
   "uname_release": "",
   "uname_version": "",
+  "uname_mode": "scoped",
   "cmdline_value": "",
   "partitions": []
 }
@@ -148,14 +150,36 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.log_file = json_string_or(&root, "logfile", config.log_file);
     config.mount_source = json_string_or(&root, "mountsource", config.mount_source);
     config.work_dir = json_string_or(&root, "work_dir", config.work_dir);
-    config.overlay_dir = json_string_or(&root, "overlay_dir", config.overlay_dir);
-    config.overlay_img = json_string_or(&root, "overlay_img", config.overlay_img);
-    config.overlay_img_size_mb = json_int_or(&root, "overlay_img_size_mb", config.overlay_img_size_mb);
+    // mirror_* is the unified storage configuration. Accept the former
+    // overlay_* keys as a one-way compatibility migration; kasumi_* was
+    // deliberately not retained because Kasumi no longer owns a separate base.
+    config.mirror_dir = root.find("mirror_dir")
+                            ? json_string_or(&root, "mirror_dir", config.mirror_dir)
+                            : json_string_or(&root, "overlay_dir", config.mirror_dir);
+    config.mirror_img = root.find("mirror_img")
+                            ? json_string_or(&root, "mirror_img", config.mirror_img)
+                            : json_string_or(&root, "overlay_img", config.mirror_img);
+    config.mirror_img_size_mb = root.find("mirror_img_size_mb")
+                                    ? json_int_or(&root, "mirror_img_size_mb", config.mirror_img_size_mb)
+                                    : json_int_or(&root, "overlay_img_size_mb", config.mirror_img_size_mb);
     config.overlay_writable = json_bool_or(&root, "overlay_writable", config.overlay_writable);
     config.fs_type = json_string_or(&root, "fs_type", config.fs_type);
     config.debug = json_bool_or(&root, "debug", config.debug);
     config.verbose = json_bool_or(&root, "verbose", config.verbose);
+    config.lkm_autoload = json_bool_or(&root, "lkm_autoload", config.lkm_autoload);
     config.kasumi_enabled = json_bool_or(&root, "kasumi_enabled", config.kasumi_enabled);
+    config.enable_kernel_debug =
+        json_bool_or(&root, "enable_kernel_debug", config.enable_kernel_debug);
+    config.enable_stealth = json_bool_or(&root, "enable_stealth", config.enable_stealth);
+    config.enable_hidexattr = json_bool_or(&root, "enable_hidexattr", config.enable_hidexattr);
+    config.enable_selinux_fix =
+        json_bool_or(&root, "enable_selinux_fix", config.enable_selinux_fix);
+    config.uname_release = json_string_or(&root, "uname_release", config.uname_release);
+    config.uname_version = json_string_or(&root, "uname_version", config.uname_version);
+    config.uname_mode = json_string_or(&root, "uname_mode", config.uname_mode);
+    if (config.uname_mode != "global") {
+        config.uname_mode = "scoped";
+    }
     config.overlayfs_enabled = json_bool_or(&root, "overlayfs_enabled", config.overlayfs_enabled);
     config.magic_mount_enabled = json_bool_or(&root, "magic_mount_enabled", config.magic_mount_enabled);
     config.mount_backend = json_string_or(&root, "mount_backend", config.mount_backend);
@@ -183,6 +207,125 @@ bool read_config_file(const std::string& path, Config& config, std::string& erro
     std::ostringstream buffer;
     buffer << in.rdbuf();
     return parse_config_json(buffer.str(), config, error);
+}
+
+bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        if (!write_default_config(path, error)) {
+            return false;
+        }
+        in.clear();
+        in.open(path, std::ios::binary);
+    }
+    if (!in) {
+        error = "open " + path + ": " + std::strerror(errno);
+        return false;
+    }
+
+    std::ostringstream input;
+    input << in.rdbuf();
+    JsonValue root;
+    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+        if (error.empty()) {
+            error = "config root must be an object";
+        }
+        return false;
+    }
+
+    JsonValue value;
+    value.type = JsonValue::Type::Bool;
+    value.bool_value = enabled;
+    root.object_value["lkm_autoload"] = value;
+
+    if (!ensure_parent_dir(path, error)) {
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "open " + path + ": " + std::strerror(errno);
+        return false;
+    }
+    out << stringify_json(root, 2) << "\n";
+    if (!out.good()) {
+        error = "write " + path + ": " + std::strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+bool update_policy_config(const std::string& path, const PolicyConfig& policy, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        if (!write_default_config(path, error)) {
+            return false;
+        }
+        in.clear();
+        in.open(path, std::ios::binary);
+    }
+    if (!in) {
+        error = "open " + path + ": " + std::strerror(errno);
+        return false;
+    }
+
+    std::ostringstream input;
+    input << in.rdbuf();
+    JsonValue root;
+    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+        if (error.empty()) {
+            error = "config root must be an object";
+        }
+        return false;
+    }
+
+    const auto bool_value = [](bool value) {
+        JsonValue out;
+        out.type = JsonValue::Type::Bool;
+        out.bool_value = value;
+        return out;
+    };
+    const auto string_value = [](const std::string& value) {
+        JsonValue out;
+        out.type = JsonValue::Type::String;
+        out.string_value = value;
+        return out;
+    };
+    const auto uid_array = [](const std::vector<std::uint32_t>& values) {
+        JsonValue out;
+        out.type = JsonValue::Type::Array;
+        for (const auto value : values) {
+            JsonValue number;
+            number.type = JsonValue::Type::Number;
+            number.number_value = value;
+            out.array_value.push_back(number);
+        }
+        return out;
+    };
+
+    JsonValue policy_json;
+    policy_json.type = JsonValue::Type::Object;
+    policy_json.object_value["owner"] = string_value(policy.owner);
+    policy_json.object_value["use_allow_uids"] = bool_value(policy.use_allow_uids);
+    policy_json.object_value["use_deny_uids"] = bool_value(policy.use_deny_uids);
+    policy_json.object_value["include_isolated_uids"] = bool_value(policy.include_isolated_uids);
+    policy_json.object_value["allow_uids"] = uid_array(policy.allow_uids);
+    policy_json.object_value["deny_uids"] = uid_array(policy.deny_uids);
+    root.object_value["policy"] = policy_json;
+
+    if (!ensure_parent_dir(path, error)) {
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "open " + path + ": " + std::strerror(errno);
+        return false;
+    }
+    out << stringify_json(root, 2) << "\n";
+    if (!out.good()) {
+        error = "write " + path + ": " + std::strerror(errno);
+        return false;
+    }
+    return true;
 }
 
 } // namespace kagami

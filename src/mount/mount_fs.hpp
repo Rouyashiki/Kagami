@@ -40,7 +40,7 @@ bool tmpfs_xattr_supported();
 // Returns true iff the child ran fn and it returned true.
 bool run_in_init_mount_ns(const std::function<bool()>& fn);
 
-// Append a line to the Kagami log (lands in daemon.log via stderr capture).
+// Append a line to the unified Kagami diagnostic log.
 void mlog(const std::string& msg);
 
 // "/system" for system, "/<p>" otherwise.

@@ -32,6 +32,16 @@ struct ModuleEntry {
     std::filesystem::path path;
 };
 
+// A path-specific backend override persisted in module_rules.json. The longest
+// matching absolute path wins, matching the YukiSU hymo control-plane contract.
+struct ModuleRule {
+    std::string path;
+    std::string mode;
+};
+
+using ModuleModeMap = std::map<std::string, std::string>;
+using ModuleRuleMap = std::map<std::string, std::vector<ModuleRule>>;
+
 struct MountReport {
     bool ok = false;
     int modules = 0; // enabled modules processed
@@ -44,12 +54,21 @@ struct MountReport {
 // no module.prop or with a disable/remove/skip_mount marker.
 std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config);
 
+ModuleModeMap load_module_modes();
+bool save_module_modes(const ModuleModeMap& modes);
+ModuleRuleMap load_module_rules();
+bool save_module_rules(const ModuleRuleMap& rules);
+
 // Resolve a module's effective backend ("overlay"|"magic"|"kasumi"|"none") from
 // its configured mode (modes[id], the global override config.mount_backend, or
 // the auto fallback). Used by the orchestrator and to report a module's actual
 // mount method. `modes` is the parsed module_mode.json (id -> mode).
 std::string resolve_module_backend(const ModuleEntry& module, const Config& config,
-                                   const std::map<std::string, std::string>& modes);
+                                   const ModuleModeMap& modes);
+
+// Rebuild only Kasumi mappings in the init namespace. This is safe to expose
+// post-boot for the Kasumi hot-mount controls; Overlay/Magic remain boot-only.
+bool refresh_kasumi_modules(const Config& config);
 
 // Pick a backend (magic mount), enter the init mount ns, mount every enabled
 // module. Safe to call from the daemon or a one-shot CLI.
