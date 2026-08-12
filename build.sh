@@ -84,6 +84,18 @@ check_deps() {
     print_success "All dependencies found (cmake, ninja)"
 }
 
+check_lkm_deps() {
+    if [ "$USE_DDK" -eq 1 ]; then
+        command -v ddk &> /dev/null || { print_error "ddk is required with --ddk"; exit 1; }
+        return 0
+    fi
+    command -v make &> /dev/null || { print_error "make is required for Kasumi LKM builds"; exit 1; }
+    if [ -z "${KDIR:-}" ] || [ ! -f "${KDIR}/Makefile" ]; then
+        print_error "KDIR must point to a prepared Android kernel/DDK tree for Kasumi LKM builds"
+        exit 1
+    fi
+}
+
 # Stage the static WebUI source (webui/) into module/webroot. webui/ is the
 # tracked source of truth; module/webroot is a generated artifact (gitignored).
 build_webui() {
@@ -137,6 +149,21 @@ build_manager() {
         *unsigned*) print_warning "Bundled UNSIGNED manager APK — set KAGAMI_* to sign ($(du -h "$apk" | cut -f1))" ;;
         *) print_success "Bundled signed manager APK ($(du -h "$apk" | cut -f1))" ;;
     esac
+}
+
+# Build and stage a KMI-tagged Kasumi API 17 asset. The helper copies the
+# Kasumi source into build/ first, so an external checkout stays untouched.
+build_kasumi_lkm() {
+    check_lkm_deps
+    if [ -z "${KASUMI_KMI}" ]; then
+        print_error "Kasumi LKM builds require --kmi <androidNN-x.y>"
+        exit 1
+    fi
+    local args=(--kmi "${KASUMI_KMI}" --out "${PROJECT_ROOT}/module/kasumi")
+    [ -n "${KASUMI_SOURCE}" ] && args+=(--source "${KASUMI_SOURCE}")
+    [ "$USE_DDK" -eq 1 ] && args+=(--ddk)
+    print_info "Building Kasumi API 17 LKM for ${KASUMI_KMI}..."
+    "${PROJECT_ROOT}/scripts/build-kasumi-lkm.sh" "${args[@]}"
 }
 
 # Configure and build kagamid for a specific architecture
@@ -207,11 +234,25 @@ COMMAND="${1:-package}"
 shift || true
 NO_WEBUI=0
 NO_MANAGER=0
+BUILD_LKM=0
+USE_DDK=0
+KASUMI_SOURCE="${KASUMI_DIR:-}"
+KASUMI_KMI="${KASUMI_KMI:-}"
 VERBOSE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-webui) NO_WEBUI=1; shift ;;
         --no-manager) NO_MANAGER=1; shift ;;
+        --with-lkm) BUILD_LKM=1; shift ;;
+        --ddk) USE_DDK=1; shift ;;
+        --kasumi-dir)
+            [ $# -ge 2 ] || { print_error "--kasumi-dir requires a path"; exit 1; }
+            KASUMI_SOURCE="$2"; shift 2
+            ;;
+        --kmi)
+            [ $# -ge 2 ] || { print_error "--kmi requires an Android KMI tag"; exit 1; }
+            KASUMI_KMI="$2"; shift 2
+            ;;
         --verbose|-v) VERBOSE="--log-level=VERBOSE"; shift ;;
         *) shift ;;
     esac
@@ -226,6 +267,7 @@ echo ""
 
 case $COMMAND in
     arm64|package) check_deps; find_ndk ;;
+    lkm) check_lkm_deps ;;
 esac
 
 case $COMMAND in
@@ -238,6 +280,9 @@ case $COMMAND in
     arm64)
         build_arch "arm64-v8a"
         ;;
+    lkm)
+        build_kasumi_lkm
+        ;;
     manager)
         build_manager
         ;;
@@ -249,6 +294,7 @@ case $COMMAND in
         compute_version
         stamp_module_prop
         build_webui
+        [ "$BUILD_LKM" -eq 1 ] && build_kasumi_lkm
         build_arch "arm64-v8a"
         build_manager
         print_info "Packaging (cmake)..."
@@ -259,7 +305,7 @@ case $COMMAND in
         rm -rf "${BUILD_DIR}"; print_success "Cleaned."
         ;;
     *)
-        echo "Usage: $0 {init|webui|manager|arm64|version|package|clean} [--no-webui] [--no-manager] [--verbose]"
+        echo "Usage: $0 {init|webui|manager|arm64|lkm|version|package|clean} [--no-webui] [--no-manager] [--with-lkm --ddk --kasumi-dir DIR --kmi androidNN-x.y] [--verbose]"
         exit 1
         ;;
 esac

@@ -12,7 +12,72 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  build-kasumi-lkm:
+    name: Kasumi API 17 (${{ matrix.kmi }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20251104
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    steps:
+      - name: Checkout Kagami
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      # API 17 is being integrated on top of the syscall/hook debt fixes.
+      # Keep this explicit until that work lands on Kasumi main.
+      - name: Checkout Kasumi API 17 fixes
+        uses: actions/checkout@v5
+        with:
+          repository: Anatdx/Kasumi
+          ref: fix/issues
+          path: kasumi
+          fetch-depth: 1
+
+      - name: Prepare DDK workspace
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/kasumi"
+          test -n "${KDIR:-}"
+          test -f "$KDIR/Makefile"
+          cmp include/kagami/kasumi_uapi.h kasumi/src/include/kasumi_uapi.h
+          grep -Eq '^#define KSM_PROTOCOL_VERSION 17$' kasumi/src/include/kasumi_uapi.h
+
+      - name: Build Kasumi LKM
+        env:
+          KASUMI_DIR: ${{ github.workspace }}/kasumi
+          KASUMI_REF: fix/issues
+        run: |
+          chmod +x scripts/build-kasumi-lkm.sh
+          scripts/build-kasumi-lkm.sh \
+            --source "$KASUMI_DIR" \
+            --kmi "${{ matrix.kmi }}" \
+            --out "$GITHUB_WORKSPACE/lkm"
+
+      - name: Upload Kasumi LKM
+        uses: actions/upload-artifact@v6
+        with:
+          name: kasumi-lkm-${{ matrix.kmi }}
+          path: |
+            lkm/${{ matrix.kmi }}_arm64_kasumi_lkm.ko
+            lkm/KASUMI-NOTICE
+            lkm/KASUMI-LICENSE-GPL-2.0
+          if-no-files-found: error
+
   build:
+    needs: build-kasumi-lkm
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     steps:
@@ -20,6 +85,27 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Download Kasumi API 17 LKM matrix
+        uses: actions/download-artifact@v5
+        with:
+          pattern: kasumi-lkm-*
+          path: lkm
+          merge-multiple: true
+
+      - name: Stage and verify Kasumi LKM assets
+        run: |
+          set -euo pipefail
+          mkdir -p module/kasumi
+          for kmi in \
+            android12-5.10 android13-5.10 android13-5.15 android14-5.15 \
+            android14-6.1 android15-6.6 android16-6.12; do
+            asset="lkm/${kmi}_arm64_kasumi_lkm.ko"
+            test -s "$asset"
+            cp "$asset" module/kasumi/
+          done
+          cp lkm/KASUMI-NOTICE lkm/KASUMI-LICENSE-GPL-2.0 module/kasumi/
+          find module/kasumi -maxdepth 1 -type f -name '*_arm64_kasumi_lkm.ko' -print | sort
 
       - name: Setup JDK 17
         uses: actions/setup-java@v5

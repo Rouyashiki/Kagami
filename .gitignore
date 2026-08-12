@@ -76,15 +76,9 @@ Testing/
 webui/node_modules/
 webui/dist/
 module/webroot/
-
-# Zygisk template outputs
-zygisk/.gradle/
-zygisk/.idea/
-zygisk/.cxx/
-zygisk/my_build/
-zygisk/output/
-zygisk/release/
-zygisk/symbols/
+module/kasumi/*.ko
+module/kasumi/KASUMI-NOTICE
+module/kasumi/KASUMI-LICENSE-GPL-2.0
 
 # Android / Gradle (manager app)
 .cxx/
