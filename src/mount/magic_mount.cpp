@@ -424,7 +424,7 @@ static bool do_directory(Node& node, const std::string& real, const std::string&
             mlog("move " + work + " -> " + real + " failed: " + std::strerror(errno));
             return false;
         }
-        ::mount("none", real.c_str(), nullptr, MS_PRIVATE, nullptr);
+        ::mount("none", real.c_str(), nullptr, MS_PRIVATE | MS_REC, nullptr);
         w.committed.push_back(real);
         ++w.tmpfs_dirs;
         mlog("magic: skeletoned " + real);
@@ -588,7 +588,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         mlog("magic: work tmpfs failed: " + std::string(std::strerror(errno)));
         return false;
     }
-    ::mount("none", work.c_str(), nullptr, MS_PRIVATE, nullptr);
+    ::mount("none", work.c_str(), nullptr, MS_PRIVATE | MS_REC, nullptr);
 
     Walk w;
     const bool ok = do_mount(*root, "/", work, false, w);
