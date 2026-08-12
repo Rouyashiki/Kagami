@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.apk binary
+*.dex binary
+*.jar binary
+*.ko binary
+*.png binary
+*.so binary
+*.ttf binary
+*.woff2 binary
