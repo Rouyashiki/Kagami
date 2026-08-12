@@ -29,7 +29,6 @@ const CONFIG_FIELD_NAMES = new Set([
   "kasumi_enabled",
   "disable_umount",
   "enable_nuke",
-  "ignore_protocol_mismatch",
   "enable_kernel_debug",
   "enable_stealth",
   "enable_hidexattr",
@@ -58,7 +57,7 @@ const state = {
   config: JSON.parse(JSON.stringify(DEFAULT_CONFIG)),
   modules: [],
   storage: { size: "-", used: "-", avail: "-", percent: 0, mode: null },
-  systemInfo: { kernel: "...", selinux: "...", mountBase: "/dev/kasumi_mirror" },
+  systemInfo: { kernel: "...", selinux: "...", mountBase: "/dev/kagami_mirror" },
   userHideRules: [],
   allRules: [],
   lkmStatus: { loaded: false, autoload: true, kmi_override: "" },
@@ -108,15 +107,24 @@ function getPersistedConfig(config) {
     debug: Boolean(config.debug),
     verbose: Boolean(config.verbose),
     fs_type: config.fs_type,
+    work_dir: config.work_dir,
+    mirror_dir: config.mirror_dir,
+    mirror_img: config.mirror_img,
+    mirror_img_size_mb: config.mirror_img_size_mb,
+    overlay_writable: Boolean(config.overlay_writable),
     disable_umount: Boolean(config.disable_umount),
     enable_nuke: Boolean(config.enable_nuke),
-    ignore_protocol_mismatch: Boolean(config.ignore_protocol_mismatch),
     enable_kernel_debug: Boolean(config.enable_kernel_debug),
     enable_stealth: Boolean(config.enable_stealth),
     enable_hidexattr: Boolean(config.enable_hidexattr),
+    enable_selinux_fix: Boolean(config.enable_selinux_fix),
     kasumi_enabled: Boolean(config.kasumi_enabled),
+    overlayfs_enabled: Boolean(config.overlayfs_enabled),
+    magic_mount_enabled: Boolean(config.magic_mount_enabled),
+    mount_backend: config.mount_backend,
     uname_release: config.uname_release || "",
     uname_version: config.uname_version || "",
+    uname_mode: config.uname_mode || "scoped",
     cmdline_value: config.cmdline_value || "",
     partitions: unique(config.partitions || []),
   };
@@ -499,7 +507,7 @@ function renderOverviewPage() {
           <div class="info-list">
             <div class="info-item"><div class="label">${escapeHtml(tr("status.kernel", "Kernel"))}</div><div class="value mono">${escapeHtml(state.systemInfo.kernel || tr("staticUi.common.unknown", "Unknown"))}</div></div>
             <div class="info-item"><div class="label">${escapeHtml(tr("status.selinux", "SELinux"))}</div><div class="value">${escapeHtml(state.systemInfo.selinux || tr("staticUi.common.unknown", "Unknown"))}</div></div>
-            <div class="info-item"><div class="label">${escapeHtml(tr("status.mountBase", "Mount Base"))}</div><div class="value mono">${escapeHtml(state.systemInfo.mountBase || "/dev/kasumi_mirror")}</div></div>
+            <div class="info-item"><div class="label">${escapeHtml(tr("status.mountBase", "Mount Base"))}</div><div class="value mono">${escapeHtml(state.systemInfo.mountBase || "/dev/kagami_mirror")}</div></div>
             <div class="info-item"><div class="label">${escapeHtml(tr("staticUi.overview.updatedValue", "Updated"))}</div><div class="value">${escapeHtml(state.lastUpdated || "-")}</div></div>
           </div>
         </section>
@@ -648,7 +656,6 @@ function renderConfigPage() {
             ${renderSwitchCard("kasumi_enabled", tr("config.enableKasumi", "Enable Kasumi"), "", config.kasumi_enabled)}
             ${renderSwitchCard("disable_umount", tr("config.disableUmount", "Disable Unmount"), "", config.disable_umount)}
             ${renderSwitchCard("enable_nuke", tr("config.enableNuke", "Enable Nuke"), "", config.enable_nuke)}
-            ${renderSwitchCard("ignore_protocol_mismatch", tr("config.ignoreProtocolMismatch", "Ignore Kasumi Protocol Mismatch"), "", config.ignore_protocol_mismatch)}
             ${renderSwitchCard("enable_kernel_debug", tr("config.enableKernelDebug", "Show Kernel Debug Logs"), "", config.enable_kernel_debug)}
             ${renderSwitchCard("enable_stealth", tr("config.enableStealth", "Enable Stealth"), "", config.enable_stealth)}
             ${renderSwitchCard("enable_hidexattr", tr("config.enableHideXattr", "Mount hide / Maps spoof / Statfs spoof"), tr("config.enableHideXattrDesc", ""), config.enable_hidexattr)}
@@ -1510,7 +1517,6 @@ function collectConfigFromDom() {
     verbose: Boolean(get("verbose")?.checked),
     disable_umount: Boolean(get("disable_umount")?.checked),
     enable_nuke: Boolean(get("enable_nuke")?.checked),
-    ignore_protocol_mismatch: Boolean(get("ignore_protocol_mismatch")?.checked),
     enable_kernel_debug: Boolean(get("enable_kernel_debug")?.checked),
     enable_stealth: Boolean(get("enable_stealth")?.checked),
     enable_hidexattr: Boolean(get("enable_hidexattr")?.checked),
@@ -1742,6 +1748,7 @@ async function handleToggleAutoload(target) {
   try {
     await api.lkmSetAutoload(Boolean(target.checked));
     state.lkmStatus.autoload = Boolean(target.checked);
+    state.config.lkm_autoload = Boolean(target.checked);
     queueRenderMotion("page");
     renderApp();
     showToast(tr("kasumi.lkm.autoloadSuccess", "Autoload updated"));
