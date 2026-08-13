@@ -239,8 +239,6 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("statfs_spoof");
     if (bitmask & KSM_FEATURE_CMDLINE_SPOOF)
         names.emplace_back("cmdline_spoof");
-    if (bitmask & KSM_FEATURE_UNAME_SPOOF)
-        names.emplace_back("uname_spoof");
     if (bitmask & KSM_FEATURE_KSTAT_SPOOF)
         names.emplace_back("kstat_spoof");
     if (bitmask & KSM_FEATURE_MERGE_DIR)
@@ -321,25 +319,6 @@ bool set_statfs_spoof(bool enable) {
 bool set_selinux_guard(bool enable) {
     int value = enable ? 1 : 0;
     return execute(KSM_IOC_SELINUX_FIX, &value) == 0;
-}
-
-bool set_uname(const std::string& release, const std::string& version) {
-    kasumi_spoof_uname arg = {};
-    std::strncpy(arg.release, release.c_str(), KSM_UNAME_LEN - 1);
-    std::strncpy(arg.version, version.c_str(), KSM_UNAME_LEN - 1);
-    return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME, &arg), arg.err);
-}
-
-bool set_uname_global(const std::string& release, const std::string& version) {
-    kasumi_spoof_uname arg = {};
-    std::strncpy(arg.release, release.c_str(), KSM_UNAME_LEN - 1);
-    std::strncpy(arg.version, version.c_str(), KSM_UNAME_LEN - 1);
-    return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME_GLOBAL, &arg), arg.err);
-}
-
-bool restore_uname_global() {
-    kasumi_spoof_uname arg = {};
-    return ioctl_arg_ok(execute(KSM_IOC_SET_UNAME_GLOBAL, &arg), arg.err);
 }
 
 bool set_cmdline(const std::string& cmdline) {

@@ -492,7 +492,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         }
         if (mount_overlay(target, layers, "", "", config.mount_source)) {
             ++n;
-            if (config.kasumi_enabled && config.enable_hidexattr &&
+            if (config.kasumi_enabled && config.enable_overlay_xattr_hide &&
                 ::kagami::kasumi::is_available() &&
                 !::kagami::kasumi::hide_overlay_xattrs(target)) {
                 mlog("overlay: failed to hide xattrs for " + target);

@@ -49,13 +49,11 @@ struct Config {
     bool kasumi_enabled = true;
     bool enable_kernel_debug = false;
     bool enable_stealth = true;
-    bool enable_hidexattr = false;
+    bool enable_overlay_xattr_hide = false;
+    bool enable_mount_hide = false;
+    bool enable_maps_spoof = false;
+    bool enable_statfs_spoof = false;
     bool enable_selinux_fix = false;
-    std::string uname_release;
-    std::string uname_version;
-    // Empty means scoped uname spoofing. "global" uses Kasumi protocol 15+
-    // and changes init_uts_ns for every task, so it is always opt-in.
-    std::string uname_mode = "scoped";
     bool overlayfs_enabled = true;
     bool magic_mount_enabled = true;
     // Global backend override: "auto" uses per-module modes (module_mode.json:

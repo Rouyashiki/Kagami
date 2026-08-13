@@ -266,23 +266,21 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
     }
 }
 
-bool configure_kernel(const Config& config, const std::string& mirror) {
+bool configure_mirror(const std::string& mirror) {
     if (!::kagami::kasumi::set_mirror_path(mirror)) {
         mlog("kasumi: failed to set mirror path " + mirror);
         return false;
     }
-    (void)::kagami::kasumi::set_debug(config.enable_kernel_debug);
-    (void)::kagami::kasumi::set_stealth(config.enable_stealth || config.enable_hidexattr);
-    (void)::kagami::kasumi::set_mount_hide(config.enable_hidexattr);
-    (void)::kagami::kasumi::set_maps_spoof(config.enable_hidexattr);
-    (void)::kagami::kasumi::set_statfs_spoof(config.enable_hidexattr);
-    (void)::kagami::kasumi::set_selinux_guard(config.enable_hidexattr || config.enable_selinux_fix);
-    if (!config.uname_release.empty() || !config.uname_version.empty()) {
-        const bool global = config.uname_mode == "global";
-        (void)(global ? ::kagami::kasumi::set_uname_global(config.uname_release, config.uname_version)
-                      : ::kagami::kasumi::set_uname(config.uname_release, config.uname_version));
-    }
     return true;
+}
+
+void disable_kernel_features() {
+    (void)::kagami::kasumi::set_debug(false);
+    (void)::kagami::kasumi::set_stealth(false);
+    (void)::kagami::kasumi::set_mount_hide(false);
+    (void)::kagami::kasumi::set_maps_spoof(false);
+    (void)::kagami::kasumi::set_statfs_spoof(false);
+    (void)::kagami::kasumi::set_selinux_guard(false);
 }
 
 } // namespace
@@ -332,6 +330,49 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
     return true;
 }
 
+bool apply_feature_config(const Config& config, std::string& error) {
+    bool ok = true;
+    const auto apply = [&](bool result, const char* name) {
+        if (!result) {
+            if (error.empty()) {
+                error = std::string("failed to set Kasumi ") + name;
+            }
+            ok = false;
+        }
+    };
+
+    apply(::kagami::kasumi::set_debug(config.enable_kernel_debug), "kernel debug");
+    apply(::kagami::kasumi::set_stealth(config.enable_stealth), "stealth");
+    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide), "mount hide");
+    apply(::kagami::kasumi::set_maps_spoof(config.enable_maps_spoof), "maps spoof");
+    apply(::kagami::kasumi::set_statfs_spoof(config.enable_statfs_spoof),
+          "statfs spoof");
+    apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix),
+          "SELinux guard");
+    if (!ok) {
+        disable_kernel_features();
+    }
+    return ok;
+}
+
+bool deactivate(std::string& error) {
+    bool ok = true;
+    if (!::kagami::kasumi::set_enabled(false)) {
+        error = "failed to disable Kasumi";
+        ok = false;
+    }
+    if (!::kagami::kasumi::clear_rules()) {
+        if (error.empty()) {
+            error = "failed to clear Kasumi rules";
+        }
+        ok = false;
+    }
+    disable_kernel_features();
+    std::error_code ec;
+    fs::remove(active_file(), ec);
+    return ok;
+}
+
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
                    const ModuleRuleMap& rules) {
     if (!::kagami::kasumi::is_available()) {
@@ -339,14 +380,9 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         return false;
     }
     if (modules.empty()) {
-        return unmount_all(config);
-    }
-
-    // Remove rules before remounting the mirror: never leave kernel redirects
-    // pointing to a detached filesystem during a hot refresh.
-    if (!::kagami::kasumi::clear_rules()) {
-        mlog("kasumi: failed to clear previous rules");
-        return false;
+        std::error_code ec;
+        fs::remove(active_file(), ec);
+        return true;
     }
 
     Config mirror_config = config;
@@ -360,7 +396,8 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     }
     const std::vector<std::string>& partitions =
         config.partitions.empty() ? fsutil::kManagedPartitions : config.partitions;
-    if (!mirror_modules(modules, mirror, partitions) || !configure_kernel(config, mirror.content_dir)) {
+    if (!mirror_modules(modules, mirror, partitions) ||
+        !configure_mirror(mirror.content_dir)) {
         return false;
     }
 
@@ -402,13 +439,6 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     for (const auto& path : batch.hide) {
         ok = ::kagami::kasumi::hide_path(path) && ok;
     }
-    if (!::kagami::kasumi::set_enabled(ok && config.kasumi_enabled)) {
-        ok = false;
-    }
-    if (ok && config.enable_stealth) {
-        (void)::kagami::kasumi::fix_mounts();
-    }
-
     std::error_code ec;
     fs::create_directories(active_file().parent_path(), ec);
     if (ok) {
@@ -425,13 +455,17 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
 
 bool unmount_all(const Config& config) {
     (void)config; // shared storage is released centrally after OverlayFS too.
+    bool ok = true;
     if (::kagami::kasumi::module_loaded() || ::kagami::kasumi::is_available()) {
-        (void)::kagami::kasumi::set_enabled(false);
-        (void)::kagami::kasumi::clear_rules();
+        std::string error;
+        ok = deactivate(error);
+        if (!ok) {
+            mlog("kasumi: " + error);
+        }
     }
     std::error_code ec;
     fs::remove(active_file(), ec);
-    return true;
+    return ok;
 }
 
 bool is_active() {

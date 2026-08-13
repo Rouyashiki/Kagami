@@ -1,4 +1,12 @@
-import { api, BUILTIN_PARTITIONS, DEFAULT_CONFIG, MODULE_META, PATHS, getRuntimeMode } from "./api.js";
+import {
+  api,
+  BUILTIN_PARTITIONS,
+  DEFAULT_CONFIG,
+  KASUMI_FEATURE_CONFIG_VERSION,
+  MODULE_META,
+  PATHS,
+  getRuntimeMode,
+} from "./api.js";
 import { enableEdgeToEdge, toast as nativeToast } from "./assets/kernelsu.js";
 import { LANGUAGE_OPTIONS, getNavigatorLanguage, isRtlLanguage, translations } from "./i18n.js";
 
@@ -31,9 +39,11 @@ const CONFIG_FIELD_NAMES = new Set([
   "enable_nuke",
   "enable_kernel_debug",
   "enable_stealth",
-  "enable_hidexattr",
-  "uname_release",
-  "uname_version",
+  "enable_overlay_xattr_hide",
+  "enable_mount_hide",
+  "enable_maps_spoof",
+  "enable_statfs_spoof",
+  "enable_selinux_fix",
   "cmdline_value",
 ]);
 
@@ -116,15 +126,16 @@ function getPersistedConfig(config) {
     enable_nuke: Boolean(config.enable_nuke),
     enable_kernel_debug: Boolean(config.enable_kernel_debug),
     enable_stealth: Boolean(config.enable_stealth),
-    enable_hidexattr: Boolean(config.enable_hidexattr),
+    kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
+    enable_overlay_xattr_hide: Boolean(config.enable_overlay_xattr_hide),
+    enable_mount_hide: Boolean(config.enable_mount_hide),
+    enable_maps_spoof: Boolean(config.enable_maps_spoof),
+    enable_statfs_spoof: Boolean(config.enable_statfs_spoof),
     enable_selinux_fix: Boolean(config.enable_selinux_fix),
     kasumi_enabled: Boolean(config.kasumi_enabled),
     overlayfs_enabled: Boolean(config.overlayfs_enabled),
     magic_mount_enabled: Boolean(config.magic_mount_enabled),
     mount_backend: config.mount_backend,
-    uname_release: config.uname_release || "",
-    uname_version: config.uname_version || "",
-    uname_mode: config.uname_mode || "scoped",
     cmdline_value: config.cmdline_value || "",
     partitions: unique(config.partitions || []),
   };
@@ -658,7 +669,11 @@ function renderConfigPage() {
             ${renderSwitchCard("enable_nuke", tr("config.enableNuke", "Enable Nuke"), "", config.enable_nuke)}
             ${renderSwitchCard("enable_kernel_debug", tr("config.enableKernelDebug", "Show Kernel Debug Logs"), "", config.enable_kernel_debug)}
             ${renderSwitchCard("enable_stealth", tr("config.enableStealth", "Enable Stealth"), "", config.enable_stealth)}
-            ${renderSwitchCard("enable_hidexattr", tr("config.enableHideXattr", "Mount hide / Maps spoof / Statfs spoof"), tr("config.enableHideXattrDesc", ""), config.enable_hidexattr)}
+            ${renderSwitchCard("enable_overlay_xattr_hide", tr("config.enableOverlayXattrHide", "Hide OverlayFS xattrs"), tr("config.enableOverlayXattrHideDesc", ""), config.enable_overlay_xattr_hide)}
+            ${renderSwitchCard("enable_mount_hide", tr("config.enableMountHide", "Mount hide"), tr("config.enableMountHideDesc", ""), config.enable_mount_hide)}
+            ${renderSwitchCard("enable_maps_spoof", tr("config.enableMapsSpoof", "Maps spoof"), tr("config.enableMapsSpoofDesc", ""), config.enable_maps_spoof)}
+            ${renderSwitchCard("enable_statfs_spoof", tr("config.enableStatfsSpoof", "Statfs spoof"), tr("config.enableStatfsSpoofDesc", ""), config.enable_statfs_spoof)}
+            ${renderSwitchCard("enable_selinux_fix", tr("config.enableSelinuxFix", "SELinux fix"), tr("config.enableSelinuxFixDesc", ""), config.enable_selinux_fix)}
           </div>
         </section>
 
@@ -907,24 +922,6 @@ function renderKasumiPage() {
             </div>
           </div>
           <div class="field-grid">
-            <div class="field">
-              <label for="kasumi-uname-release">${escapeHtml(tr("config.unameRelease", "Kernel Release"))}</label>
-              <input
-                id="kasumi-uname-release"
-                name="uname_release"
-                value="${escapeHtml(state.config.uname_release)}"
-                placeholder="${escapeHtml(tr("config.useSystemValue", "Use System Value"))}"
-              >
-            </div>
-            <div class="field">
-              <label for="kasumi-uname-version">${escapeHtml(tr("config.unameVersion", "Kernel Version"))}</label>
-              <input
-                id="kasumi-uname-version"
-                name="uname_version"
-                value="${escapeHtml(state.config.uname_version)}"
-                placeholder="${escapeHtml(tr("config.useSystemValue", "Use System Value"))}"
-              >
-            </div>
             <div class="field" style="grid-column: 1 / -1;">
               <label for="kasumi-cmdline">${escapeHtml(tr("staticUi.config.cmdline", "Kernel Cmdline"))}</label>
               <textarea
@@ -1519,10 +1516,13 @@ function collectConfigFromDom() {
     enable_nuke: Boolean(get("enable_nuke")?.checked),
     enable_kernel_debug: Boolean(get("enable_kernel_debug")?.checked),
     enable_stealth: Boolean(get("enable_stealth")?.checked),
-    enable_hidexattr: Boolean(get("enable_hidexattr")?.checked),
+    kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
+    enable_overlay_xattr_hide: Boolean(get("enable_overlay_xattr_hide")?.checked),
+    enable_mount_hide: Boolean(get("enable_mount_hide")?.checked),
+    enable_maps_spoof: Boolean(get("enable_maps_spoof")?.checked),
+    enable_statfs_spoof: Boolean(get("enable_statfs_spoof")?.checked),
+    enable_selinux_fix: Boolean(get("enable_selinux_fix")?.checked),
     kasumi_enabled: Boolean(get("kasumi_enabled")?.checked),
-    uname_release: get("uname_release")?.value || "",
-    uname_version: get("uname_version")?.value || "",
     cmdline_value: get("cmdline_value")?.value || "",
     partitions: unique(state.config.partitions || []),
   };

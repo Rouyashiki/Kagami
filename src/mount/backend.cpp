@@ -84,6 +84,18 @@ static bool apply_kasumi_policy(const Config& config) {
     return false;
 }
 
+static bool apply_kasumi_features(const Config& config) {
+    if (!config.kasumi_enabled || !::kagami::kasumi::is_available()) {
+        return true;
+    }
+    std::string error;
+    if (kasumi::apply_feature_config(config, error)) {
+        return true;
+    }
+    fsutil::mlog("kasumi: feature apply failed: " + error);
+    return false;
+}
+
 // --- bootloop protection state ---
 constexpr int kMaxBootAttempts = 3;
 
@@ -454,7 +466,16 @@ MountReport mount_all_enabled(const Config& config) {
         fsutil::mlog("Kasumi LKM autoload failed: " + lkm::last_error());
     }
 
-    const bool policy_ok = apply_kasumi_policy(config);
+    const bool kasumi_present = ::kagami::kasumi::module_loaded() ||
+                                ::kagami::kasumi::is_available();
+    bool initial_kasumi_ok = true;
+    if (!config.kasumi_enabled && kasumi_present) {
+        std::string error;
+        if (!kasumi::deactivate(error)) {
+            fsutil::mlog("kasumi: disable failed: " + error);
+            initial_kasumi_ok = false;
+        }
+    }
     const auto modules = enumerate_mountable_modules(config);
     report.modules = static_cast<int>(modules.size());
 
@@ -464,19 +485,51 @@ MountReport mount_all_enabled(const Config& config) {
     std::error_code ec;
     fs::create_directories(recovery_attempts_file().parent_path(), ec);
     if (fs::exists(recovery_disabled_file(), ec)) {
-        report.ok = true;
-        report.detail = "mounting disabled by bootloop protection; run 'kagamid recovery reset'";
+        bool deactivate_ok = true;
+        if (kasumi_present) {
+            std::string error;
+            deactivate_ok = kasumi::deactivate(error);
+            if (!deactivate_ok) {
+                fsutil::mlog("kasumi: bootloop disable failed: " + error);
+            }
+        }
+        report.ok = deactivate_ok;
+        report.detail = deactivate_ok
+                            ? "mounting disabled by bootloop protection; run 'kagamid recovery reset'"
+                            : "mounting disabled, but Kasumi cleanup failed (see daemon.log)";
         return report;
     }
     const int attempts = read_boot_attempts();
     if (attempts >= kMaxBootAttempts) {
+        bool deactivate_ok = true;
+        if (kasumi_present) {
+            std::string error;
+            deactivate_ok = kasumi::deactivate(error);
+            if (!deactivate_ok) {
+                fsutil::mlog("kasumi: bootloop disable failed: " + error);
+            }
+        }
         std::ofstream(recovery_disabled_file().string(), std::ios::trunc).put('\n');
-        report.ok = true;
-        report.detail = "bootloop protection tripped after " + std::to_string(attempts) +
-                        " unconfirmed boots; mounting disabled (run 'kagamid recovery reset')";
+        report.ok = deactivate_ok;
+        report.detail = deactivate_ok
+                            ? "bootloop protection tripped after " +
+                                  std::to_string(attempts) +
+                                  " unconfirmed boots; mounting disabled (run 'kagamid recovery reset')"
+                            : "bootloop protection tripped, but Kasumi cleanup failed (see daemon.log)";
         return report;
     }
     write_boot_attempts(attempts + 1);
+
+    const bool manage_kasumi =
+        config.kasumi_enabled && ::kagami::kasumi::is_available();
+    bool kasumi_prepare_ok = true;
+    if (manage_kasumi) {
+        std::string error;
+        kasumi_prepare_ok = kasumi::deactivate(error);
+        if (!kasumi_prepare_ok) {
+            fsutil::mlog("kasumi: reset before rebuild failed: " + error);
+        }
+    }
 
     // Orchestrate per module: a global override (config.mount_backend != "auto")
     // forces every module; otherwise each module's mode (module_mode.json, default
@@ -503,9 +556,10 @@ MountReport mount_all_enabled(const Config& config) {
                  " magic=" + std::to_string(magic_set.size()) +
                  " kasumi=" + std::to_string(kasumi_set.size()));
 
-    bool ok = policy_ok;
-    if (!overlay_set.empty() || !magic_set.empty() || !kasumi_set.empty()) {
-        ok = fsutil::run_in_init_mount_ns([&]() {
+    bool non_kasumi_mounts_ok = true;
+    bool kasumi_rules_ok = true;
+    if (!overlay_set.empty() || !magic_set.empty()) {
+        non_kasumi_mounts_ok = fsutil::run_in_init_mount_ns([&]() {
             bool r = true;
             // Magic first: magic::mount_modules clears stale KSU mounts at start,
             // which would otherwise tear down overlay's freshly-mounted KSU leaves
@@ -516,12 +570,37 @@ MountReport mount_all_enabled(const Config& config) {
             if (!overlay_set.empty()) {
                 r = overlay::mount_modules(overlay_set, config) && r;
             }
-            if (!kasumi_set.empty()) {
-                r = kasumi::mount_modules(kasumi_set, config, rules) && r;
-            }
             return r;
         });
     }
+    if (manage_kasumi) {
+        kasumi_rules_ok = kasumi_prepare_ok &&
+                          fsutil::run_in_init_mount_ns([&]() {
+                              return kasumi::mount_modules(kasumi_set, config, rules);
+                          });
+    }
+
+    bool policy_ok = true;
+    bool features_ok = true;
+    if (manage_kasumi && kasumi_prepare_ok && kasumi_rules_ok) {
+        policy_ok = apply_kasumi_policy(config);
+        features_ok = policy_ok && apply_kasumi_features(config);
+    } else if (manage_kasumi) {
+        policy_ok = false;
+        features_ok = false;
+    }
+    bool kasumi_ok = initial_kasumi_ok && kasumi_prepare_ok && policy_ok &&
+                     features_ok && kasumi_rules_ok;
+    if (manage_kasumi) {
+        if (!::kagami::kasumi::set_enabled(kasumi_ok)) {
+            kasumi_ok = false;
+        }
+        if (!kasumi_ok) {
+            std::string error;
+            (void)kasumi::deactivate(error);
+        }
+    }
+    const bool ok = non_kasumi_mounts_ok && policy_ok && features_ok && kasumi_ok;
 
     report.backend = "hybrid(overlay=" + std::to_string(overlay_set.size()) +
                      ",magic=" + std::to_string(magic_set.size()) +
@@ -550,10 +629,19 @@ bool unmount_all(const Config& config) {
 }
 
 bool refresh_kasumi_modules(const Config& config) {
-    if (!config.kasumi_enabled || !kasumi_usable()) {
-        return false;
+    if (!config.kasumi_enabled) {
+        if (!::kagami::kasumi::module_loaded() &&
+            !::kagami::kasumi::is_available()) {
+            return true;
+        }
+        std::string error;
+        if (!kasumi::deactivate(error)) {
+            fsutil::mlog("kasumi: disable failed: " + error);
+            return false;
+        }
+        return true;
     }
-    if (!apply_kasumi_policy(config)) {
+    if (!kasumi_usable()) {
         return false;
     }
     const auto all = enumerate_mountable_modules(config);
@@ -565,8 +653,27 @@ bool refresh_kasumi_modules(const Config& config) {
         }
     }
     const auto rules = load_module_rules();
-    return fsutil::run_in_init_mount_ns(
-        [&]() { return kasumi::mount_modules(selected, config, rules); });
+    std::string error;
+    const bool prepare_ok = kasumi::deactivate(error);
+    if (!prepare_ok) {
+        fsutil::mlog("kasumi: reset before refresh failed: " + error);
+    }
+    const bool mount_ok = prepare_ok && fsutil::run_in_init_mount_ns(
+                                             [&]() {
+                                                 return kasumi::mount_modules(
+                                                     selected, config, rules);
+                                             });
+    const bool policy_ok = mount_ok && apply_kasumi_policy(config);
+    const bool features_ok = policy_ok && apply_kasumi_features(config);
+    bool ok = prepare_ok && mount_ok && policy_ok && features_ok;
+    if (!::kagami::kasumi::set_enabled(ok)) {
+        ok = false;
+    }
+    if (!ok) {
+        std::string cleanup_error;
+        (void)kasumi::deactivate(cleanup_error);
+    }
+    return ok;
 }
 
 void recovery_boot_completed() {

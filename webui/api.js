@@ -8,6 +8,8 @@ export const PATHS = {
   DEFAULT_LOG: "/data/adb/kagami/daemon.log",
 };
 
+export const KASUMI_FEATURE_CONFIG_VERSION = 2;
+
 export const DEFAULT_CONFIG = {
   moduledir: "/data/adb/modules",
   tempdir: "",
@@ -26,7 +28,11 @@ export const DEFAULT_CONFIG = {
   enable_nuke: true,
   enable_kernel_debug: false,
   enable_stealth: true,
-  enable_hidexattr: false,
+  kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
+  enable_overlay_xattr_hide: false,
+  enable_mount_hide: false,
+  enable_maps_spoof: false,
+  enable_statfs_spoof: false,
   enable_selinux_fix: false,
   kasumi_enabled: true,
   overlayfs_enabled: true,
@@ -40,9 +46,6 @@ export const DEFAULT_CONFIG = {
     allow_uids: [],
     deny_uids: [],
   },
-  uname_release: "",
-  uname_version: "",
-  uname_mode: "scoped",
   cmdline_value: "",
   partitions: [],
   kasumi_available: false,
@@ -84,6 +87,43 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeConfig(rawConfig) {
+  const raw = rawConfig && typeof rawConfig === "object" ? clone(rawConfig) : {};
+  const splitKeys = [
+    "enable_overlay_xattr_hide",
+    "enable_mount_hide",
+    "enable_maps_spoof",
+    "enable_statfs_spoof",
+  ];
+  const hasSplitFeatures =
+    Number(raw.kasumi_feature_config_version || 0) >= KASUMI_FEATURE_CONFIG_VERSION ||
+    splitKeys.some((key) => hasOwn(raw, key));
+
+  if (hasSplitFeatures) {
+    raw.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
+    delete raw.enable_hidexattr;
+    return raw;
+  }
+
+  const legacy = raw.enable_hidexattr === true;
+  const normalized = {
+    ...raw,
+    kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
+    enable_overlay_xattr_hide: legacy,
+    enable_mount_hide: legacy,
+    enable_maps_spoof: legacy,
+    enable_statfs_spoof: legacy,
+    enable_selinux_fix: legacy || raw.enable_selinux_fix === true,
+    enable_stealth: Boolean(raw.enable_stealth ?? DEFAULT_CONFIG.enable_stealth) || legacy,
+  };
+  delete normalized.enable_hidexattr;
+  return normalized;
+}
+
 async function execJson(command, fallback = {}) {
   const result = await exec(command);
   const out = apiOutput(result);
@@ -110,10 +150,12 @@ const mockState = {
     kasumi_available: true,
     tmpfs_xattr_supported: true,
     partitions: ["system", "vendor", "product"],
-    enable_hidexattr: true,
+    enable_overlay_xattr_hide: true,
+    enable_mount_hide: true,
+    enable_maps_spoof: true,
+    enable_statfs_spoof: true,
+    enable_selinux_fix: true,
     cmdline_value: "androidboot.verifiedbootstate=green androidboot.vbmeta.device_state=locked",
-    uname_release: "6.1.89-android14-gki",
-    uname_version: "#1 SMP PREEMPT Thu Mar 27 20:12:00 CST 2026",
   },
   modules: [
     {
@@ -158,15 +200,14 @@ const mockState = {
     kasumiModules: ["playintegrityfix"],
     kasumiMismatch: false,
     hooks:
-      "GET_FD: tracepoint(sys_enter/sys_exit)\npath: tracepoint(sys_enter)\nvfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe\nuname: kretprobe\ncmdline: tracepoint(sys_enter/sys_exit)",
+      "GET_FD: tracepoint(sys_enter/sys_exit)\npath: tracepoint(sys_enter)\nvfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe\ncmdline: tracepoint(sys_enter/sys_exit)",
     features: {
-      bitmask: 0x1e7,
+      bitmask: 0x1e5,
       names: [
         "mount_hide",
         "maps_spoof",
         "statfs_spoof",
         "cmdline_spoof",
-        "uname_spoof",
         "kstat_spoof",
         "merge_dir",
       ],
@@ -191,8 +232,6 @@ const mockState = {
   },
   userHideRules: ["/data/adb/magisk", "/sdcard/Download/advanced", "/system/app/EdXposed"],
   allRules: [
-    { type: "SPOOF", path: "uname release", target: "6.1.89-android14-gki", isUserDefined: false },
-    { type: "SPOOF", path: "uname version", target: "#1 SMP PREEMPT Thu Mar 27 20:12:00 CST 2026", isUserDefined: false },
     { type: "HIDE", path: "/data/adb/magisk", isUserDefined: true },
     { type: "HIDE", path: "/sdcard/Download/advanced", isUserDefined: true },
     { type: "MERGE", path: "/system/etc", source: "/data/adb/modules/playintegrityfix/system/etc", isUserDefined: false },
@@ -204,8 +243,8 @@ const mockState = {
     kmi_override: "",
   },
   logs: {
-    system: `[INFO] Kagami daemon initialized\n[INFO] tmpfs backend selected\n[DEBUG] active modules: zygisk_next, playintegrityfix\n[INFO] applied uname spoof\n[INFO] applied cmdline spoof`,
-    kernel: `[KAGAMIFS] protocol=14 feature_mask=0x1e7\n[KAGAMIFS] tracepoint hooks ready\n[KAGAMIFS] add hide rule /data/adb/magisk\n[KAGAMIFS] cmdline spoof enabled`,
+    system: `[INFO] Kagami daemon initialized\n[INFO] tmpfs backend selected\n[DEBUG] active modules: zygisk_next, playintegrityfix\n[INFO] applied cmdline spoof`,
+    kernel: `[KAGAMIFS] protocol=14 feature_mask=0x1e5\n[KAGAMIFS] tracepoint hooks ready\n[KAGAMIFS] add hide rule /data/adb/magisk\n[KAGAMIFS] cmdline spoof enabled`,
   },
 };
 
@@ -215,7 +254,7 @@ const mockApi = {
   },
 
   async saveConfig(config) {
-    mockState.config = { ...clone(DEFAULT_CONFIG), ...clone(config) };
+    mockState.config = { ...clone(DEFAULT_CONFIG), ...normalizeConfig(config) };
   },
 
   async scanModules() {
@@ -318,7 +357,8 @@ const realApi = {
     const result = await exec(`${PATHS.BINARY} config show`);
     const out = apiOutput(result);
     if (result.errno === 0 && out) {
-      return { ...clone(DEFAULT_CONFIG), ...JSON.parse(out) };
+      const normalized = normalizeConfig(JSON.parse(out));
+      return { ...clone(DEFAULT_CONFIG), ...normalized };
     }
     return clone(DEFAULT_CONFIG);
   },
@@ -341,36 +381,30 @@ const realApi = {
       enable_nuke: config.enable_nuke,
       enable_kernel_debug: config.enable_kernel_debug,
       enable_stealth: config.enable_stealth,
-      enable_hidexattr: config.enable_hidexattr || false,
-      enable_selinux_fix: config.enable_selinux_fix || false,
+      kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
+      enable_overlay_xattr_hide: config.enable_overlay_xattr_hide === true,
+      enable_mount_hide: config.enable_mount_hide === true,
+      enable_maps_spoof: config.enable_maps_spoof === true,
+      enable_statfs_spoof: config.enable_statfs_spoof === true,
+      enable_selinux_fix: config.enable_selinux_fix === true,
       kasumi_enabled: config.kasumi_enabled,
       overlayfs_enabled: config.overlayfs_enabled,
       magic_mount_enabled: config.magic_mount_enabled,
       mount_backend: config.mount_backend,
       policy: clone(config.policy || DEFAULT_CONFIG.policy),
-      uname_release: config.uname_release,
-      uname_version: config.uname_version,
-      uname_mode: config.uname_mode,
       cmdline_value: config.cmdline_value,
       partitions: config.partitions,
     };
 
     await writeJsonFile(PATHS.CONFIG, configToSave);
 
-    await exec(`${PATHS.BINARY} debug ${config.enable_kernel_debug ? "enable" : "disable"}`);
-    await exec(`${PATHS.BINARY} debug stealth ${config.enable_stealth ? "enable" : "disable"}`);
-
     if (config.kasumi_available) {
-      await exec(`${PATHS.BINARY} kasumi ${config.kasumi_enabled ? "enable" : "disable"}`);
-      const hideSwitch = config.enable_hidexattr ? "on" : "off";
-      await exec(`${PATHS.BINARY} kasumi mount-hide ${hideSwitch}`);
-      await exec(`${PATHS.BINARY} kasumi maps-spoof ${hideSwitch}`);
-      await exec(`${PATHS.BINARY} kasumi statfs-spoof ${hideSwitch}`);
+      const result = await exec(`${PATHS.BINARY} config apply`);
+      if (result.errno !== 0) {
+        await exec(`${PATHS.BINARY} kasumi disable`);
+        throw new Error(apiOutput(result) || "Failed to apply Kasumi configuration");
+      }
     }
-
-    const release = shellEscape(config.uname_release || "");
-    const version = shellEscape(config.uname_version || "");
-    await exec(`${PATHS.BINARY} debug set-uname '${release}' '${version}'`);
 
     if (config.cmdline_value) {
       await exec(`${PATHS.BINARY} debug set-cmdline '${shellEscape(config.cmdline_value)}'`);
@@ -487,8 +521,6 @@ const realApi = {
 
   async getSystemInfo() {
     let kernel = "Unknown";
-    let unameRelease = "";
-    let unameVersion = "";
 
     try {
       const versionResult = await exec("cat /proc/version");
@@ -496,26 +528,8 @@ const realApi = {
       const releaseMatch = stdout.match(/Linux version ([^\s]+)/);
       if (releaseMatch) {
         kernel = releaseMatch[1];
-        unameRelease = releaseMatch[1];
       } else if (stdout.trim()) {
         kernel = stdout.trim();
-      }
-
-      const versionMatch = stdout.match(/Linux version [^\s]+ (.+)/);
-      if (versionMatch) {
-        let fullVersion = versionMatch[1].trim();
-        while (fullVersion.startsWith("(")) {
-          const end = fullVersion.indexOf(")");
-          if (end === -1) {
-            break;
-          }
-          fullVersion = fullVersion.slice(end + 1).trim();
-        }
-        const hashIndex = fullVersion.indexOf("#");
-        if (hashIndex > 0) {
-          fullVersion = fullVersion.slice(hashIndex).trim();
-        }
-        unameVersion = fullVersion;
       }
     } catch (_error) {
       // ignore
@@ -549,8 +563,6 @@ const realApi = {
       kernel,
       selinux,
       mountBase: systemData.mount_base || mountData.mount_base || "/dev/kagami_mirror",
-      unameRelease,
-      unameVersion,
       kasumiAvailable: systemData.kasumi_available,
       kasumiStatus: systemData.kasumi_status,
       kasumiModules: mountData.active_modules || [],

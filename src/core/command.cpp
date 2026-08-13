@@ -693,19 +693,34 @@ static int apply_config_file(const fs::path& path) {
         std::cerr << error << "\n";
         return 1;
     }
-    const auto current = kasumi::policy_snapshot();
-    if (!mount::kasumi::apply_policy_config(config.policy, error)) {
-        if (current.state.ok && current.state.enabled &&
-            !kasumi::set_enabled(true)) {
-            error += "; failed to restore Kasumi enabled state: ";
-            error += std::strerror(errno);
+    if (!config.kasumi_enabled) {
+        if ((kasumi::module_loaded() || kasumi::is_available()) &&
+            !mount::kasumi::deactivate(error)) {
+            std::cerr << error << "\n";
+            return 1;
         }
+        return 0;
+    }
+    if (!kasumi::is_available()) {
+        std::cerr << "Kasumi is unavailable\n";
+        return 1;
+    }
+    if (!mount::kasumi::apply_policy_config(config.policy, error)) {
+        std::string cleanup_error;
+        (void)mount::kasumi::deactivate(cleanup_error);
         std::cerr << error << "\n";
         return 1;
     }
-    if (current.state.ok && current.state.enabled && !kasumi::set_enabled(true)) {
-        std::cerr << "failed to restore Kasumi enabled state after policy apply: "
-                  << std::strerror(errno) << "\n";
+    if (!mount::kasumi::apply_feature_config(config, error)) {
+        std::string cleanup_error;
+        (void)mount::kasumi::deactivate(cleanup_error);
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!kasumi::set_enabled(true)) {
+        std::string cleanup_error;
+        (void)mount::kasumi::deactivate(cleanup_error);
+        std::cerr << "failed to enable Kasumi after config apply\n";
         return 1;
     }
     return print_policy_json();
@@ -1677,20 +1692,6 @@ int run_command(const std::vector<std::string>& args) {
         }
         if (args.size() >= 3 && args[1] == "stealth") {
             return kasumi::set_stealth(args[2] == "enable") ? 0 : 1;
-        }
-        if (args.size() >= 2 && args[1] == "set-uname") {
-            const bool global = arg_or_default(args, 2, "") == "global";
-            const bool scoped = arg_or_default(args, 2, "") == "scoped";
-            const std::size_t offset = (global || scoped) ? 3 : 2;
-            const bool ok = global
-                                ? kasumi::set_uname_global(arg_or_default(args, offset, ""),
-                                                           arg_or_default(args, offset + 1, ""))
-                                : kasumi::set_uname(arg_or_default(args, offset, ""),
-                                                    arg_or_default(args, offset + 1, ""));
-            return ok ? 0 : 1;
-        }
-        if (args.size() >= 2 && args[1] == "restore-uname") {
-            return kasumi::restore_uname_global() ? 0 : 1;
         }
         if (args.size() >= 2 && args[1] == "set-cmdline") {
             return kasumi::set_cmdline(arg_or_default(args, 2, "")) ? 0 : 1;

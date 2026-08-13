@@ -57,7 +57,11 @@ std::string default_config_json() {
   "enable_nuke": true,
   "enable_kernel_debug": false,
   "enable_stealth": true,
-  "enable_hidexattr": false,
+  "kasumi_feature_config_version": 2,
+  "enable_overlay_xattr_hide": false,
+  "enable_mount_hide": false,
+  "enable_maps_spoof": false,
+  "enable_statfs_spoof": false,
   "enable_selinux_fix": false,
   "kasumi_enabled": true,
   "overlayfs_enabled": true,
@@ -71,9 +75,6 @@ std::string default_config_json() {
     "allow_uids": [],
     "deny_uids": []
   },
-  "uname_release": "",
-  "uname_version": "",
-  "uname_mode": "scoped",
   "cmdline_value": "",
   "partitions": []
 }
@@ -171,14 +172,35 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.enable_kernel_debug =
         json_bool_or(&root, "enable_kernel_debug", config.enable_kernel_debug);
     config.enable_stealth = json_bool_or(&root, "enable_stealth", config.enable_stealth);
-    config.enable_hidexattr = json_bool_or(&root, "enable_hidexattr", config.enable_hidexattr);
-    config.enable_selinux_fix =
-        json_bool_or(&root, "enable_selinux_fix", config.enable_selinux_fix);
-    config.uname_release = json_string_or(&root, "uname_release", config.uname_release);
-    config.uname_version = json_string_or(&root, "uname_version", config.uname_version);
-    config.uname_mode = json_string_or(&root, "uname_mode", config.uname_mode);
-    if (config.uname_mode != "global") {
-        config.uname_mode = "scoped";
+    const bool has_split_kasumi_features =
+        json_int_or(&root, "kasumi_feature_config_version", 0) >= 2 ||
+        root.find("enable_overlay_xattr_hide") != nullptr ||
+        root.find("enable_mount_hide") != nullptr ||
+        root.find("enable_maps_spoof") != nullptr ||
+        root.find("enable_statfs_spoof") != nullptr;
+    if (has_split_kasumi_features) {
+        config.enable_overlay_xattr_hide = json_bool_or(
+            &root, "enable_overlay_xattr_hide", config.enable_overlay_xattr_hide);
+        config.enable_mount_hide =
+            json_bool_or(&root, "enable_mount_hide", config.enable_mount_hide);
+        config.enable_maps_spoof =
+            json_bool_or(&root, "enable_maps_spoof", config.enable_maps_spoof);
+        config.enable_statfs_spoof =
+            json_bool_or(&root, "enable_statfs_spoof", config.enable_statfs_spoof);
+        config.enable_selinux_fix =
+            json_bool_or(&root, "enable_selinux_fix", config.enable_selinux_fix);
+    } else {
+        // Legacy enable_hidexattr drove all four kernel projections, overlay
+        // xattr hiding, and implicitly enabled stealth. Preserve that state in
+        // memory; the WebUI writes only the split v2 fields on the next save.
+        const bool legacy = json_bool_or(&root, "enable_hidexattr", false);
+        config.enable_overlay_xattr_hide = legacy;
+        config.enable_mount_hide = legacy;
+        config.enable_maps_spoof = legacy;
+        config.enable_statfs_spoof = legacy;
+        config.enable_selinux_fix =
+            legacy || json_bool_or(&root, "enable_selinux_fix", false);
+        config.enable_stealth = config.enable_stealth || legacy;
     }
     config.overlayfs_enabled = json_bool_or(&root, "overlayfs_enabled", config.overlayfs_enabled);
     config.magic_mount_enabled = json_bool_or(&root, "magic_mount_enabled", config.magic_mount_enabled);
