@@ -17,6 +17,14 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error);
 // gate is disabled. No feature implicitly enables another one.
 bool apply_feature_config(const Config& config, std::string& error);
 
+// Disable the global gate and runtime features without discarding path rules.
+bool disable_control_state(std::string& error);
+
+// Restore user-managed HIDE rules without rebuilding module mappings. This is
+// safe after a post-boot LKM load even when modules already use a fallback
+// OverlayFS or Magic Mount backend.
+bool restore_persisted_hide_rules(std::string& error);
+
 // Disable Kasumi and clear path rules without requiring an active mirror.
 bool deactivate(std::string& error);
 
@@ -31,5 +39,10 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
 bool unmount_all(const Config& config);
 
 bool is_active();
+void invalidate_active_state();
+bool has_replayable_mappings();
+std::vector<std::string> replayable_module_ids();
+bool record_replayable_mappings(const std::vector<ModuleEntry>& modules);
+void clear_replayable_mappings();
 
 } // namespace kagami::mount::kasumi

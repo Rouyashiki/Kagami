@@ -70,7 +70,7 @@ const state = {
   systemInfo: { kernel: "...", selinux: "...", mountBase: "/dev/kagami_mirror" },
   userHideRules: [],
   allRules: [],
-  lkmStatus: { loaded: false, autoload: true, kmi_override: "" },
+  lkmStatus: { valid: false, loaded: false, autoload: false, kmi_override: "" },
   conflicts: [],
   logs: "",
   logType: "system",
@@ -88,6 +88,7 @@ const state = {
 let warningTimer = null;
 let configSaveQueue = Promise.resolve();
 let lastSavedConfigSignature = "";
+let configRuntimeApplyPending = false;
 let moduleSaveQueue = Promise.resolve();
 let lastSavedModulesSignature = "[]";
 let pendingRenderMotion = null;
@@ -110,7 +111,7 @@ function unique(items) {
 }
 
 function getPersistedConfig(config) {
-  return {
+  const persisted = {
     moduledir: config.moduledir,
     tempdir: config.tempdir,
     mountsource: config.mountsource,
@@ -139,10 +140,45 @@ function getPersistedConfig(config) {
     cmdline_value: config.cmdline_value || "",
     partitions: unique(config.partitions || []),
   };
+  if (config.__lkmAutoloadPresent !== false) {
+    persisted.lkm_autoload = Boolean(config.lkm_autoload);
+  }
+  return persisted;
 }
 
 function getConfigSignature(config) {
   return JSON.stringify(getPersistedConfig(config));
+}
+
+function getConfigChanges(previousSignature, config) {
+  let previous = {};
+  try {
+    previous = JSON.parse(previousSignature);
+  } catch (_error) {
+    // Treat every field as changed if the saved snapshot is unavailable.
+  }
+  const next = getPersistedConfig(config);
+  const changes = {};
+  Object.entries(next).forEach(([key, value]) => {
+    if (key === "lkm_autoload") {
+      return;
+    }
+    if (JSON.stringify(previous[key]) !== JSON.stringify(value)) {
+      changes[key] = value;
+    }
+  });
+  return changes;
+}
+
+function updateSavedAutoloadSignature(enabled) {
+  let persisted;
+  try {
+    persisted = JSON.parse(lastSavedConfigSignature);
+  } catch (_error) {
+    persisted = getPersistedConfig(state.config);
+  }
+  persisted.lkm_autoload = Boolean(enabled);
+  lastSavedConfigSignature = JSON.stringify(persisted);
 }
 
 function getPersistedModules(modules) {
@@ -891,16 +927,16 @@ function renderKasumiPage() {
               }
             </div>
           </div>
-          <div class="switch-card" style="margin-bottom:14px;">
+          <label class="switch-card" for="lkm-autoload" style="margin-bottom:14px;">
             <div class="switch-copy">
               <strong>${escapeHtml(tr("kasumi.lkm.autoload", "Autoload at boot"))}</strong>
               <small><span class="mono">kagamid lkm set-autoload</span></small>
             </div>
             <span class="toggle">
-              <input type="checkbox" data-action="toggle-autoload" ${state.lkmStatus.autoload ? "checked" : ""}>
+              <input id="lkm-autoload" type="checkbox" data-action="toggle-autoload" ${state.lkmStatus.autoload ? "checked" : ""}>
               <span></span>
             </span>
-          </div>
+          </label>
           <div class="field-inline">
             <button class="button" data-action="lkm-load">${escapeHtml(tr("kasumi.lkm.load", "Load"))}</button>
             <button class="button" data-variant="ghost" data-action="lkm-unload">${escapeHtml(tr("kasumi.lkm.unload", "Unload"))}</button>
@@ -1459,23 +1495,46 @@ async function refreshLogs() {
   }
 }
 
+async function waitForConfigWrites() {
+  while (true) {
+    const pending = configSaveQueue;
+    await pending.catch(() => undefined);
+    if (pending === configSaveQueue) {
+      return;
+    }
+  }
+}
+
 async function refreshAll() {
   state.loading = true;
   state.error = "";
   renderApp();
 
   try {
-    const [config, modules, storage, systemInfo, userHideRules, allRules, lkmStatus] = await Promise.all([
-      api.loadConfig(),
-      api.scanModules(),
-      api.getStorageUsage(),
-      api.getSystemInfo(),
-      api.getUserHideRules(),
-      api.getAllRules(),
-      api.getLkmStatus(),
-    ]);
+    let refreshed;
+    while (true) {
+      await waitForConfigWrites();
+      const stableQueue = configSaveQueue;
+      refreshed = await Promise.all([
+        api.loadConfig(),
+        api.scanModules(),
+        api.getStorageUsage(),
+        api.getSystemInfo(),
+        api.getUserHideRules(),
+        api.getAllRules(),
+        api.getLkmStatus(),
+      ]);
+      if (stableQueue === configSaveQueue) {
+        break;
+      }
+    }
+    const [config, modules, storage, systemInfo, userHideRules, allRules, lkmStatus] = refreshed;
 
     state.config = { ...clone(DEFAULT_CONFIG), ...config };
+    if (lkmStatus.valid === true) {
+      state.config.lkm_autoload = lkmStatus.autoload === true;
+      state.config.__lkmAutoloadPresent = true;
+    }
     lastSavedConfigSignature = getConfigSignature(state.config);
     state.modules = modules;
     lastSavedModulesSignature = getModulesSignature(state.modules);
@@ -1483,7 +1542,9 @@ async function refreshAll() {
     state.systemInfo = systemInfo;
     state.userHideRules = userHideRules;
     state.allRules = allRules;
-    state.lkmStatus = lkmStatus;
+    state.lkmStatus = lkmStatus.valid === true
+      ? lkmStatus
+      : { ...lkmStatus, autoload: Boolean(state.config.lkm_autoload) };
     state.lastUpdated = formatUpdatedTime(new Date());
 
     if (state.tab === "logs") {
@@ -1504,26 +1565,37 @@ function collectConfigFromDom() {
   }
 
   const get = (name) => document.querySelector(`[name="${name}"]`);
+  const checked = (name, fallback) => {
+    const input = get(name);
+    return input ? Boolean(input.checked) : Boolean(fallback);
+  };
+  const value = (name, fallback) => {
+    const input = get(name);
+    return input ? input.value : fallback;
+  };
   return {
     ...clone(state.config),
-    moduledir: get("moduledir")?.value?.trim() || state.config.moduledir,
-    tempdir: get("tempdir")?.value?.trim() || "",
-    mountsource: get("mountsource")?.value || state.config.mountsource,
-    fs_type: get("fs_type")?.value || state.config.fs_type,
-    debug: Boolean(get("debug")?.checked),
-    verbose: Boolean(get("verbose")?.checked),
-    disable_umount: Boolean(get("disable_umount")?.checked),
-    enable_nuke: Boolean(get("enable_nuke")?.checked),
-    enable_kernel_debug: Boolean(get("enable_kernel_debug")?.checked),
-    enable_stealth: Boolean(get("enable_stealth")?.checked),
+    moduledir: value("moduledir", state.config.moduledir).trim(),
+    tempdir: value("tempdir", state.config.tempdir).trim(),
+    mountsource: value("mountsource", state.config.mountsource),
+    fs_type: value("fs_type", state.config.fs_type),
+    debug: checked("debug", state.config.debug),
+    verbose: checked("verbose", state.config.verbose),
+    disable_umount: checked("disable_umount", state.config.disable_umount),
+    enable_nuke: checked("enable_nuke", state.config.enable_nuke),
+    enable_kernel_debug: checked("enable_kernel_debug", state.config.enable_kernel_debug),
+    enable_stealth: checked("enable_stealth", state.config.enable_stealth),
     kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
-    enable_overlay_xattr_hide: Boolean(get("enable_overlay_xattr_hide")?.checked),
-    enable_mount_hide: Boolean(get("enable_mount_hide")?.checked),
-    enable_maps_spoof: Boolean(get("enable_maps_spoof")?.checked),
-    enable_statfs_spoof: Boolean(get("enable_statfs_spoof")?.checked),
-    enable_selinux_fix: Boolean(get("enable_selinux_fix")?.checked),
-    kasumi_enabled: Boolean(get("kasumi_enabled")?.checked),
-    cmdline_value: get("cmdline_value")?.value || "",
+    enable_overlay_xattr_hide: checked(
+      "enable_overlay_xattr_hide",
+      state.config.enable_overlay_xattr_hide,
+    ),
+    enable_mount_hide: checked("enable_mount_hide", state.config.enable_mount_hide),
+    enable_maps_spoof: checked("enable_maps_spoof", state.config.enable_maps_spoof),
+    enable_statfs_spoof: checked("enable_statfs_spoof", state.config.enable_statfs_spoof),
+    enable_selinux_fix: checked("enable_selinux_fix", state.config.enable_selinux_fix),
+    kasumi_enabled: checked("kasumi_enabled", state.config.kasumi_enabled),
+    cmdline_value: value("cmdline_value", state.config.cmdline_value),
     partitions: unique(state.config.partitions || []),
   };
 }
@@ -1597,26 +1669,37 @@ async function persistConfig(nextConfig, { silent = true, refresh = false } = {}
   const nextSignature = getConfigSignature(normalizedConfig);
   state.config = normalizedConfig;
 
-  if (nextSignature === lastSavedConfigSignature && !refresh) {
+  if (nextSignature === lastSavedConfigSignature && !refresh && !configRuntimeApplyPending) {
     return true;
   }
 
   const saveTask = async () => {
     const shouldSave = nextSignature !== lastSavedConfigSignature;
-    if (shouldSave) {
-      await api.saveConfig(normalizedConfig);
-      lastSavedConfigSignature = nextSignature;
+    if (shouldSave || configRuntimeApplyPending) {
+      const changes = shouldSave
+        ? getConfigChanges(lastSavedConfigSignature, normalizedConfig)
+        : {};
+      try {
+        await api.saveConfig(changes);
+        configRuntimeApplyPending = false;
+        if (shouldSave) {
+          lastSavedConfigSignature = nextSignature;
+        }
+      } catch (error) {
+        if (error?.configPersisted === true) {
+          configRuntimeApplyPending = true;
+          if (shouldSave) {
+            lastSavedConfigSignature = nextSignature;
+          }
+          state.lastUpdated = formatUpdatedTime(new Date());
+        }
+        throw error;
+      }
       state.lastUpdated = formatUpdatedTime(new Date());
     }
 
     if (!silent) {
       showToast(tr("config.saved", "Configuration saved"));
-    }
-
-    if (refresh) {
-      await refreshAll();
-    } else {
-      renderApp();
     }
 
     return true;
@@ -1625,11 +1708,17 @@ async function persistConfig(nextConfig, { silent = true, refresh = false } = {}
   configSaveQueue = configSaveQueue.catch(() => undefined).then(saveTask);
 
   try {
-    return await configSaveQueue;
+    await configSaveQueue;
   } catch (error) {
     showToast(error.message || tr("config.saveFailed", "Failed to save configuration"), "danger");
     return false;
   }
+  if (refresh) {
+    await refreshAll();
+  } else {
+    renderApp();
+  }
+  return true;
 }
 
 function isConfigAutoSaveField(target) {
@@ -1699,17 +1788,18 @@ async function handleRemoveHideRule(path) {
 
 async function handleLkmAction(action) {
   try {
+    let message = "";
     if (action === "load") {
       await api.lkmLoad();
-      showToast(tr("kasumi.lkm.loadSuccess", "LKM loaded"));
+      message = tr("kasumi.lkm.loadSuccess", "LKM loaded");
     } else if (action === "unload") {
       await api.lkmUnload();
-      showToast(tr("kasumi.lkm.unloadSuccess", "LKM unloaded"));
+      message = tr("kasumi.lkm.unloadSuccess", "LKM unloaded");
     }
-    state.lkmStatus = await api.getLkmStatus();
-    queueRenderMotion("page");
-    renderApp();
+    await refreshAll();
+    showToast(message);
   } catch (error) {
+    await refreshAll();
     showToast(
       error.message ||
         (action === "load" ? tr("kasumi.lkm.loadFailed", "Failed to load LKM") : tr("kasumi.lkm.unloadFailed", "Failed to unload LKM")),
@@ -1745,15 +1835,26 @@ async function handleSetKmi(clear = false) {
 }
 
 async function handleToggleAutoload(target) {
+  const enabled = Boolean(target.checked);
+  const previous = Boolean(state.config.lkm_autoload);
+  const previousPresence = state.config.__lkmAutoloadPresent;
+  state.config.lkm_autoload = enabled;
+  state.config.__lkmAutoloadPresent = true;
+  const saveTask = async () => {
+    await api.lkmSetAutoload(enabled);
+    updateSavedAutoloadSignature(enabled);
+  };
+  configSaveQueue = configSaveQueue.catch(() => undefined).then(saveTask);
   try {
-    await api.lkmSetAutoload(Boolean(target.checked));
-    state.lkmStatus.autoload = Boolean(target.checked);
-    state.config.lkm_autoload = Boolean(target.checked);
+    await configSaveQueue;
+    state.lkmStatus.autoload = enabled;
     queueRenderMotion("page");
     renderApp();
     showToast(tr("kasumi.lkm.autoloadSuccess", "Autoload updated"));
   } catch (error) {
-    target.checked = !target.checked;
+    target.checked = previous;
+    state.config.lkm_autoload = previous;
+    state.config.__lkmAutoloadPresent = previousPresence;
     showToast(error.message || tr("kasumi.lkm.autoloadFailed", "Failed to set autoload"), "danger");
   }
 }
@@ -1938,10 +2039,7 @@ document.addEventListener("click", async (event) => {
       acceptWarning();
       break;
     case "reload-config":
-      state.config = { ...clone(DEFAULT_CONFIG), ...(await api.loadConfig()) };
-      lastSavedConfigSignature = getConfigSignature(state.config);
-      queueRenderMotion("page");
-      renderApp();
+      await refreshAll();
       break;
     case "scan-partitions":
       await handlePartitionScan();

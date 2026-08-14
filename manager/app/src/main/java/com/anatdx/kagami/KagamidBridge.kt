@@ -25,7 +25,7 @@ data class KasumiStatus(
 
 data class LkmStatus(
     val loaded: Boolean = false,
-    val autoload: Boolean = true,
+    val autoload: Boolean = false,
     val kmiOverride: String = "",
 )
 
@@ -101,7 +101,7 @@ class KagamidBridge(
         val root = JSONObject(json)
         return LkmStatus(
             loaded = root.optBoolean("loaded", false),
-            autoload = root.optBoolean("autoload", true),
+            autoload = root.optBoolean("autoload", false),
             kmiOverride = root.optString("kmi_override", ""),
         )
     }

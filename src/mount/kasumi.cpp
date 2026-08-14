@@ -31,6 +31,62 @@ using fsutil::mlog;
 namespace {
 
 fs::path active_file() { return runtime_data_dir() / "run" / "kasumi_active"; }
+fs::path mapping_plan_file() {
+    return runtime_data_dir() / "run" / "kasumi_mapping_plan";
+}
+
+std::string current_boot_id() {
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string value;
+    std::getline(in, value);
+    return value;
+}
+
+bool marker_matches_current_boot(const fs::path& path) {
+    const std::string boot_id = current_boot_id();
+    if (boot_id.empty()) {
+        return false;
+    }
+    std::ifstream in(path);
+    std::string stored_boot_id;
+    return static_cast<bool>(std::getline(in, stored_boot_id)) &&
+           stored_boot_id == boot_id;
+}
+
+bool write_boot_marker(const fs::path& path, const std::string& detail = {}) {
+    const std::string boot_id = current_boot_id();
+    if (boot_id.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+    fs::path temporary = path;
+    temporary += ".tmp";
+    std::ofstream out(temporary, std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out << boot_id << "\n";
+    if (!detail.empty()) {
+        out << detail << "\n";
+    }
+    out.flush();
+    const bool write_ok = out.good();
+    out.close();
+    if (!write_ok || out.fail()) {
+        fs::remove(temporary, ec);
+        return false;
+    }
+    fs::rename(temporary, path, ec);
+    if (ec) {
+        fs::remove(temporary, ec);
+        return false;
+    }
+    return true;
+}
 
 bool path_matches_rule(const std::string& path, const std::string& prefix) {
     if (path == prefix) {
@@ -274,13 +330,24 @@ bool configure_mirror(const std::string& mirror) {
     return true;
 }
 
-void disable_kernel_features() {
-    (void)::kagami::kasumi::set_debug(false);
-    (void)::kagami::kasumi::set_stealth(false);
-    (void)::kagami::kasumi::set_mount_hide(false);
-    (void)::kagami::kasumi::set_maps_spoof(false);
-    (void)::kagami::kasumi::set_statfs_spoof(false);
-    (void)::kagami::kasumi::set_selinux_guard(false);
+bool disable_kernel_features(std::string* error = nullptr) {
+    bool ok = true;
+    const auto disable = [&](bool result, const char* name) {
+        if (!result) {
+            ok = false;
+            if (error && error->empty()) {
+                *error = std::string("failed to disable Kasumi ") + name;
+            }
+        }
+    };
+    disable(::kagami::kasumi::set_debug(false), "kernel debug");
+    disable(::kagami::kasumi::set_stealth(false), "stealth");
+    disable(::kagami::kasumi::set_mount_hide(false), "mount hide");
+    disable(::kagami::kasumi::set_maps_spoof(false), "maps spoof");
+    disable(::kagami::kasumi::set_statfs_spoof(false), "statfs spoof");
+    disable(::kagami::kasumi::set_selinux_guard(false), "SELinux guard");
+    disable(::kagami::kasumi::set_cmdline(""), "cmdline spoof");
+    return ok;
 }
 
 } // namespace
@@ -349,27 +416,47 @@ bool apply_feature_config(const Config& config, std::string& error) {
           "statfs spoof");
     apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix),
           "SELinux guard");
+    apply(::kagami::kasumi::set_cmdline(config.cmdline_value), "cmdline spoof");
     if (!ok) {
-        disable_kernel_features();
+        (void)disable_kernel_features();
     }
     return ok;
 }
 
-bool deactivate(std::string& error) {
+bool disable_control_state(std::string& error) {
     bool ok = true;
     if (!::kagami::kasumi::set_enabled(false)) {
         error = "failed to disable Kasumi";
         ok = false;
     }
+    if (!disable_kernel_features(&error)) {
+        ok = false;
+    }
+    return ok;
+}
+
+bool restore_persisted_hide_rules(std::string& error) {
+    bool ok = true;
+    for (const auto& path : user_hide_rules()) {
+        if (!::kagami::kasumi::hide_path(path)) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        error = "failed to restore one or more persistent hide rules";
+    }
+    return ok;
+}
+
+bool deactivate(std::string& error) {
+    bool ok = disable_control_state(error);
     if (!::kagami::kasumi::clear_rules()) {
         if (error.empty()) {
             error = "failed to clear Kasumi rules";
         }
         ok = false;
     }
-    disable_kernel_features();
-    std::error_code ec;
-    fs::remove(active_file(), ec);
+    invalidate_active_state();
     return ok;
 }
 
@@ -379,10 +466,22 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         mlog("kasumi: backend requested but protocol is unavailable");
         return false;
     }
+    const auto persisted_hide_rules = user_hide_rules();
     if (modules.empty()) {
-        std::error_code ec;
-        fs::remove(active_file(), ec);
-        return true;
+        std::string error;
+        const bool ok = restore_persisted_hide_rules(error);
+        if (ok) {
+            if (!write_boot_marker(active_file())) {
+                mlog("kasumi: failed to record restored runtime state");
+            }
+            mlog("kasumi: installed add=0 merge=0 hide=" +
+                 std::to_string(persisted_hide_rules.size()));
+        } else {
+            std::error_code ec;
+            fs::remove(active_file(), ec);
+            mlog("kasumi: one or more persistent hide rules failed");
+        }
+        return ok;
     }
 
     Config mirror_config = config;
@@ -433,7 +532,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     for (const auto& rule : batch.merge) {
         ok = ::kagami::kasumi::add_merge_rule(rule.first, rule.second) && ok;
     }
-    for (const auto& path : user_hide_rules()) {
+    for (const auto& path : persisted_hide_rules) {
         batch.hide.insert(path);
     }
     for (const auto& path : batch.hide) {
@@ -441,8 +540,11 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     }
     std::error_code ec;
     fs::create_directories(active_file().parent_path(), ec);
+    if (ok && !write_boot_marker(active_file(), mirror.content_dir)) {
+        ok = false;
+        mlog("kasumi: failed to record restored runtime state");
+    }
     if (ok) {
-        std::ofstream(active_file(), std::ios::trunc) << mirror.content_dir << "\n";
         mlog("kasumi: installed add=" + std::to_string(batch.add.size()) +
              " merge=" + std::to_string(batch.merge.size()) +
              " hide=" + std::to_string(batch.hide.size()));
@@ -465,12 +567,58 @@ bool unmount_all(const Config& config) {
     }
     std::error_code ec;
     fs::remove(active_file(), ec);
+    clear_replayable_mappings();
     return ok;
 }
 
 bool is_active() {
+    return marker_matches_current_boot(active_file());
+}
+
+void invalidate_active_state() {
     std::error_code ec;
-    return fs::exists(active_file(), ec) && !ec;
+    fs::remove(active_file(), ec);
+}
+
+std::vector<std::string> replayable_module_ids() {
+    std::vector<std::string> ids;
+    if (!marker_matches_current_boot(mapping_plan_file())) {
+        return ids;
+    }
+    std::ifstream in(mapping_plan_file());
+    std::string line;
+    std::getline(in, line); // boot id
+    while (std::getline(in, line)) {
+        if (!line.empty()) {
+            ids.push_back(line);
+        }
+    }
+    return ids;
+}
+
+bool has_replayable_mappings() {
+    return !replayable_module_ids().empty();
+}
+
+bool record_replayable_mappings(const std::vector<ModuleEntry>& modules) {
+    if (modules.empty()) {
+        clear_replayable_mappings();
+        return true;
+    }
+    std::ostringstream ids;
+    for (const auto& module : modules) {
+        ids << module.id << "\n";
+    }
+    if (write_boot_marker(mapping_plan_file(), ids.str())) {
+        return true;
+    }
+    clear_replayable_mappings();
+    return false;
+}
+
+void clear_replayable_mappings() {
+    std::error_code ec;
+    fs::remove(mapping_plan_file(), ec);
 }
 
 } // namespace kagami::mount::kasumi

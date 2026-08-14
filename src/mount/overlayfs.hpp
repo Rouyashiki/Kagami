@@ -19,6 +19,11 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
 // Detach our overlay mounts and the storage base. Must run in the init ns.
 bool unmount_all(const Config& config);
 
+// Re-register xattr hiding for OverlayFS mounts that Kagami already owns.
+// Must run inside the init mount namespace. This is idempotent and does not
+// remount or otherwise migrate a live backend.
+bool restore_xattr_hiding(const Config& config);
+
 bool is_active(const Config& config);
 
 } // namespace kagami::mount::overlay

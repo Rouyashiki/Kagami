@@ -11,6 +11,7 @@
 #include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
 #include "mount/mount_fs.hpp"
+#include "mount/overlayfs.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -62,6 +63,7 @@ static void print_usage() {
         << "  kagamid version\n"
         << "  kagamid config show\n"
         << "  kagamid config gen [-o PATH]\n"
+        << "  kagamid config merge-json JSON\n"
         << "  kagamid config apply [PATH]\n"
         << "  kagamid config policy set <owner> <allow-csv|-> <deny-csv|-> <isolated:on|off>\n"
         << "  kagamid daemon status|serve|call|ping|stop\n"
@@ -713,12 +715,16 @@ static int print_kasumi_snapshot_json() {
     return 0;
 }
 
-static int apply_config_file(const fs::path& path) {
+static int apply_config_file(const fs::path& path, bool kernel_state_lost = false,
+                             bool force_enable = false) {
     Config config;
     std::string error;
     if (!read_config_file(path.string(), config, error)) {
         std::cerr << error << "\n";
         return 1;
+    }
+    if (force_enable) {
+        config.kasumi_enabled = true;
     }
     if (!config.kasumi_enabled) {
         if ((kasumi::module_loaded() || kasumi::is_available()) &&
@@ -732,21 +738,47 @@ static int apply_config_file(const fs::path& path) {
         std::cerr << "Kasumi is unavailable\n";
         return 1;
     }
+
+    // Rebuild module mappings only when this boot already established that
+    // Kasumi owns them. A first post-boot load may follow an Overlay/Magic
+    // fallback and must not migrate or stack backends underneath live mounts.
+    if (mount::kasumi::has_replayable_mappings() &&
+        (kernel_state_lost || !mount::kasumi::is_active())) {
+        if (!mount::refresh_kasumi_modules(config)) {
+            std::cerr << "failed to replay persisted Kasumi configuration\n";
+            return 1;
+        }
+        return print_policy_json();
+    }
+
     if (!mount::kasumi::apply_policy_config(config.policy, error)) {
         std::string cleanup_error;
-        (void)mount::kasumi::deactivate(cleanup_error);
+        (void)mount::kasumi::disable_control_state(cleanup_error);
+        std::cerr << error << "\n";
+        return 1;
+    }
+    if (!mount::kasumi::restore_persisted_hide_rules(error)) {
+        std::string cleanup_error;
+        (void)mount::kasumi::disable_control_state(cleanup_error);
         std::cerr << error << "\n";
         return 1;
     }
     if (!mount::kasumi::apply_feature_config(config, error)) {
         std::string cleanup_error;
-        (void)mount::kasumi::deactivate(cleanup_error);
+        (void)mount::kasumi::disable_control_state(cleanup_error);
         std::cerr << error << "\n";
+        return 1;
+    }
+    if (!mount::fsutil::run_in_init_mount_ns(
+            [&]() { return mount::overlay::restore_xattr_hiding(config); })) {
+        std::string cleanup_error;
+        (void)mount::kasumi::disable_control_state(cleanup_error);
+        std::cerr << "failed to restore OverlayFS xattr hiding\n";
         return 1;
     }
     if (!kasumi::set_enabled(true)) {
         std::string cleanup_error;
-        (void)mount::kasumi::deactivate(cleanup_error);
+        (void)mount::kasumi::disable_control_state(cleanup_error);
         std::cerr << "failed to enable Kasumi after config apply\n";
         return 1;
     }
@@ -937,6 +969,18 @@ static int handle_config(const std::vector<std::string>& args) {
         }
         return 0;
     }
+    if (sub == "merge-json") {
+        if (args.size() != 3) {
+            std::cerr << "usage: kagamid config merge-json JSON\n";
+            return 1;
+        }
+        std::string error;
+        if (!merge_config_json(config_file().string(), args[2], error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
+        return 0;
+    }
     if (sub == "apply") {
         return apply_config_file(arg_or_default(args, 2, config_file().string()));
     }
@@ -1061,6 +1105,8 @@ static int handle_module(const std::vector<std::string>& args) {
     if (sub == "list") {
         const auto modes = mount::load_module_modes();
         const auto rule_map = mount::load_module_rules();
+        const auto replayable = mount::kasumi::replayable_module_ids();
+        const std::set<std::string> kasumi_boot_plan(replayable.begin(), replayable.end());
         const Config cfg = current_config();
         const fs::path module_root = cfg.module_dir.empty() ? modules_dir() : fs::path(cfg.module_dir);
         std::cout << "{\"modules\":[";
@@ -1103,9 +1149,18 @@ static int handle_module(const std::vector<std::string>& args) {
                 const auto mode_it = modes.find(id);
                 const std::string mode = mode_it == modes.end() ? "auto" : mode_it->second;
                 const auto rules_it = rule_map.find(id);
-                // strategy = the actual resolved backend (overlay/magic/kasumi/none)
-                const std::string strategy =
-                    mount::resolve_module_backend(mount::ModuleEntry{id, entry.path()}, cfg, modes);
+                // The same-boot plan is authoritative for Kasumi ownership.
+                // Without it, an explicit Kasumi choice may already be running
+                // through the boot-time Overlay/Magic fallback.
+                std::string strategy;
+                if (kasumi_boot_plan.count(id) != 0) {
+                    strategy = "kasumi";
+                } else {
+                    Config fallback_config = cfg;
+                    fallback_config.kasumi_enabled = false;
+                    strategy = mount::resolve_module_backend(
+                        mount::ModuleEntry{id, entry.path()}, fallback_config, modes);
+                }
                 std::cout << "{"
                           << "\"id\":" << json_quote(id) << ","
                           << "\"name\":" << json_quote(props.count("name") ? props.at("name") : id) << ","
@@ -1213,9 +1268,9 @@ static int handle_module(const std::vector<std::string>& args) {
             std::cerr << "module not found: " << id << "\n";
             return 1;
         }
-        const auto modes = mount::load_module_modes();
-        if (mount::resolve_module_backend({id, module_path}, cfg, modes) != "kasumi") {
-            std::cerr << "hot module control is only available for an active Kasumi backend\n";
+        const auto replayable = mount::kasumi::replayable_module_ids();
+        if (std::find(replayable.begin(), replayable.end(), id) == replayable.end()) {
+            std::cerr << "module was not assigned to Kasumi this boot; reboot to change its backend\n";
             return 1;
         }
         const fs::path marker = data_dir() / "run" / "hot_unmounted" / id;
@@ -1482,8 +1537,11 @@ static int handle_kasumi(const std::vector<std::string>& args) {
         std::cerr << "usage: kagamid kasumi policy [show|owner OWNER [allow] [deny] [isolated]|allow UID...|deny UID...|clear allow|deny|all|reset|apply [config]]\n";
         return 1;
     }
-    if (sub == "enable" || sub == "disable") {
-        if (!kasumi::set_enabled(sub == "enable")) {
+    if (sub == "enable") {
+        return apply_config_file(config_file(), false, true);
+    }
+    if (sub == "disable") {
+        if (!kasumi::set_enabled(false)) {
             std::cerr << "failed to set Kasumi enabled state\n";
             return 1;
         }
@@ -1494,6 +1552,7 @@ static int handle_kasumi(const std::vector<std::string>& args) {
             std::cerr << "failed to clear Kasumi rules\n";
             return 1;
         }
+        mount::kasumi::invalidate_active_state();
         return 0;
     }
     if (sub == "hide-path" || sub == "delete-rule") {
@@ -1597,11 +1656,12 @@ static int handle_lkm(const std::vector<std::string>& args) {
         return 0;
     }
     if (sub == "load") {
-        if (lkm::load()) {
-            return 0;
+        const bool already_available = kasumi::is_available();
+        if (!lkm::load()) {
+            std::cerr << "failed to load Kasumi LKM: " << lkm::last_error() << "\n";
+            return 1;
         }
-        std::cerr << "failed to load Kasumi LKM: " << lkm::last_error() << "\n";
-        return 1;
+        return already_available ? 0 : apply_config_file(config_file(), true);
     }
     if (sub == "unload" || sub == "force-unload") {
         if (lkm::unload(sub != "force-unload")) {
@@ -1611,11 +1671,16 @@ static int handle_lkm(const std::vector<std::string>& args) {
         return 1;
     }
     if (sub == "autoload") {
-        if (lkm::autoload()) {
+        const bool enabled = lkm::get_autoload();
+        const bool already_available = kasumi::is_available();
+        if (!lkm::autoload()) {
+            std::cerr << "Kasumi LKM autoload failed: " << lkm::last_error() << "\n";
+            return 1;
+        }
+        if (!enabled) {
             return 0;
         }
-        std::cerr << "Kasumi LKM autoload failed: " << lkm::last_error() << "\n";
-        return 1;
+        return already_available ? 0 : apply_config_file(config_file(), true);
     }
     if (sub == "status") {
         std::cout << "{\"loaded\":" << (lkm::is_loaded() ? "true" : "false")

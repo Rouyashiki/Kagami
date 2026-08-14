@@ -513,6 +513,24 @@ bool unmount_all(const Config& config) {
     return true;
 }
 
+bool restore_xattr_hiding(const Config& config) {
+    if (!config.enable_overlay_xattr_hide) {
+        return true;
+    }
+    if (!config.kasumi_enabled || !::kagami::kasumi::is_available()) {
+        return false;
+    }
+
+    bool ok = true;
+    for (const auto& target : our_overlays(config.mount_source)) {
+        if (!::kagami::kasumi::hide_overlay_xattrs(target)) {
+            mlog("overlay: failed to restore xattr hiding for " + target);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool is_active(const Config& config) { return !our_overlays(config.mount_source).empty(); }
 
 } // namespace kagami::mount::overlay

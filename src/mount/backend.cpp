@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -101,6 +102,52 @@ constexpr int kMaxBootAttempts = 3;
 
 static fs::path recovery_attempts_file() { return runtime_data_dir() / "run" / "boot_attempts"; }
 static fs::path recovery_disabled_file() { return runtime_data_dir() / "run" / "mount_disabled"; }
+static fs::path mount_orchestrator_file() {
+    return runtime_data_dir() / "run" / "mount_orchestrator_boot";
+}
+
+static std::string current_boot_id() {
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string value;
+    std::getline(in, value);
+    return value;
+}
+
+static bool claim_mount_orchestrator() {
+    const std::string boot_id = current_boot_id();
+    if (boot_id.empty()) {
+        return false;
+    }
+    {
+        std::ifstream in(mount_orchestrator_file());
+        std::string recorded;
+        if (std::getline(in, recorded) && recorded == boot_id) {
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::create_directories(mount_orchestrator_file().parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+    fs::path temporary = mount_orchestrator_file();
+    temporary += ".tmp";
+    std::ofstream out(temporary, std::ios::trunc);
+    out << boot_id << "\n";
+    out.flush();
+    const bool write_ok = out.good();
+    out.close();
+    if (!write_ok || out.fail()) {
+        fs::remove(temporary, ec);
+        return false;
+    }
+    fs::rename(temporary, mount_orchestrator_file(), ec);
+    if (ec) {
+        fs::remove(temporary, ec);
+        return false;
+    }
+    return true;
+}
 
 static int read_boot_attempts() {
     std::ifstream in(recovery_attempts_file());
@@ -460,9 +507,16 @@ static void update_self_status(bool ok, std::size_t overlay, std::size_t magic,
 MountReport mount_all_enabled(const Config& config) {
     MountReport report;
 
-    // An LKM is an explicit boot-time choice. A packaged .ko must not load just
-    // because Kagami itself runs, and this is the only automatic-load call site.
-    if (config.kasumi_enabled && config.lkm_autoload && !lkm::autoload()) {
+    if (!claim_mount_orchestrator()) {
+        report.detail = "module mount-all already ran this boot or its state could not be recorded";
+        return report;
+    }
+    kasumi::invalidate_active_state();
+    kasumi::clear_replayable_mappings();
+
+    // An LKM is an explicit boot-time choice. lkm::autoload() owns the persisted
+    // setting (including the legacy-file migration) and is a no-op when disabled.
+    if (!lkm::autoload()) {
         fsutil::mlog("Kasumi LKM autoload failed: " + lkm::last_error());
     }
 
@@ -578,6 +632,16 @@ MountReport mount_all_enabled(const Config& config) {
                           fsutil::run_in_init_mount_ns([&]() {
                               return kasumi::mount_modules(kasumi_set, config, rules);
                           });
+        if (kasumi_rules_ok && !kasumi_set.empty() &&
+            !kasumi::record_replayable_mappings(kasumi_set)) {
+            kasumi_rules_ok = false;
+            fsutil::mlog("kasumi: failed to commit the boot mapping plan");
+        }
+        if (!kasumi_rules_ok || kasumi_set.empty()) {
+            kasumi::clear_replayable_mappings();
+        }
+    } else {
+        kasumi::clear_replayable_mappings();
     }
 
     bool policy_ok = true;
@@ -644,11 +708,17 @@ bool refresh_kasumi_modules(const Config& config) {
     if (!kasumi_usable()) {
         return false;
     }
+    const auto replayable = kasumi::replayable_module_ids();
+    if (replayable.empty()) {
+        fsutil::mlog("kasumi: refusing post-boot mapping replay without a "
+                     "Kasumi-owned boot plan");
+        return false;
+    }
+    const std::set<std::string> replayable_set(replayable.begin(), replayable.end());
     const auto all = enumerate_mountable_modules(config);
-    const auto modes = load_module_modes();
     std::vector<ModuleEntry> selected;
     for (const auto& module : all) {
-        if (resolve_module_backend(module, config, modes) == "kasumi") {
+        if (replayable_set.count(module.id) != 0) {
             selected.push_back(module);
         }
     }
@@ -663,9 +733,13 @@ bool refresh_kasumi_modules(const Config& config) {
                                                  return kasumi::mount_modules(
                                                      selected, config, rules);
                                              });
-    const bool policy_ok = mount_ok && apply_kasumi_policy(config);
+    const bool overlay_xattr_ok = mount_ok && fsutil::run_in_init_mount_ns(
+                                                  [&]() {
+                                                      return overlay::restore_xattr_hiding(config);
+                                                  });
+    const bool policy_ok = overlay_xattr_ok && apply_kasumi_policy(config);
     const bool features_ok = policy_ok && apply_kasumi_features(config);
-    bool ok = prepare_ok && mount_ok && policy_ok && features_ok;
+    bool ok = prepare_ok && mount_ok && overlay_xattr_ok && policy_ok && features_ok;
     if (!::kagami::kasumi::set_enabled(ok)) {
         ok = false;
     }

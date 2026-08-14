@@ -3,12 +3,16 @@
 #include "core/json_value.hpp"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace kagami {
 
@@ -37,6 +41,76 @@ static bool ensure_parent_dir(const std::string& path, std::string& error) {
     }
     return true;
 }
+
+static bool write_config_atomic(const std::string& path, const std::string& data,
+                                std::string& error) {
+    if (!ensure_parent_dir(path, error)) {
+        return false;
+    }
+    const std::string temporary = path + ".tmp." + std::to_string(getpid());
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "open " + temporary + ": " + std::strerror(errno);
+        return false;
+    }
+    out << data;
+    out.flush();
+    const bool write_ok = out.good();
+    out.close();
+    if (!write_ok || out.fail()) {
+        error = "write " + temporary + " failed";
+        ::remove(temporary.c_str());
+        return false;
+    }
+    const int fd = ::open(temporary.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || ::fsync(fd) != 0) {
+        const int saved_errno = errno;
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        ::remove(temporary.c_str());
+        error = "sync " + temporary + ": " + std::strerror(saved_errno);
+        return false;
+    }
+    ::close(fd);
+    if (::rename(temporary.c_str(), path.c_str()) != 0) {
+        const int saved_errno = errno;
+        ::remove(temporary.c_str());
+        error = "replace " + path + ": " + std::strerror(saved_errno);
+        return false;
+    }
+    return true;
+}
+
+class ConfigFileLock {
+public:
+    ~ConfigFileLock() {
+        if (fd_ >= 0) {
+            (void)::flock(fd_, LOCK_UN);
+            ::close(fd_);
+        }
+    }
+
+    bool acquire(const std::string& path, std::string& error) {
+        if (!ensure_parent_dir(path, error)) {
+            return false;
+        }
+        const std::string lock_path = path + ".lock";
+        fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (fd_ < 0) {
+            error = "open " + lock_path + ": " + std::strerror(errno);
+            return false;
+        }
+        if (::flock(fd_, LOCK_EX) != 0) {
+            error = "lock " + lock_path + ": " + std::strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    int fd_ = -1;
+};
 
 std::string default_config_json() {
     return R"({
@@ -82,17 +156,11 @@ std::string default_config_json() {
 }
 
 bool write_default_config(const std::string& path, std::string& error) {
-    if (!ensure_parent_dir(path, error)) {
+    ConfigFileLock lock;
+    if (!lock.acquire(path, error)) {
         return false;
     }
-
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        error = "open " + path + ": " + std::strerror(errno);
-        return false;
-    }
-    out << default_config_json();
-    return out.good();
+    return write_config_atomic(path, default_config_json(), error);
 }
 
 static std::vector<std::string> json_string_array_or_empty(const JsonValue* value) {
@@ -172,6 +240,7 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.enable_kernel_debug =
         json_bool_or(&root, "enable_kernel_debug", config.enable_kernel_debug);
     config.enable_stealth = json_bool_or(&root, "enable_stealth", config.enable_stealth);
+    config.cmdline_value = json_string_or(&root, "cmdline_value", config.cmdline_value);
     const bool has_split_kasumi_features =
         json_int_or(&root, "kasumi_feature_config_version", 0) >= 2 ||
         root.find("enable_overlay_xattr_hide") != nullptr ||
@@ -231,22 +300,91 @@ bool read_config_file(const std::string& path, Config& config, std::string& erro
     return parse_config_json(buffer.str(), config, error);
 }
 
-bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        if (!write_default_config(path, error)) {
-            return false;
+bool merge_config_json(const std::string& path, const std::string& updates,
+                       std::string& error) {
+    JsonValue patch;
+    if (!parse_json(updates, patch, error) || !patch.is_object()) {
+        if (error.empty()) {
+            error = "config updates must be a JSON object";
         }
-        in.clear();
-        in.open(path, std::ios::binary);
+        return false;
     }
-    if (!in) {
-        error = "open " + path + ": " + std::strerror(errno);
+    if (patch.find("lkm_autoload")) {
+        error = "use 'lkm set-autoload' to update lkm_autoload";
         return false;
     }
 
+    ConfigFileLock lock;
+    if (!lock.acquire(path, error)) {
+        return false;
+    }
+
+    std::ifstream in(path, std::ios::binary);
     std::ostringstream input;
-    input << in.rdbuf();
+    if (in) {
+        input << in.rdbuf();
+    } else {
+        input << default_config_json();
+    }
+    JsonValue root;
+    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+        if (error.empty()) {
+            error = "config root must be an object";
+        }
+        return false;
+    }
+
+    const auto has_split_features = [](const JsonValue& value) {
+        return json_int_or(&value, "kasumi_feature_config_version", 0) >= 2 ||
+               value.find("enable_overlay_xattr_hide") != nullptr ||
+               value.find("enable_mount_hide") != nullptr ||
+               value.find("enable_maps_spoof") != nullptr ||
+               value.find("enable_statfs_spoof") != nullptr;
+    };
+    if (!has_split_features(root) && has_split_features(patch)) {
+        const auto bool_value = [](bool value) {
+            JsonValue out;
+            out.type = JsonValue::Type::Bool;
+            out.bool_value = value;
+            return out;
+        };
+        JsonValue version;
+        version.type = JsonValue::Type::Number;
+        version.number_value = 2;
+
+        const bool legacy = json_bool_or(&root, "enable_hidexattr", false);
+        root.object_value["kasumi_feature_config_version"] = version;
+        root.object_value["enable_overlay_xattr_hide"] = bool_value(legacy);
+        root.object_value["enable_mount_hide"] = bool_value(legacy);
+        root.object_value["enable_maps_spoof"] = bool_value(legacy);
+        root.object_value["enable_statfs_spoof"] = bool_value(legacy);
+        root.object_value["enable_selinux_fix"] = bool_value(
+            legacy || json_bool_or(&root, "enable_selinux_fix", false));
+        root.object_value["enable_stealth"] = bool_value(
+            legacy || json_bool_or(&root, "enable_stealth", true));
+        root.object_value.erase("enable_hidexattr");
+    }
+    for (const auto& [key, value] : patch.object_value) {
+        if (key == "kasumi_available" || key == "tmpfs_xattr_supported") {
+            continue;
+        }
+        root.object_value[key] = value;
+    }
+    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
+}
+
+bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error) {
+    ConfigFileLock lock;
+    if (!lock.acquire(path, error)) {
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream input;
+    if (in) {
+        input << in.rdbuf();
+    } else {
+        input << default_config_json();
+    }
     JsonValue root;
     if (!parse_json(input.str(), root, error) || !root.is_object()) {
         if (error.empty()) {
@@ -260,38 +398,21 @@ bool update_lkm_autoload_config(const std::string& path, bool enabled, std::stri
     value.bool_value = enabled;
     root.object_value["lkm_autoload"] = value;
 
-    if (!ensure_parent_dir(path, error)) {
-        return false;
-    }
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        error = "open " + path + ": " + std::strerror(errno);
-        return false;
-    }
-    out << stringify_json(root, 2) << "\n";
-    if (!out.good()) {
-        error = "write " + path + ": " + std::strerror(errno);
-        return false;
-    }
-    return true;
+    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
 }
 
 bool update_policy_config(const std::string& path, const PolicyConfig& policy, std::string& error) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        if (!write_default_config(path, error)) {
-            return false;
-        }
-        in.clear();
-        in.open(path, std::ios::binary);
-    }
-    if (!in) {
-        error = "open " + path + ": " + std::strerror(errno);
+    ConfigFileLock lock;
+    if (!lock.acquire(path, error)) {
         return false;
     }
-
+    std::ifstream in(path, std::ios::binary);
     std::ostringstream input;
-    input << in.rdbuf();
+    if (in) {
+        input << in.rdbuf();
+    } else {
+        input << default_config_json();
+    }
     JsonValue root;
     if (!parse_json(input.str(), root, error) || !root.is_object()) {
         if (error.empty()) {
@@ -334,20 +455,7 @@ bool update_policy_config(const std::string& path, const PolicyConfig& policy, s
     policy_json.object_value["deny_uids"] = uid_array(policy.deny_uids);
     root.object_value["policy"] = policy_json;
 
-    if (!ensure_parent_dir(path, error)) {
-        return false;
-    }
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        error = "open " + path + ": " + std::strerror(errno);
-        return false;
-    }
-    out << stringify_json(root, 2) << "\n";
-    if (!out.good()) {
-        error = "write " + path + ": " + std::strerror(errno);
-        return false;
-    }
-    return true;
+    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
 }
 
 } // namespace kagami

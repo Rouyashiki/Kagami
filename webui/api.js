@@ -83,6 +83,12 @@ function shellEscape(value) {
   return String(value ?? "").replace(/'/g, "'\\''");
 }
 
+function configPersistedError(message) {
+  const error = new Error(message);
+  error.configPersisted = true;
+  return error;
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -250,11 +256,11 @@ const mockState = {
 
 const mockApi = {
   async loadConfig() {
-    return clone(mockState.config);
+    return { ...clone(mockState.config), __lkmAutoloadPresent: true };
   },
 
-  async saveConfig(config) {
-    mockState.config = { ...clone(DEFAULT_CONFIG), ...normalizeConfig(config) };
+  async saveConfig(updates) {
+    mockState.config = { ...mockState.config, ...clone(updates) };
   },
 
   async scanModules() {
@@ -328,7 +334,7 @@ const mockApi = {
   },
 
   async getLkmStatus() {
-    return clone(mockState.lkmStatus);
+    return { valid: true, ...clone(mockState.lkmStatus) };
   },
 
   async lkmSetKmi(kmi) {
@@ -357,59 +363,51 @@ const realApi = {
     const result = await exec(`${PATHS.BINARY} config show`);
     const out = apiOutput(result);
     if (result.errno === 0 && out) {
-      const normalized = normalizeConfig(JSON.parse(out));
-      return { ...clone(DEFAULT_CONFIG), ...normalized };
+      const raw = JSON.parse(out);
+      const normalized = normalizeConfig(raw);
+      return {
+        ...clone(DEFAULT_CONFIG),
+        ...normalized,
+        __lkmAutoloadPresent: Object.prototype.hasOwnProperty.call(raw, "lkm_autoload"),
+      };
     }
-    return clone(DEFAULT_CONFIG);
+    return { ...clone(DEFAULT_CONFIG), __lkmAutoloadPresent: false };
   },
 
-  async saveConfig(config) {
-    const configToSave = {
-      moduledir: config.moduledir,
-      tempdir: config.tempdir,
-      mountsource: config.mountsource,
-      debug: config.debug,
-      verbose: config.verbose,
-      lkm_autoload: config.lkm_autoload === true,
-      fs_type: config.fs_type,
-      work_dir: config.work_dir,
-      mirror_dir: config.mirror_dir,
-      mirror_img: config.mirror_img,
-      mirror_img_size_mb: config.mirror_img_size_mb,
-      overlay_writable: config.overlay_writable,
-      disable_umount: config.disable_umount,
-      enable_nuke: config.enable_nuke,
-      enable_kernel_debug: config.enable_kernel_debug,
-      enable_stealth: config.enable_stealth,
-      kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
-      enable_overlay_xattr_hide: config.enable_overlay_xattr_hide === true,
-      enable_mount_hide: config.enable_mount_hide === true,
-      enable_maps_spoof: config.enable_maps_spoof === true,
-      enable_statfs_spoof: config.enable_statfs_spoof === true,
-      enable_selinux_fix: config.enable_selinux_fix === true,
-      kasumi_enabled: config.kasumi_enabled,
-      overlayfs_enabled: config.overlayfs_enabled,
-      magic_mount_enabled: config.magic_mount_enabled,
-      mount_backend: config.mount_backend,
-      policy: clone(config.policy || DEFAULT_CONFIG.policy),
-      cmdline_value: config.cmdline_value,
-      partitions: config.partitions,
-    };
+  async saveConfig(updates) {
+    const configUpdates = clone(updates || {});
+    delete configUpdates.lkm_autoload;
+    delete configUpdates.__lkmAutoloadPresent;
+    if (Object.keys(configUpdates).some((key) => key.startsWith("enable_") && key !== "enable_nuke")) {
+      configUpdates.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
+    }
+    const payload = shellEscape(JSON.stringify(configUpdates));
+    const persist = await exec(`${PATHS.BINARY} config merge-json '${payload}'`);
+    if (persist.errno !== 0) {
+      throw new Error(apiOutput(persist) || "Failed to save configuration");
+    }
 
-    await writeJsonFile(PATHS.CONFIG, configToSave);
-
-    if (config.kasumi_available) {
+    const systemResult = await exec(`${PATHS.BINARY} api system`);
+    const systemOutput = apiOutput(systemResult);
+    if (systemResult.errno !== 0 || !systemOutput) {
+      throw configPersistedError(
+        apiOutput(systemResult) || "Configuration saved, but runtime state could not be queried",
+      );
+    }
+    let system;
+    try {
+      system = JSON.parse(systemOutput);
+    } catch (_error) {
+      throw configPersistedError("Configuration saved, but the runtime status response was invalid");
+    }
+    if (system.kasumi_available === true) {
       const result = await exec(`${PATHS.BINARY} config apply`);
       if (result.errno !== 0) {
         await exec(`${PATHS.BINARY} kasumi disable`);
-        throw new Error(apiOutput(result) || "Failed to apply Kasumi configuration");
+        throw configPersistedError(
+          apiOutput(result) || "Configuration saved, but Kasumi rejected the runtime apply",
+        );
       }
-    }
-
-    if (config.cmdline_value) {
-      await exec(`${PATHS.BINARY} debug set-cmdline '${shellEscape(config.cmdline_value)}'`);
-    } else {
-      await exec(`${PATHS.BINARY} debug clear-cmdline`);
     }
   },
 
@@ -684,10 +682,21 @@ const realApi = {
   },
 
   async getLkmStatus() {
-    const data = await execJson(`${PATHS.BINARY} api lkm`, { loaded: false, autoload: true, kmi_override: "" });
+    const result = await exec(`${PATHS.BINARY} api lkm`);
+    const out = apiOutput(result);
+    if (result.errno !== 0 || !out) {
+      return { valid: false, loaded: false, autoload: false, kmi_override: "" };
+    }
+    let data;
+    try {
+      data = JSON.parse(out);
+    } catch (_error) {
+      return { valid: false, loaded: false, autoload: false, kmi_override: "" };
+    }
     return {
+      valid: true,
       loaded: data.loaded === true,
-      autoload: data.autoload !== false,
+      autoload: data.autoload === true,
       kmi_override: data.kmi_override || "",
     };
   },

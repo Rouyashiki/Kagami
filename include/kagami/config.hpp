@@ -54,6 +54,7 @@ struct Config {
     bool enable_maps_spoof = false;
     bool enable_statfs_spoof = false;
     bool enable_selinux_fix = false;
+    std::string cmdline_value;
     bool overlayfs_enabled = true;
     bool magic_mount_enabled = true;
     // Global backend override: "auto" uses per-module modes (module_mode.json:
@@ -69,6 +70,8 @@ std::string default_config_json();
 bool write_default_config(const std::string& path, std::string& error);
 bool parse_config_json(const std::string& json, Config& config, std::string& error);
 bool read_config_file(const std::string& path, Config& config, std::string& error);
+bool merge_config_json(const std::string& path, const std::string& updates,
+                       std::string& error);
 bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error);
 bool update_policy_config(const std::string& path, const PolicyConfig& policy, std::string& error);
 
