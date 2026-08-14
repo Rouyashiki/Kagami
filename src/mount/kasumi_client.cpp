@@ -21,6 +21,16 @@
 
 namespace kagami::kasumi {
 
+static_assert(static_cast<std::uint32_t>(QuiesceState::Active) ==
+              KSM_QUIESCE_STATE_ACTIVE);
+static_assert(static_cast<std::uint32_t>(QuiesceState::Draining) ==
+              KSM_QUIESCE_STATE_DRAINING);
+static_assert(static_cast<std::uint32_t>(QuiesceState::Ready) ==
+              KSM_QUIESCE_STATE_READY);
+static_assert(static_cast<std::uint32_t>(QuiesceState::Failed) ==
+              KSM_QUIESCE_STATE_FAILED);
+static_assert(sizeof(kasumi_quiesce_arg) == 64);
+
 std::string default_mirror_path() {
     return "/dev/kagami_mirror";
 }
@@ -221,12 +231,21 @@ std::string hooks() {
     return std::string(buffer.data());
 }
 
-int features() {
+FeatureCapabilities feature_capabilities() {
+    FeatureCapabilities capabilities;
     int bitmask = 0;
     if (execute(KSM_IOC_GET_FEATURES, &bitmask) != 0) {
-        return 0;
+        capabilities.last_errno = errno != 0 ? errno : EIO;
+        return capabilities;
     }
-    return bitmask;
+    capabilities.ok = true;
+    capabilities.bitmask = bitmask;
+    capabilities.quiesce = (bitmask & KSM_FEATURE_QUIESCE) != 0;
+    return capabilities;
+}
+
+int features() {
+    return feature_capabilities().bitmask;
 }
 
 std::vector<std::string> feature_names(int bitmask) {
@@ -249,7 +268,42 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("fake_mountinfo");
     if (bitmask & KSM_FEATURE_SELINUX_FIX)
         names.emplace_back("selinux_fix");
+    if (bitmask & KSM_FEATURE_QUIESCE)
+        names.emplace_back("quiesce");
     return names;
+}
+
+QuiesceSnapshot prepare_unload() {
+    QuiesceSnapshot snapshot;
+    kasumi_quiesce_arg arg = {};
+    arg.version = KSM_QUIESCE_API_VERSION;
+    arg.size = static_cast<__u32>(sizeof(arg));
+
+    const int rc = execute(KSM_IOC_PREPARE_UNLOAD, &arg);
+    snapshot.version = arg.version;
+    snapshot.size = arg.size;
+    snapshot.flags = arg.flags;
+    snapshot.state = static_cast<QuiesceState>(arg.state);
+    snapshot.busy_mask = arg.busy_mask;
+    snapshot.pending_getfd = arg.pending_getfd;
+    snapshot.pending_marker = arg.pending_marker;
+    snapshot.pending_redirect = arg.pending_redirect;
+    snapshot.live_proc_proxy = arg.live_proc_proxy;
+    snapshot.live_file_view = arg.live_file_view;
+    snapshot.control_files = arg.control_files;
+    snapshot.module_refs = arg.module_refs;
+    snapshot.err = arg.err;
+    if (rc != 0) {
+        snapshot.last_errno = errno != 0 ? errno : EIO;
+        return snapshot;
+    }
+    if (arg.err != 0) {
+        snapshot.last_errno = arg.err < 0 ? -arg.err : arg.err;
+        errno = snapshot.last_errno;
+        return snapshot;
+    }
+    snapshot.ok = true;
+    return snapshot;
 }
 
 std::vector<std::string> active_modules_from_rules(const std::string& rules) {

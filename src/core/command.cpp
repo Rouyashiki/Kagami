@@ -427,6 +427,33 @@ static int print_features_json(int bitmask) {
     return 0;
 }
 
+static void print_lkm_unload_status_json() {
+    const auto unload = lkm::unload_status();
+    const auto& quiesce = unload.quiesce;
+    std::cout << "{"
+              << "\"attempted\":" << (unload.attempted ? "true" : "false") << ","
+              << "\"quiesce_supported\":"
+              << (unload.quiesce_supported ? "true" : "false") << ","
+              << "\"capability_errno\":" << unload.capability_errno << ","
+              << "\"delete_errno\":" << unload.delete_errno << ","
+              << "\"quiesce\":{"
+              << "\"ok\":" << (quiesce.ok ? "true" : "false") << ","
+              << "\"errno\":" << quiesce.last_errno << ","
+              << "\"version\":" << quiesce.version << ","
+              << "\"size\":" << quiesce.size << ","
+              << "\"flags\":" << quiesce.flags << ","
+              << "\"state\":" << static_cast<std::uint32_t>(quiesce.state) << ","
+              << "\"busy_mask\":" << quiesce.busy_mask << ","
+              << "\"pending_getfd\":" << quiesce.pending_getfd << ","
+              << "\"pending_marker\":" << quiesce.pending_marker << ","
+              << "\"pending_redirect\":" << quiesce.pending_redirect << ","
+              << "\"live_proc_proxy\":" << quiesce.live_proc_proxy << ","
+              << "\"live_file_view\":" << quiesce.live_file_view << ","
+              << "\"control_files\":" << quiesce.control_files << ","
+              << "\"module_refs\":" << quiesce.module_refs << ","
+              << "\"err\":" << quiesce.err << "}}";
+}
+
 static std::string policy_owner_name(kasumi::PolicyOwner owner) {
     switch (owner) {
     case kasumi::PolicyOwner::Auto:
@@ -993,7 +1020,10 @@ static int handle_api(const std::vector<std::string>& args) {
                   << ",\"kmi_override\":" << json_quote(lkm::get_kmi_override())
                   << ",\"detected_kmi\":" << json_quote(lkm::current_kmi())
                   << ",\"asset\":" << json_quote(lkm::find_asset())
-                  << ",\"last_error\":" << json_quote(lkm::last_error()) << "}\n";
+                  << ",\"last_error\":" << json_quote(lkm::last_error())
+                  << ",\"unload\":";
+        print_lkm_unload_status_json();
+        std::cout << "}\n";
         return 0;
     }
     if (sub == "kasumi") {
@@ -1593,7 +1623,10 @@ static int handle_lkm(const std::vector<std::string>& args) {
                   << ",\"kmi_override\":" << json_quote(lkm::get_kmi_override())
                   << ",\"detected_kmi\":" << json_quote(lkm::current_kmi())
                   << ",\"asset\":" << json_quote(lkm::find_asset())
-                  << ",\"last_error\":" << json_quote(lkm::last_error()) << "}\n";
+                  << ",\"last_error\":" << json_quote(lkm::last_error())
+                  << ",\"unload\":";
+        print_lkm_unload_status_json();
+        std::cout << "}\n";
         return 0;
     }
     std::cerr << "usage: kagamid lkm load|unload|force-unload|status|autoload|set-autoload|set-kmi|clear-kmi\n";

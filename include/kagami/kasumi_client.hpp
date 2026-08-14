@@ -23,6 +23,38 @@ struct VersionInfo {
     Status status = Status::NotPresent;
 };
 
+struct FeatureCapabilities {
+    bool ok = false;
+    int last_errno = 0;
+    int bitmask = 0;
+    bool quiesce = false;
+};
+
+enum class QuiesceState : std::uint32_t {
+    Active = 0,
+    Draining = 1,
+    Ready = 2,
+    Failed = 3,
+};
+
+struct QuiesceSnapshot {
+    bool ok = false;
+    int last_errno = 0;
+    std::uint32_t version = 0;
+    std::uint32_t size = 0;
+    std::uint32_t flags = 0;
+    QuiesceState state = QuiesceState::Active;
+    std::uint32_t busy_mask = 0;
+    std::uint32_t pending_getfd = 0;
+    std::uint32_t pending_marker = 0;
+    std::uint32_t pending_redirect = 0;
+    std::uint32_t live_proc_proxy = 0;
+    std::uint32_t live_file_view = 0;
+    std::uint32_t control_files = 0;
+    std::uint32_t module_refs = 0;
+    int err = 0;
+};
+
 enum class PolicyOwner : std::uint32_t {
     Auto = 0,
     KernelSU = 1,
@@ -68,9 +100,11 @@ void set_connection_persistent(bool persistent);
 void release_connection();
 std::string active_rules();
 std::string hooks();
+FeatureCapabilities feature_capabilities();
 int features();
 std::vector<std::string> feature_names(int bitmask);
 std::vector<std::string> active_modules_from_rules(const std::string& rules);
+QuiesceSnapshot prepare_unload();
 
 bool set_enabled(bool enable);
 bool set_debug(bool enable);

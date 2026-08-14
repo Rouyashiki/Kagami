@@ -1,8 +1,18 @@
 #pragma once
 
+#include "kagami/kasumi_client.hpp"
+
 #include <string>
 
 namespace kagami::lkm {
+
+struct UnloadStatus {
+    bool attempted = false;
+    bool quiesce_supported = false;
+    int capability_errno = 0;
+    kasumi::QuiesceSnapshot quiesce;
+    int delete_errno = 0;
+};
 
 // Kasumi LKM lifecycle for a standalone metamodule. Assets are looked up from
 // Kagami's module/data directories instead of ksud's embedded asset table.
@@ -20,5 +30,6 @@ std::string get_kmi_override();
 std::string current_kmi();
 std::string find_asset(const std::string& kmi = "");
 std::string last_error();
+UnloadStatus unload_status();
 
 } // namespace kagami::lkm

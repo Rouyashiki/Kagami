@@ -36,6 +36,8 @@ namespace fs = std::filesystem;
 namespace {
 
 std::string g_last_error;
+UnloadStatus g_unload_status;
+std::string g_ready_unload_instance;
 
 constexpr const char* kModuleName = "kasumi_lkm";
 
@@ -222,12 +224,15 @@ bool finit_module_load(const std::string& path, const char* params) {
     return false;
 }
 
-bool delete_module_nonblocking() {
+int delete_module_nonblocking() {
+    errno = 0;
     if (syscall(SYS_delete_module, kModuleName, O_NONBLOCK) == 0) {
-        return true;
+        return 0;
     }
-    set_error(std::string("delete_module ") + kModuleName + ": " + std::strerror(errno));
-    return false;
+    const int saved_errno = errno != 0 ? errno : EIO;
+    set_error(std::string("delete_module ") + kModuleName + ": " +
+              std::strerror(saved_errno));
+    return saved_errno;
 }
 
 #endif
@@ -273,6 +278,8 @@ bool retain_owned_connection() {
 }
 
 std::string last_error() { return g_last_error; }
+
+UnloadStatus unload_status() { return g_unload_status; }
 
 std::string get_kmi_override() { return read_first_line(kmi_override_file()); }
 
@@ -413,6 +420,8 @@ bool load() {
         kasumi::set_connection_persistent(false);
         return false;
     }
+    g_unload_status = {};
+    g_ready_unload_instance.clear();
     return true;
 #else
     set_error("Kasumi LKM loading requires Android/Linux");
@@ -426,7 +435,12 @@ bool autoload() {
 
 bool unload(bool require_ownership) {
     g_last_error.clear();
+    const UnloadStatus previous_unload = g_unload_status;
+    const std::string previous_ready_instance = g_ready_unload_instance;
+    g_unload_status = {};
+    g_unload_status.attempted = true;
     if (!is_loaded()) {
+        g_ready_unload_instance.clear();
         kasumi::set_connection_persistent(false);
         std::error_code stale_ec;
         fs::remove(ownership_file(), stale_ec);
@@ -438,30 +452,130 @@ bool unload(bool require_ownership) {
         return true;
     }
 #if defined(__linux__)
+    const std::string current_instance = module_instance_token();
+    const bool retry_ready_delete =
+        !previous_ready_instance.empty() &&
+        previous_ready_instance == current_instance &&
+        previous_unload.attempted && previous_unload.quiesce_supported &&
+        previous_unload.quiesce.ok &&
+        previous_unload.quiesce.state == kasumi::QuiesceState::Ready;
+    if (!retry_ready_delete) {
+        g_ready_unload_instance.clear();
+    }
+
     if (require_ownership) {
         if (!owns_loaded_module()) {
             set_error("refusing to unload a Kasumi LKM not loaded by Kagami");
             return false;
         }
     }
-    (void)kasumi::set_enabled(false);
-    (void)kasumi::clear_rules();
-    kasumi::set_connection_persistent(false);
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    if (retry_ready_delete) {
+        // PREPARE is terminal and GET_FD has already stopped. Preserve the
+        // READY snapshot and retry only delete_module for this exact instance.
+        g_unload_status.quiesce_supported = true;
+        g_unload_status.quiesce = previous_unload.quiesce;
+        kasumi::set_connection_persistent(false);
+    } else {
+        kasumi::set_connection_persistent(true);
+        const auto capabilities = kasumi::feature_capabilities();
+        if (!capabilities.ok) {
+            g_unload_status.capability_errno = capabilities.last_errno;
+            const int saved_errno = capabilities.last_errno != 0
+                                        ? capabilities.last_errno
+                                        : EIO;
+            set_error(std::string("query Kasumi unload capability: ") +
+                      std::strerror(saved_errno));
+            errno = saved_errno;
+            return false;
+        }
+        if (require_ownership && !owns_loaded_module()) {
+            kasumi::set_connection_persistent(false);
+            set_error("loaded kasumi_lkm instance changed before unload capability was acquired");
+            errno = ESTALE;
+            return false;
+        }
+
+        g_unload_status.quiesce_supported = capabilities.quiesce;
+        if (capabilities.quiesce) {
+            constexpr int kQuiescePollAttempts = 30;
+            bool ready = false;
+            for (int attempt = 0; attempt < kQuiescePollAttempts; ++attempt) {
+                g_unload_status.quiesce = kasumi::prepare_unload();
+                const auto& snapshot = g_unload_status.quiesce;
+                if (!snapshot.ok) {
+                    const int saved_errno = snapshot.last_errno != 0
+                                                ? snapshot.last_errno
+                                                : EIO;
+                    std::ostringstream message;
+                    message << "prepare Kasumi unload: " << std::strerror(saved_errno)
+                            << " (state=" << static_cast<std::uint32_t>(snapshot.state)
+                            << ", err=" << snapshot.err << ")";
+                    set_error(message.str());
+                    errno = saved_errno;
+                    return false;
+                }
+                if (snapshot.state == kasumi::QuiesceState::Ready) {
+                    ready = true;
+                    break;
+                }
+                if (snapshot.state != kasumi::QuiesceState::Active &&
+                    snapshot.state != kasumi::QuiesceState::Draining) {
+                    set_error("prepare Kasumi unload returned an unknown state");
+                    errno = EPROTO;
+                    return false;
+                }
+                if (attempt + 1 < kQuiescePollAttempts) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            if (!ready) {
+                const auto& snapshot = g_unload_status.quiesce;
+                std::ostringstream message;
+                message << "Kasumi unload quiesce timed out (state="
+                        << static_cast<std::uint32_t>(snapshot.state)
+                        << ", busy_mask=0x" << std::hex << snapshot.busy_mask
+                        << std::dec << ", control_files=" << snapshot.control_files
+                        << ", module_refs=" << snapshot.module_refs << ")";
+                set_error(message.str());
+                errno = EBUSY;
+                return false;
+            }
+
+            // READY proves callback teardown and leaves one control-file module
+            // reference. delete_module remains authoritative if an fd alias keeps
+            // that same file alive after this descriptor is closed.
+            g_ready_unload_instance = module_instance_token();
+            kasumi::set_connection_persistent(false);
+        } else {
+            // API 17 without KSM_FEATURE_QUIESCE keeps the legacy best-effort path.
+            (void)kasumi::set_enabled(false);
+            (void)kasumi::clear_rules();
+            kasumi::set_connection_persistent(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        }
+    }
+
     for (int attempt = 0; attempt < 5; ++attempt) {
-        if (delete_module_nonblocking()) {
+        const int delete_errno = delete_module_nonblocking();
+        g_unload_status.delete_errno = delete_errno;
+        if (delete_errno == 0) {
+            g_ready_unload_instance.clear();
             std::error_code ec;
             fs::remove(ownership_file(), ec);
+            g_last_error.clear();
             return true;
         }
-        if (errno != EAGAIN && errno != EBUSY) {
+        if (delete_errno != EAGAIN && delete_errno != EBUSY) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
     }
-    if (require_ownership && owns_loaded_module()) {
+    const int delete_errno = g_unload_status.delete_errno;
+    if (!g_unload_status.quiesce_supported && require_ownership && owns_loaded_module()) {
         (void)retain_owned_connection();
     }
+    errno = delete_errno;
     return false;
 #else
     set_error("Kasumi LKM unloading requires Android/Linux");
