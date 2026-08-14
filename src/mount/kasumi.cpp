@@ -410,7 +410,12 @@ bool apply_feature_config(const Config& config, std::string& error) {
 
     apply(::kagami::kasumi::set_debug(config.enable_kernel_debug), "kernel debug");
     apply(::kagami::kasumi::set_stealth(config.enable_stealth), "stealth");
-    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide), "mount hide");
+    const auto mount_hide_mode = config.mount_hide_mode == "aggressive"
+        ? ::kagami::kasumi::MountHideMode::Aggressive
+        : ::kagami::kasumi::MountHideMode::Normal;
+    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide,
+                                            mount_hide_mode),
+          "mount hide");
     apply(::kagami::kasumi::set_maps_spoof(config.enable_maps_spoof), "maps spoof");
     apply(::kagami::kasumi::set_statfs_spoof(config.enable_statfs_spoof),
           "statfs spoof");

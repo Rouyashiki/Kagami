@@ -131,9 +131,10 @@ std::string default_config_json() {
   "enable_nuke": true,
   "enable_kernel_debug": false,
   "enable_stealth": true,
-  "kasumi_feature_config_version": 2,
+  "kasumi_feature_config_version": 3,
   "enable_overlay_xattr_hide": false,
   "enable_mount_hide": false,
+  "mount_hide_mode": "normal",
   "enable_maps_spoof": false,
   "enable_statfs_spoof": false,
   "enable_selinux_fix": false,
@@ -252,6 +253,12 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
             &root, "enable_overlay_xattr_hide", config.enable_overlay_xattr_hide);
         config.enable_mount_hide =
             json_bool_or(&root, "enable_mount_hide", config.enable_mount_hide);
+        config.mount_hide_mode =
+            json_string_or(&root, "mount_hide_mode", config.mount_hide_mode);
+        if (config.mount_hide_mode != "normal" &&
+            config.mount_hide_mode != "aggressive") {
+            config.mount_hide_mode = "normal";
+        }
         config.enable_maps_spoof =
             json_bool_or(&root, "enable_maps_spoof", config.enable_maps_spoof);
         config.enable_statfs_spoof =
@@ -261,7 +268,7 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     } else {
         // Legacy enable_hidexattr drove all four kernel projections, overlay
         // xattr hiding, and implicitly enabled stealth. Preserve that state in
-        // memory; the WebUI writes only the split v2 fields on the next save.
+        // memory; the WebUI writes only the split v3 fields on the next save.
         const bool legacy = json_bool_or(&root, "enable_hidexattr", false);
         config.enable_overlay_xattr_hide = legacy;
         config.enable_mount_hide = legacy;
@@ -338,6 +345,7 @@ bool merge_config_json(const std::string& path, const std::string& updates,
         return json_int_or(&value, "kasumi_feature_config_version", 0) >= 2 ||
                value.find("enable_overlay_xattr_hide") != nullptr ||
                value.find("enable_mount_hide") != nullptr ||
+               value.find("mount_hide_mode") != nullptr ||
                value.find("enable_maps_spoof") != nullptr ||
                value.find("enable_statfs_spoof") != nullptr;
     };
@@ -350,12 +358,16 @@ bool merge_config_json(const std::string& path, const std::string& updates,
         };
         JsonValue version;
         version.type = JsonValue::Type::Number;
-        version.number_value = 2;
+        version.number_value = 3;
 
         const bool legacy = json_bool_or(&root, "enable_hidexattr", false);
         root.object_value["kasumi_feature_config_version"] = version;
         root.object_value["enable_overlay_xattr_hide"] = bool_value(legacy);
         root.object_value["enable_mount_hide"] = bool_value(legacy);
+        JsonValue mount_hide_mode;
+        mount_hide_mode.type = JsonValue::Type::String;
+        mount_hide_mode.string_value = "normal";
+        root.object_value["mount_hide_mode"] = std::move(mount_hide_mode);
         root.object_value["enable_maps_spoof"] = bool_value(legacy);
         root.object_value["enable_statfs_spoof"] = bool_value(legacy);
         root.object_value["enable_selinux_fix"] = bool_value(
@@ -369,6 +381,12 @@ bool merge_config_json(const std::string& path, const std::string& updates,
             continue;
         }
         root.object_value[key] = value;
+    }
+    if (patch.find("mount_hide_mode") != nullptr) {
+        JsonValue version;
+        version.type = JsonValue::Type::Number;
+        version.number_value = 3;
+        root.object_value["kasumi_feature_config_version"] = std::move(version);
     }
     return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
 }

@@ -41,6 +41,7 @@ const CONFIG_FIELD_NAMES = new Set([
   "enable_stealth",
   "enable_overlay_xattr_hide",
   "enable_mount_hide",
+  "mount_hide_mode",
   "enable_maps_spoof",
   "enable_statfs_spoof",
   "enable_selinux_fix",
@@ -130,6 +131,7 @@ function getPersistedConfig(config) {
     kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
     enable_overlay_xattr_hide: Boolean(config.enable_overlay_xattr_hide),
     enable_mount_hide: Boolean(config.enable_mount_hide),
+    mount_hide_mode: config.mount_hide_mode === "aggressive" ? "aggressive" : "normal",
     enable_maps_spoof: Boolean(config.enable_maps_spoof),
     enable_statfs_spoof: Boolean(config.enable_statfs_spoof),
     enable_selinux_fix: Boolean(config.enable_selinux_fix),
@@ -710,6 +712,20 @@ function renderConfigPage() {
             ${renderSwitchCard("enable_maps_spoof", tr("config.enableMapsSpoof", "Maps spoof"), tr("config.enableMapsSpoofDesc", ""), config.enable_maps_spoof)}
             ${renderSwitchCard("enable_statfs_spoof", tr("config.enableStatfsSpoof", "Statfs spoof"), tr("config.enableStatfsSpoofDesc", ""), config.enable_statfs_spoof)}
             ${renderSwitchCard("enable_selinux_fix", tr("config.enableSelinuxFix", "SELinux fix"), tr("config.enableSelinuxFixDesc", ""), config.enable_selinux_fix)}
+          </div>
+          <div class="field-grid" style="margin-top:16px;">
+            <div class="field">
+              <label for="cfg-mount-hide-mode">${escapeHtml(tr("config.mountHideMode", "Mount hide level"))}</label>
+              <select id="cfg-mount-hide-mode" name="mount_hide_mode" ${config.enable_mount_hide ? "" : "disabled"}>
+                <option value="normal" ${config.mount_hide_mode === "aggressive" ? "" : "selected"}>${escapeHtml(tr("config.mountHideModeNormal", "Normal"))}</option>
+                <option value="aggressive" ${config.mount_hide_mode === "aggressive" ? "selected" : ""}>${escapeHtml(tr("config.mountHideModeAggressive", "Aggressive"))}</option>
+              </select>
+              <small>${escapeHtml(
+                config.mount_hide_mode === "aggressive"
+                  ? tr("config.mountHideModeAggressiveDesc", "Also project zygote_next shared propagation and mount namespace links")
+                  : tr("config.mountHideModeNormalDesc", "Hide root-owned mounts while preserving the real zygote_next shared view"),
+              )}</small>
+            </div>
           </div>
         </section>
 
@@ -1591,6 +1607,9 @@ function collectConfigFromDom() {
       state.config.enable_overlay_xattr_hide,
     ),
     enable_mount_hide: checked("enable_mount_hide", state.config.enable_mount_hide),
+    mount_hide_mode: value("mount_hide_mode", state.config.mount_hide_mode) === "aggressive"
+      ? "aggressive"
+      : "normal",
     enable_maps_spoof: checked("enable_maps_spoof", state.config.enable_maps_spoof),
     enable_statfs_spoof: checked("enable_statfs_spoof", state.config.enable_statfs_spoof),
     enable_selinux_fix: checked("enable_selinux_fix", state.config.enable_selinux_fix),

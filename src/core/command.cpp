@@ -70,7 +70,7 @@ static void print_usage() {
         << "  kagamid api system|storage|lkm|kasumi|features|hooks|policy|backends|meta\n"
         << "  kagamid module list|add|delete|set-mode|add-rule|remove-rule|hot-mount|hot-unmount|check-conflicts|mount-all|unmount|normalize\n"
         << "  kagamid recovery status|boot-completed|reset\n"
-        << "  kagamid kasumi version|list|enable|disable|clear|set-mirror|fix-mounts|hide-overlay-xattrs|maps|policy\n"
+        << "  kagamid kasumi version|list|enable|disable|clear|set-mirror|fix-mounts|hide-overlay-xattrs|mount-hide off|normal|aggressive|maps|policy\n"
         << "  kagamid lkm load|unload|status|autoload|set-autoload|set-kmi|clear-kmi\n";
 }
 
@@ -1602,10 +1602,19 @@ static int handle_kasumi(const std::vector<std::string>& args) {
     }
     if (sub == "mount-hide" || sub == "maps-spoof" || sub == "statfs-spoof" ||
         sub == "selinux-fix") {
-        const bool on = arg_or_default(args, 2, "off") == "on";
+        const std::string value = arg_or_default(args, 2, "off");
+        const bool on = value == "on" || value == "normal" ||
+                        value == "aggressive";
         bool ok = false;
         if (sub == "mount-hide") {
-            ok = kasumi::set_mount_hide(on);
+            if (value != "off" && value != "on" && value != "normal" &&
+                value != "aggressive") {
+                std::cerr << "usage: kagamid kasumi mount-hide off|normal|aggressive\n";
+                return 1;
+            }
+            ok = kasumi::set_mount_hide(
+                on, value == "aggressive" ? kasumi::MountHideMode::Aggressive
+                                            : kasumi::MountHideMode::Normal);
         } else if (sub == "maps-spoof") {
             ok = kasumi::set_maps_spoof(on);
         } else if (sub == "statfs-spoof") {

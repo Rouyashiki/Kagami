@@ -29,6 +29,10 @@ static_assert(static_cast<std::uint32_t>(QuiesceState::Ready) ==
               KSM_QUIESCE_STATE_READY);
 static_assert(static_cast<std::uint32_t>(QuiesceState::Failed) ==
               KSM_QUIESCE_STATE_FAILED);
+static_assert(static_cast<std::uint32_t>(MountHideMode::Normal) ==
+              KSM_MOUNT_HIDE_MODE_NORMAL);
+static_assert(static_cast<std::uint32_t>(MountHideMode::Aggressive) ==
+              KSM_MOUNT_HIDE_MODE_AGGRESSIVE);
 static_assert(sizeof(kasumi_quiesce_arg) == 64);
 
 std::string default_mirror_path() {
@@ -266,6 +270,8 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("selinux_bypass");
     if (bitmask & KSM_FEATURE_FAKE_MOUNTINFO)
         names.emplace_back("fake_mountinfo");
+    if (bitmask & KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE)
+        names.emplace_back("mount_hide_aggressive");
     if (bitmask & KSM_FEATURE_SELINUX_FIX)
         names.emplace_back("selinux_fix");
     if (bitmask & KSM_FEATURE_QUIESCE)
@@ -352,7 +358,20 @@ bool hide_overlay_xattrs(const std::string& path) {
     return execute(KSM_IOC_HIDE_OVERLAY_XATTRS, &arg) == 0;
 }
 
-bool set_mount_hide(bool enable) {
+bool set_mount_hide(bool enable, MountHideMode mode) {
+    const int bitmask = features();
+    const bool mode_supported =
+        (bitmask & KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE) != 0;
+
+    if (enable && mode == MountHideMode::Aggressive && !mode_supported) {
+        errno = EOPNOTSUPP;
+        return false;
+    }
+    if (mode_supported) {
+        int raw_mode = static_cast<int>(mode);
+        if (execute(KSM_IOC_SET_MOUNT_HIDE_MODE, &raw_mode) != 0)
+            return false;
+    }
     kasumi_mount_hide_arg arg = {};
     arg.enable = enable ? 1 : 0;
     return ioctl_arg_ok(execute(KSM_IOC_SET_MOUNT_HIDE, &arg), arg.err);

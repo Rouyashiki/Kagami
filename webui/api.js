@@ -8,7 +8,7 @@ export const PATHS = {
   DEFAULT_LOG: "/data/adb/kagami/daemon.log",
 };
 
-export const KASUMI_FEATURE_CONFIG_VERSION = 2;
+export const KASUMI_FEATURE_CONFIG_VERSION = 3;
 
 export const DEFAULT_CONFIG = {
   moduledir: "/data/adb/modules",
@@ -31,6 +31,7 @@ export const DEFAULT_CONFIG = {
   kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
   enable_overlay_xattr_hide: false,
   enable_mount_hide: false,
+  mount_hide_mode: "normal",
   enable_maps_spoof: false,
   enable_statfs_spoof: false,
   enable_selinux_fix: false,
@@ -111,6 +112,7 @@ function normalizeConfig(rawConfig) {
 
   if (hasSplitFeatures) {
     raw.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
+    raw.mount_hide_mode = raw.mount_hide_mode === "aggressive" ? "aggressive" : "normal";
     delete raw.enable_hidexattr;
     return raw;
   }
@@ -121,6 +123,7 @@ function normalizeConfig(rawConfig) {
     kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
     enable_overlay_xattr_hide: legacy,
     enable_mount_hide: legacy,
+    mount_hide_mode: "normal",
     enable_maps_spoof: legacy,
     enable_statfs_spoof: legacy,
     enable_selinux_fix: legacy || raw.enable_selinux_fix === true,
@@ -378,7 +381,9 @@ const realApi = {
     const configUpdates = clone(updates || {});
     delete configUpdates.lkm_autoload;
     delete configUpdates.__lkmAutoloadPresent;
-    if (Object.keys(configUpdates).some((key) => key.startsWith("enable_") && key !== "enable_nuke")) {
+    if (Object.keys(configUpdates).some(
+      (key) => (key.startsWith("enable_") && key !== "enable_nuke") || key === "mount_hide_mode",
+    )) {
       configUpdates.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
     }
     const payload = shellEscape(JSON.stringify(configUpdates));

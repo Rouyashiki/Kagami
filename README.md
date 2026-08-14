@@ -47,3 +47,9 @@ while API 17 is integrated with the hook-debt fixes. The accepted filename forma
 full KMI matrix, and licensing details are in `module/kasumi/README.md`. If no
 compatible asset is installed, boot continues with the OverlayFS/Magic Mount
 fallback.
+
+`mount_hide_mode` selects the Kasumi mount-hide level. `normal` removes
+root-owned mounts while preserving the real zygote_next shared namespace view;
+`aggressive` also projects shared propagation and `/proc/*/ns/mnt` links. The
+default is `normal`, and the aggressive setting requires a Kasumi module that
+advertises `KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE`.
