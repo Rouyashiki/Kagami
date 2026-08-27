@@ -20,7 +20,7 @@ export const DEFAULT_CONFIG = {
   lkm_autoload: false,
   fs_type: "auto",
   work_dir: "/dev/kagami",
-  mirror_dir: "/dev/kagami_mirror",
+  mirror_dir: "",
   mirror_img: "/data/adb/kagami/mirror.img",
   mirror_img_size_mb: 2048,
   overlay_writable: false,
@@ -203,7 +203,7 @@ const mockState = {
   systemInfo: {
     kernel: "6.1.89-android14-gki",
     selinux: "Permissive",
-    mountBase: "/dev/kagami_mirror",
+    mountBase: "/mnt/ab12cd34ef567890",
     kasumiAvailable: true,
     kasumiStatus: 0,
     kasumiModules: ["playintegrityfix"],
@@ -565,7 +565,7 @@ const realApi = {
     return {
       kernel,
       selinux,
-      mountBase: systemData.mount_base || mountData.mount_base || "/dev/kagami_mirror",
+      mountBase: systemData.mount_base || mountData.mount_base || "",
       kasumiAvailable: systemData.kasumi_available,
       kasumiStatus: systemData.kasumi_status,
       kasumiModules: mountData.active_modules || [],

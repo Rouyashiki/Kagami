@@ -68,7 +68,7 @@ const state = {
   config: JSON.parse(JSON.stringify(DEFAULT_CONFIG)),
   modules: [],
   storage: { size: "-", used: "-", avail: "-", percent: 0, mode: null },
-  systemInfo: { kernel: "...", selinux: "...", mountBase: "/dev/kagami_mirror" },
+  systemInfo: { kernel: "...", selinux: "...", mountBase: "" },
   userHideRules: [],
   allRules: [],
   lkmStatus: { valid: false, loaded: false, autoload: false, kmi_override: "" },
@@ -556,7 +556,7 @@ function renderOverviewPage() {
           <div class="info-list">
             <div class="info-item"><div class="label">${escapeHtml(tr("status.kernel", "Kernel"))}</div><div class="value mono">${escapeHtml(state.systemInfo.kernel || tr("staticUi.common.unknown", "Unknown"))}</div></div>
             <div class="info-item"><div class="label">${escapeHtml(tr("status.selinux", "SELinux"))}</div><div class="value">${escapeHtml(state.systemInfo.selinux || tr("staticUi.common.unknown", "Unknown"))}</div></div>
-            <div class="info-item"><div class="label">${escapeHtml(tr("status.mountBase", "Mount Base"))}</div><div class="value mono">${escapeHtml(state.systemInfo.mountBase || "/dev/kagami_mirror")}</div></div>
+            <div class="info-item"><div class="label">${escapeHtml(tr("status.mountBase", "Mount Base"))}</div><div class="value mono">${escapeHtml(state.systemInfo.mountBase || tr("status.mountBaseNone", "None"))}</div></div>
             <div class="info-item"><div class="label">${escapeHtml(tr("staticUi.overview.updatedValue", "Updated"))}</div><div class="value">${escapeHtml(state.lastUpdated || "-")}</div></div>
           </div>
         </section>

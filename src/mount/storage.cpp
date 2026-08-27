@@ -218,7 +218,7 @@ Handle setup(const Config& config) {
     Handle h;
     const std::string base = acquire_mirror_dir(config); // per-boot random /mnt mountpoint
     // The mirror root is the mountpoint itself: module trees live directly at
-    // /dev/kagami_mirror/<module-id>, matching hymo's /dev/hymo_mirror layout.
+    // <base>/<module-id> (base is the per-boot random /mnt/<rand> mountpoint).
     h.content_dir = base;
     const std::string img = config.mirror_img; // backing image persists on /data
     std::string erofs_img = config.mirror_img;
