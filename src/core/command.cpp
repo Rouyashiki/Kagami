@@ -1789,12 +1789,6 @@ int run_command(const std::vector<std::string>& args) {
         if (args.size() >= 3 && args[1] == "stealth") {
             return kasumi::set_stealth(args[2] == "enable") ? 0 : 1;
         }
-        if (args.size() >= 2 && args[1] == "set-cmdline") {
-            return kasumi::set_cmdline(arg_or_default(args, 2, "")) ? 0 : 1;
-        }
-        if (args.size() >= 2 && args[1] == "clear-cmdline") {
-            return kasumi::set_cmdline("") ? 0 : 1;
-        }
         return 0;
     }
     if (args[0] == "lkm") {

@@ -320,11 +320,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -663,11 +661,9 @@ export const translations = {
       "config": {
         "core": "核心配置",
         "toggles": "行为开关",
-        "spoof": "内核伪装",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "挂载阶段",
         "logFile": "日志文件",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "保存并应用",
         "noCustomPartitions": "还没有自定义分区"
       },
@@ -1006,11 +1002,9 @@ export const translations = {
       "config": {
         "core": "核心設定",
         "toggles": "行為開關",
-        "spoof": "核心偽裝",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "掛載階段",
         "logFile": "日誌檔案",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "儲存並套用",
         "noCustomPartitions": "還沒有自訂分區"
       },
@@ -1342,11 +1336,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -1670,11 +1662,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -1998,11 +1988,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -2326,11 +2314,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -2654,11 +2640,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },
@@ -2982,11 +2966,9 @@ export const translations = {
       "config": {
         "core": "Core Config",
         "toggles": "Behavior",
-        "spoof": "Kernel Spoofing",
         "tmpfsXattr": "tmpfs xattr",
         "mountStage": "Mount Stage",
         "logFile": "Log File",
-        "cmdline": "Kernel Cmdline",
         "saveApply": "Save & Apply",
         "noCustomPartitions": "No custom partitions"
       },

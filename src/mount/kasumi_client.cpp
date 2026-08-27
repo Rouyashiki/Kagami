@@ -256,8 +256,6 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("maps_spoof");
     if (bitmask & KSM_FEATURE_STATFS_SPOOF)
         names.emplace_back("statfs_spoof");
-    if (bitmask & KSM_FEATURE_CMDLINE_SPOOF)
-        names.emplace_back("cmdline_spoof");
     if (bitmask & KSM_FEATURE_KSTAT_SPOOF)
         names.emplace_back("kstat_spoof");
     if (bitmask & KSM_FEATURE_MERGE_DIR)
@@ -388,12 +386,6 @@ bool set_statfs_spoof(bool enable) {
 bool set_selinux_guard(bool enable) {
     int value = enable ? 1 : 0;
     return execute(KSM_IOC_SELINUX_FIX, &value) == 0;
-}
-
-bool set_cmdline(const std::string& cmdline) {
-    kasumi_spoof_cmdline arg = {};
-    std::strncpy(arg.cmdline, cmdline.c_str(), KSM_FAKE_CMDLINE_SIZE - 1);
-    return ioctl_arg_ok(execute(KSM_IOC_SET_CMDLINE, &arg), arg.err);
 }
 
 bool clear_rules() { return execute(KSM_IOC_CLEAR_ALL, nullptr) == 0; }

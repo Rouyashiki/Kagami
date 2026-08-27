@@ -47,7 +47,6 @@ export const DEFAULT_CONFIG = {
     allow_uids: [],
     deny_uids: [],
   },
-  cmdline_value: "",
   partitions: [],
   kasumi_available: false,
   tmpfs_xattr_supported: false,
@@ -164,7 +163,6 @@ const mockState = {
     enable_maps_spoof: true,
     enable_statfs_spoof: true,
     enable_selinux_fix: true,
-    cmdline_value: "androidboot.verifiedbootstate=green androidboot.vbmeta.device_state=locked",
   },
   modules: [
     {
@@ -209,14 +207,13 @@ const mockState = {
     kasumiModules: ["playintegrityfix"],
     kasumiMismatch: false,
     hooks:
-      "GET_FD: tracepoint(sys_enter/sys_exit)\npath: tracepoint(sys_enter)\nvfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe\ncmdline: tracepoint(sys_enter/sys_exit)",
+      "GET_FD: tracepoint(sys_enter/sys_exit)\npath: tracepoint(sys_enter)\nvfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe",
     features: {
       bitmask: 0x1e5,
       names: [
         "mount_hide",
         "maps_spoof",
         "statfs_spoof",
-        "cmdline_spoof",
         "kstat_spoof",
         "merge_dir",
       ],
@@ -252,8 +249,8 @@ const mockState = {
     kmi_override: "",
   },
   logs: {
-    system: `[INFO] Kagami daemon initialized\n[INFO] tmpfs backend selected\n[DEBUG] active modules: zygisk_next, playintegrityfix\n[INFO] applied cmdline spoof`,
-    kernel: `[KAGAMIFS] protocol=14 feature_mask=0x1e5\n[KAGAMIFS] tracepoint hooks ready\n[KAGAMIFS] add hide rule /data/adb/magisk\n[KAGAMIFS] cmdline spoof enabled`,
+    system: `[INFO] Kagami daemon initialized\n[INFO] tmpfs backend selected\n[DEBUG] active modules: zygisk_next, playintegrityfix`,
+    kernel: `[KAGAMIFS] protocol=14 feature_mask=0x1e5\n[KAGAMIFS] tracepoint hooks ready\n[KAGAMIFS] add hide rule /data/adb/magisk`,
   },
 };
 

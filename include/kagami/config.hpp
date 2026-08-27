@@ -57,7 +57,6 @@ struct Config {
     bool enable_maps_spoof = false;
     bool enable_statfs_spoof = false;
     bool enable_selinux_fix = false;
-    std::string cmdline_value;
     bool overlayfs_enabled = true;
     bool magic_mount_enabled = true;
     // Global backend override: "auto" uses per-module modes (module_mode.json:

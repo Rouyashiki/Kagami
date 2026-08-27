@@ -45,7 +45,6 @@ const CONFIG_FIELD_NAMES = new Set([
   "enable_maps_spoof",
   "enable_statfs_spoof",
   "enable_selinux_fix",
-  "cmdline_value",
 ]);
 
 const MODULE_EXPANDED_STORAGE_KEY = "kagami_module_expanded_v2";
@@ -139,7 +138,6 @@ function getPersistedConfig(config) {
     overlayfs_enabled: Boolean(config.overlayfs_enabled),
     magic_mount_enabled: Boolean(config.magic_mount_enabled),
     mount_backend: config.mount_backend,
-    cmdline_value: config.cmdline_value || "",
     partitions: unique(config.partitions || []),
   };
   if (config.__lkmAutoloadPresent !== false) {
@@ -966,24 +964,6 @@ function renderKasumiPage() {
             <button class="button" data-variant="ghost" data-action="clear-kmi">${escapeHtml(tr("kasumi.lkm.clearKmi", "Clear"))}</button>
           </div>
         </section>
-
-        <section class="card">
-          <div class="section-head">
-            <div>
-              <h3>${escapeHtml(tr("staticUi.config.spoof", "Kernel Spoofing"))}</h3>
-            </div>
-          </div>
-          <div class="field-grid">
-            <div class="field" style="grid-column: 1 / -1;">
-              <label for="kasumi-cmdline">${escapeHtml(tr("staticUi.config.cmdline", "Kernel Cmdline"))}</label>
-              <textarea
-                id="kasumi-cmdline"
-                name="cmdline_value"
-                placeholder="androidboot.verifiedbootstate=green"
-              >${escapeHtml(state.config.cmdline_value)}</textarea>
-            </div>
-          </div>
-        </section>
       </div>
 
       <div class="grid-2">
@@ -1614,7 +1594,6 @@ function collectConfigFromDom() {
     enable_statfs_spoof: checked("enable_statfs_spoof", state.config.enable_statfs_spoof),
     enable_selinux_fix: checked("enable_selinux_fix", state.config.enable_selinux_fix),
     kasumi_enabled: checked("kasumi_enabled", state.config.kasumi_enabled),
-    cmdline_value: value("cmdline_value", state.config.cmdline_value),
     partitions: unique(state.config.partitions || []),
   };
 }

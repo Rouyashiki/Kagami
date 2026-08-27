@@ -254,7 +254,6 @@ bool disable_kernel_features(std::string* error = nullptr) {
     disable(::kagami::kasumi::set_maps_spoof(false), "maps spoof");
     disable(::kagami::kasumi::set_statfs_spoof(false), "statfs spoof");
     disable(::kagami::kasumi::set_selinux_guard(false), "SELinux guard");
-    disable(::kagami::kasumi::set_cmdline(""), "cmdline spoof");
     return ok;
 }
 
@@ -329,7 +328,6 @@ bool apply_feature_config(const Config& config, std::string& error) {
           "statfs spoof");
     apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix),
           "SELinux guard");
-    apply(::kagami::kasumi::set_cmdline(config.cmdline_value), "cmdline spoof");
     if (!ok) {
         (void)disable_kernel_features();
     }

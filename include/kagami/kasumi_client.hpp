@@ -119,7 +119,6 @@ bool set_mount_hide(bool enable, MountHideMode mode = MountHideMode::Normal);
 bool set_maps_spoof(bool enable);
 bool set_statfs_spoof(bool enable);
 bool set_selinux_guard(bool enable);
-bool set_cmdline(const std::string& cmdline);
 bool clear_rules();
 bool add_rule(const std::string& target, const std::string& source, int type);
 bool add_merge_rule(const std::string& target, const std::string& source);

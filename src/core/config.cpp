@@ -150,7 +150,6 @@ std::string default_config_json() {
     "allow_uids": [],
     "deny_uids": []
   },
-  "cmdline_value": "",
   "partitions": []
 }
 )";
@@ -241,7 +240,6 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.enable_kernel_debug =
         json_bool_or(&root, "enable_kernel_debug", config.enable_kernel_debug);
     config.enable_stealth = json_bool_or(&root, "enable_stealth", config.enable_stealth);
-    config.cmdline_value = json_string_or(&root, "cmdline_value", config.cmdline_value);
     const bool has_split_kasumi_features =
         json_int_or(&root, "kasumi_feature_config_version", 0) >= 2 ||
         root.find("enable_overlay_xattr_hide") != nullptr ||
