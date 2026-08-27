@@ -25,14 +25,16 @@ struct Config {
     // from /data onto system). /dev is a writable tmpfs everywhere; /debug_ramdisk
     // is read-only on some devices. Configurable; avoid /mnt.
     std::string work_dir = "/dev/kagami";
-    // Shared OverlayFS/Kasumi module mirror. It MUST NOT live under /data:
-    // redirected files need the target partition's SELinux context, not
-    // data_file. OverlayFS and Kasumi intentionally share this one mount so a
-    // hybrid boot has a single tmpfs/loop-image lifetime. Magic Mount keeps its
-    // independent work tmpfs and therefore does not create this base on its own.
-    // fs_type selects the storage mode ("auto" tries tmpfs then ext4; "tmpfs"/
-    // "ext4"/"erofs" force one). The ext4/erofs backing image persists on /data.
-    std::string mirror_dir = "/dev/kagami_mirror";
+    // OverlayFS module mirror. It MUST NOT live under /data: an overlay lowerdir
+    // exposes the source's SELinux context and data_file is wrong for the target
+    // partition, so content is relabeled into this mirror. Kasumi does NOT use it
+    // (its vnode clones the source SID and redirects straight to /data/adb/modules);
+    // Magic Mount keeps its own work tmpfs. Empty (default, and the retired
+    // "/dev/kagami_mirror") => a per-boot random /mnt/<rand> mountpoint with no
+    // fixed signature; any other explicit path overrides. fs_type selects the
+    // storage mode ("auto" tries tmpfs then ext4; "tmpfs"/"ext4"/"erofs" force
+    // one). The ext4/erofs backing image persists on /data.
+    std::string mirror_dir = "";
     std::string mirror_img = "/data/adb/kagami/mirror.img";
     int mirror_img_size_mb = 2048;
     // Read-only overlay by default (lowerdirs only), matching meta-overlayfs. A

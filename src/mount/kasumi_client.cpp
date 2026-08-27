@@ -35,10 +35,6 @@ static_assert(static_cast<std::uint32_t>(MountHideMode::Aggressive) ==
               KSM_MOUNT_HIDE_MODE_AGGRESSIVE);
 static_assert(sizeof(kasumi_quiesce_arg) == 64);
 
-std::string default_mirror_path() {
-    return "/dev/kagami_mirror";
-}
-
 static bool lkm_in_proc_modules() {
 #if defined(__linux__)
     std::ifstream modules("/proc/modules");
@@ -318,7 +314,7 @@ std::vector<std::string> active_modules_from_rules(const std::string& rules) {
     std::string line;
     while (std::getline(lines, line)) {
         const std::vector<std::string> prefixes = {
-            "/data/adb/modules/", "/dev/kagami_mirror/", "/mnt/",
+            "/data/adb/modules/",
         };
         for (const auto& prefix : prefixes) {
             std::size_t pos = line.find(prefix);
@@ -415,12 +411,6 @@ bool add_merge_rule(const std::string& target, const std::string& source) {
     arg.src = target.c_str();
     arg.target = source.c_str();
     return execute(KSM_IOC_ADD_MERGE_RULE, &arg) == 0;
-}
-
-bool set_mirror_path(const std::string& path) {
-    kasumi_syscall_arg arg = {};
-    arg.src = path.c_str();
-    return execute(KSM_IOC_SET_MIRROR_PATH, &arg) == 0;
 }
 
 bool hide_path(const std::string& path) {

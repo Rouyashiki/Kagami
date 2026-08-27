@@ -12,6 +12,7 @@
 #include "mount/magic_mount.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/overlayfs.hpp"
+#include "mount/storage.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -70,7 +71,7 @@ static void print_usage() {
         << "  kagamid api system|storage|lkm|kasumi|features|hooks|policy|backends|meta\n"
         << "  kagamid module list|add|delete|set-mode|add-rule|remove-rule|hot-mount|hot-unmount|check-conflicts|mount-all|unmount|normalize\n"
         << "  kagamid recovery status|boot-completed|reset\n"
-        << "  kagamid kasumi version|list|enable|disable|clear|set-mirror|fix-mounts|hide-overlay-xattrs|mount-hide off|normal|aggressive|maps|policy\n"
+        << "  kagamid kasumi version|list|enable|disable|clear|fix-mounts|hide-overlay-xattrs|mount-hide off|normal|aggressive|maps|policy\n"
         << "  kagamid lkm load|unload|status|autoload|set-autoload|set-kmi|clear-kmi\n";
 }
 
@@ -361,7 +362,7 @@ static Config current_config() {
 
 static int print_storage_json() {
     const Config config = current_config();
-    const std::string mirror_base = config.mirror_dir;
+    const std::string mirror_base = mount::storage::current_mirror_dir(config);
 
     // Report the active backend's storage base (tmpfs/ext4/erofs): the shared
     // mirror root if mounted, else the Magic Mount work tmpfs, else fall back
@@ -689,7 +690,7 @@ static int print_kasumi_snapshot_json() {
               << "\"last_error\":"
               << json_quote(version.last_errno == 0 ? "" : std::strerror(version.last_errno)) << ","
               << "\"modules_visible\":" << (version.modules_visible ? "true" : "false") << ","
-              << "\"mount_base\":" << json_quote(config.mirror_dir) << ","
+              << "\"mount_base\":" << json_quote(mount::storage::current_mirror_dir(config)) << ","
               << "\"features\":{\"bitmask\":" << bitmask << ",\"names\":";
     print_string_array(kasumi::feature_names(bitmask));
     std::cout << "},\"hooks\":" << json_quote(hook_text) << ","
@@ -827,7 +828,7 @@ static int print_system_json() {
         << "{"
         << "\"kernel\":" << json_quote(kernel_release()) << ","
         << "\"selinux\":" << json_quote(selinux_status()) << ","
-        << "\"mount_base\":" << json_quote(config.mirror_dir) << ","
+        << "\"mount_base\":" << json_quote(mount::storage::current_mirror_dir(config)) << ","
         << "\"kasumi_available\":" << (version.status == kasumi::Status::Available ? "true" : "false") << ","
         << "\"kasumi_status\":" << static_cast<int>(version.status) << ","
         << "\"hooks\":" << json_quote(hook_text) << ","
@@ -883,7 +884,7 @@ static int print_kasumi_version_json() {
         << json_quote(mismatch ? "Kasumi protocol mismatch" : "") << ","
         << "\"active_modules\":";
     print_string_array(modules);
-    std::cout << ",\"mount_base\":" << json_quote(config.mirror_dir) << "}\n";
+    std::cout << ",\"mount_base\":" << json_quote(mount::storage::current_mirror_dir(config)) << "}\n";
     return 0;
 }
 
@@ -1572,18 +1573,6 @@ static int handle_kasumi(const std::vector<std::string>& args) {
     if (sub == "fix-mounts") {
         if (!kasumi::fix_mounts()) {
             std::cerr << "failed to reorder Kasumi mount ids\n";
-            return 1;
-        }
-        return 0;
-    }
-    if (sub == "set-mirror") {
-        const std::string path = arg_or_default(args, 2, "");
-        if (path.empty() || path.front() != '/') {
-            std::cerr << "kasumi set-mirror requires an absolute path\n";
-            return 1;
-        }
-        if (!kasumi::set_mirror_path(path)) {
-            std::cerr << "failed to set Kasumi mirror path\n";
             return 1;
         }
         return 0;

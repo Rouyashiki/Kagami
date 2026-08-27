@@ -5,7 +5,6 @@
 #include "kagami/kasumi_client.hpp"
 #include "kagami/kasumi_uapi.h"
 #include "mount/mount_fs.hpp"
-#include "mount/storage.hpp"
 
 #include <dirent.h>
 #include <sys/mount.h>
@@ -143,89 +142,6 @@ std::string resolve_virtual_path(const std::string& value) {
     return current.string();
 }
 
-bool is_sub_partition(const std::string& name, const std::vector<std::string>& parts) {
-    return name != "system" &&
-           std::find(parts.begin(), parts.end(), name) != parts.end();
-}
-
-void relabel_tree(const std::string& node, const std::string& target, const std::string& parent_ctx) {
-    std::string context;
-    if (!fsutil::get_context(target, context)) {
-        context = parent_ctx;
-    }
-    if (!context.empty()) {
-        fsutil::set_context(node, context);
-    }
-    struct stat st = {};
-    if (lstat(node.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
-        return;
-    }
-    DIR* dir = opendir(node.c_str());
-    if (!dir) {
-        return;
-    }
-    while (dirent* entry = readdir(dir)) {
-        if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        relabel_tree(node + "/" + entry->d_name, target + "/" + entry->d_name, context);
-    }
-    closedir(dir);
-}
-
-void relabel_partition(const std::string& destination, const std::string& partition,
-                       const std::vector<std::string>& parts) {
-    if (partition != "system") {
-        relabel_tree(destination, fsutil::partition_mount_point(partition), "");
-        return;
-    }
-    DIR* dir = opendir(destination.c_str());
-    if (!dir) {
-        return;
-    }
-    std::error_code ec;
-    while (dirent* entry = readdir(dir)) {
-        if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        const std::string child = destination + "/" + entry->d_name;
-        const std::string target = is_sub_partition(entry->d_name, parts) && fs::is_directory(child, ec)
-                                       ? "/" + std::string(entry->d_name)
-                                       : "/system/" + std::string(entry->d_name);
-        relabel_tree(child, target, "");
-    }
-    closedir(dir);
-}
-
-bool mirror_modules(const std::vector<ModuleEntry>& modules, const storage::Handle& storage,
-                    const std::vector<std::string>& parts) {
-    if (storage.mode == storage::Mode::Erofs) {
-        mlog("kasumi: erofs mirror is read-only and cannot be refreshed at boot");
-        return false;
-    }
-    bool ok = true;
-    for (const auto& module : modules) {
-        const fs::path module_destination = fs::path(storage.content_dir) / module.id;
-        fsutil::rm_rf(module_destination.string());
-        for (const auto& partition : parts) {
-            const fs::path source = module.path / partition;
-            std::error_code ec;
-            if (!fs::is_directory(source, ec) || fs::is_empty(source, ec)) {
-                continue;
-            }
-            const fs::path destination = module_destination / partition;
-            fs::create_directories(destination, ec);
-            if (ec || !fsutil::copy_tree(source.string(), destination.string())) {
-                mlog("kasumi: failed to mirror " + source.string());
-                ok = false;
-                continue;
-            }
-            relabel_partition(destination.string(), partition, parts);
-        }
-    }
-    return ok;
-}
-
 std::vector<std::string> user_hide_rules() {
     std::vector<std::string> out;
     std::ifstream in(runtime_data_dir() / "user_hide_rules.json");
@@ -320,14 +236,6 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
     if (ec) {
         mlog("kasumi: scan failed for " + source_root.string() + ": " + ec.message());
     }
-}
-
-bool configure_mirror(const std::string& mirror) {
-    if (!::kagami::kasumi::set_mirror_path(mirror)) {
-        mlog("kasumi: failed to set mirror path " + mirror);
-        return false;
-    }
-    return true;
 }
 
 bool disable_kernel_features(std::string* error = nullptr) {
@@ -489,21 +397,12 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         return ok;
     }
 
-    Config mirror_config = config;
-    // Kasumi shares the same module mirror as OverlayFS. It never needs the
-    // optional OverlayFS upper/work layer by itself.
-    mirror_config.overlay_writable = false;
-    storage::Handle mirror = storage::setup(mirror_config);
-    if (!mirror.ok) {
-        mlog("kasumi: mirror storage setup failed");
-        return false;
-    }
+    // Kasumi redirects each target straight to the real module tree under
+    // /data/adb/modules; the vnode clones the source inode's SELinux SID, so no
+    // relabeled mirror is needed (unlike OverlayFS, which exposes the lowerdir's
+    // context). Kasumi therefore mounts no workdir.
     const std::vector<std::string>& partitions =
         config.partitions.empty() ? fsutil::kManagedPartitions : config.partitions;
-    if (!mirror_modules(modules, mirror, partitions) ||
-        !configure_mirror(mirror.content_dir)) {
-        return false;
-    }
 
     RuleBatch batch;
     for (const auto& module : modules) {
@@ -524,7 +423,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         const auto rule_it = rules.find(it->id);
         const std::vector<ModuleRule> empty_rules;
         const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
-        const fs::path source = fs::path(mirror.content_dir) / it->id;
+        const fs::path source = it->path;
         for (const auto& partition : partitions) {
             compile_tree(source / partition, "/" + partition, module_rules, batch);
         }
@@ -545,7 +444,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     }
     std::error_code ec;
     fs::create_directories(active_file().parent_path(), ec);
-    if (ok && !write_boot_marker(active_file(), mirror.content_dir)) {
+    if (ok && !write_boot_marker(active_file())) {
         ok = false;
         mlog("kasumi: failed to record restored runtime state");
     }

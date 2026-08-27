@@ -6,10 +6,14 @@
 
 namespace kagami::mount::storage {
 
-// OverlayFS and Kasumi share a clean module mirror: neither backend may serve
-// redirected files directly from /data because of SELinux contexts. We provide
-// the mirror as tmpfs (when it preserves overlay xattrs), an ext4 loop image,
-// or a read-only erofs image paired with a tmpfs writable layer.
+// OverlayFS needs a clean module mirror: an overlay lowerdir exposes the source
+// inode's SELinux context and /data contexts are wrong for /system, so module
+// content is relabeled into a mirror. (Kasumi does NOT use this: its vnode
+// clones the source SID and redirects straight to /data/adb/modules.) The mirror
+// is a tmpfs (when it preserves overlay xattrs), an ext4 loop image, or a
+// read-only erofs image paired with a tmpfs writable layer, mounted at a
+// per-boot random /mnt/<rand> path (see current_mirror_dir) so it presents no
+// fixed, /dev-anchored signature.
 enum class Mode { Tmpfs, Ext4, Erofs };
 
 const char* mode_name(Mode mode);
@@ -24,8 +28,13 @@ struct Handle {
 // Mount or reuse the shared mirror per config.fs_type ("auto" => tmpfs if
 // overlay xattrs work, else ext4). Must run inside the init mount namespace;
 // marks new mounts private and registers them with KernelSU. Returns
-// Handle{ok=false} on failure.
+// Handle{ok=false} on failure. Picks and persists the per-boot mount path.
 Handle setup(const Config& config);
+
+// The overlay mirror mountpoint in effect for this boot: an explicit non-default
+// config.mirror_dir, else the per-boot random /mnt path setup() recorded, else
+// "" when no mirror is active. Read-only; never generates a path.
+std::string current_mirror_dir(const Config& config);
 
 // Unmount an acquired base (content + writable). The ext4/erofs image is left
 // on disk. Backend code should normally use teardown_shared() after both

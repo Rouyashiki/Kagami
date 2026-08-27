@@ -118,7 +118,7 @@ std::string default_config_json() {
   "tempdir": "",
   "mountsource": "KSU",
   "work_dir": "/dev/kagami",
-  "mirror_dir": "/dev/kagami_mirror",
+  "mirror_dir": "",
   "mirror_img": "/data/adb/kagami/mirror.img",
   "mirror_img_size_mb": 2048,
   "overlay_writable": false,

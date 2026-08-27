@@ -97,7 +97,6 @@ struct PolicySnapshot {
     std::vector<std::uint32_t> deny_uids;
 };
 
-std::string default_mirror_path();
 VersionInfo version_info();
 bool is_available();
 bool module_loaded();
@@ -124,7 +123,6 @@ bool set_cmdline(const std::string& cmdline);
 bool clear_rules();
 bool add_rule(const std::string& target, const std::string& source, int type);
 bool add_merge_rule(const std::string& target, const std::string& source);
-bool set_mirror_path(const std::string& path);
 bool hide_path(const std::string& path);
 bool delete_rule(const std::string& path);
 bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned long spoofed_ino, unsigned long spoofed_dev, const std::string& spoofed_path);

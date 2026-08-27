@@ -144,9 +144,79 @@ static bool mounted_mode(const std::string& path, Mode& mode) {
     return false;
 }
 
+// The per-boot mirror path is recorded here so status/teardown in later kagamid
+// invocations agree with the mount-all that created it.
+static std::string mirror_run_file(const Config& config) {
+    const std::string base = config.data_dir.empty() ? "/data/adb/kagami" : config.data_dir;
+    return base + "/run/overlay_mirror";
+}
+
+static std::string read_boot_id() {
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string id;
+    std::getline(in, id);
+    return id;
+}
+
+// "" and the retired fixed default both mean "randomize"; any other explicit
+// mirror_dir is an operator override that wins.
+static bool mirror_is_auto(const std::string& dir) {
+    return dir.empty() || dir == "/dev/kagami_mirror";
+}
+
+static std::string random_mount_name() {
+    std::ifstream u("/dev/urandom", std::ios::binary);
+    static const char hex[] = "0123456789abcdef";
+    std::string name;
+    for (int i = 0; i < 8; ++i) {
+        unsigned char c = 0;
+        if (!u.read(reinterpret_cast<char*>(&c), 1)) {
+            break;
+        }
+        name.push_back(hex[(c >> 4) & 0xF]);
+        name.push_back(hex[c & 0xF]);
+    }
+    return name.size() == 16 ? name : std::string("kagami-fallback");
+}
+
+std::string current_mirror_dir(const Config& config) {
+    if (!mirror_is_auto(config.mirror_dir)) {
+        return config.mirror_dir;
+    }
+    const std::string boot_id = read_boot_id();
+    std::ifstream in(mirror_run_file(config));
+    std::string stored_boot;
+    std::string path;
+    if (!boot_id.empty() && std::getline(in, stored_boot) &&
+        std::getline(in, path) && stored_boot == boot_id && !path.empty()) {
+        return path;
+    }
+    return {};
+}
+
+// Pick (and persist) the overlay mirror mountpoint for this boot. Reuses the
+// path already chosen earlier this boot so a repeat setup() agrees on it.
+static std::string acquire_mirror_dir(const Config& config) {
+    if (!mirror_is_auto(config.mirror_dir)) {
+        return config.mirror_dir;
+    }
+    const std::string existing = current_mirror_dir(config);
+    if (!existing.empty()) {
+        return existing;
+    }
+    const std::string dir = "/mnt/" + random_mount_name();
+    std::error_code ec;
+    fs::create_directories(fs::path(mirror_run_file(config)).parent_path(), ec);
+    std::ofstream out(mirror_run_file(config), std::ios::trunc);
+    if (out) {
+        out << read_boot_id() << "\n" << dir << "\n";
+    }
+    return dir;
+}
+
 Handle setup(const Config& config) {
     Handle h;
-    const std::string base = config.mirror_dir; // shared mount point, off /data
+    const std::string base = acquire_mirror_dir(config); // per-boot random /mnt mountpoint
     // The mirror root is the mountpoint itself: module trees live directly at
     // /dev/kagami_mirror/<module-id>, matching hymo's /dev/hymo_mirror layout.
     h.content_dir = base;
@@ -276,11 +346,16 @@ void teardown(const Handle& handle) {
 }
 
 void teardown_shared(const Config& config) {
-    const std::string base = config.mirror_dir;
+    const std::string base = current_mirror_dir(config);
+    if (base.empty()) {
+        return;
+    }
     // rw is only separately mounted in EROFS mode; detaching it is harmless in
     // tmpfs/ext4 mode, where the writable layer lives inside the mirror root.
     umount2((base + ".rw").c_str(), MNT_DETACH);
     umount2(base.c_str(), MNT_DETACH);
+    std::error_code ec;
+    fs::remove(mirror_run_file(config), ec); // release the per-boot path record
 }
 
 } // namespace kagami::mount::storage

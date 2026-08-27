@@ -28,14 +28,15 @@ bool restore_persisted_hide_rules(std::string& error);
 // Disable Kasumi and clear path rules without requiring an active mirror.
 bool deactivate(std::string& error);
 
-// Mirrors module content off /data, compiles it into ADD/MERGE/HIDE Kasumi
-// rules, and configures the shared mirror. Must run in PID 1's mount namespace
-// because the mirror filesystem is mounted there.
+// Compiles each enabled module's /data/adb/modules tree into ADD/MERGE/HIDE
+// Kasumi rules that redirect straight to the source inode (no mirror; the vnode
+// clones the source SELinux SID). Must run in PID 1's mount namespace so the
+// rules resolve against the init-namespace view.
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
                    const ModuleRuleMap& rules);
 
-// Removes Kagami-owned Kasumi rules and detaches its mirror storage. Must run
-// in the init mount namespace.
+// Removes Kagami-owned Kasumi rules. Kasumi holds no mirror storage of its own.
+// Must run in the init mount namespace.
 bool unmount_all(const Config& config);
 
 bool is_active();
