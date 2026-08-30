@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXPECTED_REF="${KASUMI_REF:-fix/issues}"
+EXPECTED_REF="${KASUMI_REF:-main}"
 EXPECTED_PROTOCOL=17
 KASUMI_SOURCE="${KASUMI_DIR:-}"
 KMI="${KASUMI_KMI:-}"
@@ -111,7 +111,7 @@ fi
 
 grep -Eq "^[[:space:]]*#define[[:space:]]+KSM_PROTOCOL_VERSION[[:space:]]+${EXPECTED_PROTOCOL}$" \
     "$KASUMI_SOURCE/src/include/kasumi_uapi.h" ||
-    die "Kasumi source is not API ${EXPECTED_PROTOCOL}; use ${EXPECTED_REF}, not main/API 16"
+    die "Kasumi source is not API ${EXPECTED_PROTOCOL}; use ${EXPECTED_REF}"
 cmp -s "${PROJECT_ROOT}/include/kagami/kasumi_uapi.h" \
     "$KASUMI_SOURCE/src/include/kasumi_uapi.h" ||
     die "Kagami UAPI differs from Kasumi ${EXPECTED_REF}; sync the header before building an LKM"

@@ -1202,11 +1202,11 @@ function renderInfoPage() {
         </div>
         <div class="link-list">
           ${[
-            [tr("info.github", "GitHub Repository"), "https://github.com/Anatdx/kagami"],
+            [tr("info.github", "GitHub Repository"), "https://github.com/Rouyashiki/Kagami"],
             [tr("info.gitlab", "GitLab Repository"), "https://gitlab.com/Anatdx/kagami"],
             [tr("info.selfhosted", "Anatdx Self-hosted Repository"), "https://git.anatdx.com/Anatdx/kagami"],
-            ["Kasumi", "https://github.com/Anatdx/Kasumi"],
-            ["YukiSU", "https://github.com/Anatdx/YukiSU"],
+            ["Kasumi", "https://github.com/Rouyashiki/Kasumi"],
+            ["YukiSU", "https://github.com/Rouyashiki/YukiSU"],
           ]
             .map(
               ([label, href]) => `

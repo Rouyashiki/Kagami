@@ -36,13 +36,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      # API 17 is being integrated on top of the syscall/hook debt fixes.
-      # Keep this explicit until that work lands on Kasumi main.
-      - name: Checkout Kasumi API 17 fixes
+      - name: Checkout Kasumi main
         uses: actions/checkout@v5
         with:
-          repository: Anatdx/Kasumi
-          ref: fix/issues
+          repository: Rouyashiki/Kasumi
+          ref: main
           path: kasumi
           fetch-depth: 1
 
@@ -58,7 +56,7 @@ jobs:
       - name: Build Kasumi LKM
         env:
           KASUMI_DIR: ${{ github.workspace }}/kasumi
-          KASUMI_REF: fix/issues
+          KASUMI_REF: main
         run: |
           chmod +x scripts/build-kasumi-lkm.sh
           scripts/build-kasumi-lkm.sh \

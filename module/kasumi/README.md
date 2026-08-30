@@ -1,8 +1,7 @@
 # Kasumi LKM assets
 
-Kagami can build and package Kasumi modules directly. The build source is
-[`Anatdx/Kasumi`](https://github.com/Anatdx/Kasumi) on **`fix/issues`** while
-API 17 is integrated with the hook-debt fixes.
+Kagami can build and package Kasumi modules directly. The build source tracks
+[`Rouyashiki/Kasumi`](https://github.com/Rouyashiki/Kasumi) on **`main`**.
 
 For a prepared Android kernel/DDK tree:
 

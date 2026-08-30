@@ -42,9 +42,9 @@ cmake --build build --target package
 Kagami manages Kasumi as an optional LKM. Put independently built `.ko` assets
 under `module/kasumi/` before packaging, or build one directly with
 `KDIR=/path/to/ddk ./build.sh lkm --kmi android15-6.6`. The local build and CI
-both pin [`Anatdx/Kasumi`](https://github.com/Anatdx/Kasumi) at `fix/issues`
-while API 17 is integrated with the hook-debt fixes. The accepted filename formats,
-full KMI matrix, and licensing details are in `module/kasumi/README.md`. If no
+both track [`Rouyashiki/Kasumi`](https://github.com/Rouyashiki/Kasumi) on `main`. The
+accepted filename formats, full KMI matrix, and licensing details are in
+`module/kasumi/README.md`. If no
 compatible asset is installed, boot continues with the OverlayFS/Magic Mount
 fallback.
 
