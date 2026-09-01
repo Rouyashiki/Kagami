@@ -83,6 +83,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: recursive
 
       - name: Download Kasumi API 17 LKM matrix
         uses: actions/download-artifact@v5

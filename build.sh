@@ -181,9 +181,10 @@ build_arch() {
         -DANDROID_PLATFORM=android-26 \
         ${VERBOSE} \
         "${PROJECT_ROOT}"
-    cmake --build "${BUILD_SUBDIR}" --target kagamid
+    cmake --build "${BUILD_SUBDIR}" --target kagamid lkmloader
 
     local BIN="${BUILD_SUBDIR}/kagamid-${ARCH}"
+    local LOADER="${BUILD_SUBDIR}/third_party/lkmloader/lkmloader"
     if [ -f "$BIN" ]; then
         cp "$BIN" "${OUT_DIR}/"
         print_success "Built kagamid-${ARCH} ($(du -h "$BIN" | cut -f1))"
@@ -191,6 +192,12 @@ build_arch() {
         print_error "Binary kagamid-${ARCH} not found!"
         exit 1
     fi
+    if [ ! -f "$LOADER" ]; then
+        print_error "Binary lkmloader not found!"
+        exit 1
+    fi
+    cp "$LOADER" "${OUT_DIR}/"
+    print_success "Built lkmloader ($(du -h "$LOADER" | cut -f1))"
 }
 
 # Compute the unified version: v<tag>-<commitcount+10000>.

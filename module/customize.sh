@@ -16,6 +16,8 @@ else
     abort "! Binary not found: $BINARY_NAME"
 fi
 chmod 0755 "$MODPATH/kagamid"
+[ -f "$MODPATH/lkmloader" ] || abort "! lkmloader missing"
+chmod 0755 "$MODPATH/lkmloader"
 
 rm -f "$MODPATH"/kagamid-arm64-v8a \
       "$MODPATH"/kagamid-armeabi-v7a \

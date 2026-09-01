@@ -51,6 +51,10 @@ target_compile_definitions(kagamid PRIVATE
     KAGAMI_VERSION="${KAGAMI_MODULE_VERSION}"
 )
 
+set(LKMLOADER_STRIP_ANDROID_BINARY ${KAGAMI_STRIP_ANDROID_BINARY}
+    CACHE BOOL "Strip the bundled lkmloader Android binary" FORCE)
+add_subdirectory(third_party/lkmloader)
+
 if(ANDROID)
     set_target_properties(kagamid PROPERTIES OUTPUT_NAME "kagamid-${ANDROID_ABI}")
     target_compile_options(kagamid PRIVATE
@@ -82,9 +86,9 @@ add_custom_target(package
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${KAGAMI_PACKAGE_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/module ${KAGAMI_PACKAGE_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:kagamid> ${KAGAMI_PACKAGE_DIR}/kagamid
-    COMMAND chmod 0755 ${KAGAMI_PACKAGE_DIR}/kagamid
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:lkmloader> ${KAGAMI_PACKAGE_DIR}/lkmloader
     COMMAND ${CMAKE_COMMAND} -E chdir ${KAGAMI_PACKAGE_DIR} ${CMAKE_COMMAND} -E tar cf ${KAGAMI_PACKAGE_ZIP} --format=zip .
-    DEPENDS kagamid
+    DEPENDS kagamid lkmloader
     COMMENT "Creating ${KAGAMI_PACKAGE_ZIP}"
     VERBATIM
 )

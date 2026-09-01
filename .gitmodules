@@ -1,0 +1,3 @@
+[submodule "lkmloader"]
+	path = third_party/lkmloader
+	url = ../lkmloader

@@ -164,6 +164,77 @@ std::vector<fs::path> asset_directories() {
 }
 
 #if defined(__linux__)
+enum class HelperLoadResult {
+    Unavailable,
+    Success,
+    Failure,
+};
+
+std::string lkm_loader_path() {
+    char executable[PATH_MAX] = {};
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    if (length <= 0) {
+        return "";
+    }
+    executable[length] = '\0';
+    const fs::path helper =
+        fs::path(executable).parent_path() / "lkmloader";
+    struct stat st = {};
+    if (stat(helper.c_str(), &st) != 0 || !S_ISREG(st.st_mode) ||
+        access(helper.c_str(), X_OK) != 0) {
+        return "";
+    }
+    return helper.string();
+}
+
+HelperLoadResult try_lkm_loader(const std::string& path, const std::string& params,
+                                std::string& error) {
+    const std::string helper = lkm_loader_path();
+    if (helper.empty()) {
+        return HelperLoadResult::Unavailable;
+    }
+
+    char command[] = "lkmloader";
+    std::array<char*, 4> argv = {
+        command,
+        const_cast<char*>(path.c_str()),
+        params.empty() ? nullptr : const_cast<char*>(params.c_str()),
+        nullptr,
+    };
+    const pid_t pid = fork();
+    if (pid < 0) {
+        error = std::string("fork LKM loader: ") + std::strerror(errno);
+        return HelperLoadResult::Failure;
+    }
+    if (pid == 0) {
+        execv(helper.c_str(), argv.data());
+        _exit(127);
+    }
+
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        error = std::string("waitpid LKM loader: ") + std::strerror(errno);
+        return HelperLoadResult::Failure;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return HelperLoadResult::Success;
+    }
+    if (WIFEXITED(status)) {
+        error = "LKM loader exited with status " +
+                std::to_string(WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        error = "LKM loader was killed by signal " +
+                std::to_string(WTERMSIG(status));
+    } else {
+        error = "LKM loader ended with an unknown status";
+    }
+    return HelperLoadResult::Failure;
+}
+
 bool finit_module_load(const std::string& path, const char* params) {
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
@@ -180,8 +251,19 @@ bool finit_module_load(const std::string& path, const char* params) {
         set_error("kasumi_lkm was loaded concurrently; ownership was not acquired");
         return false;
     }
+    const std::string finit_error = "finit_module " + path + ": " +
+                                    std::strerror(saved_errno);
+    std::string helper_error;
+    const HelperLoadResult helper_result =
+        try_lkm_loader(path, params ? params : "", helper_error);
+    if (helper_result == HelperLoadResult::Success) {
+        g_last_error.clear();
+        return true;
+    }
     if (saved_errno != ENOSYS) {
-        set_error("finit_module " + path + ": " + std::strerror(saved_errno));
+        set_error(helper_result == HelperLoadResult::Failure
+                      ? finit_error + "; helper fallback: " + helper_error
+                      : finit_error);
         return false;
     }
 
@@ -220,7 +302,11 @@ bool finit_module_load(const std::string& path, const char* params) {
         set_error("kasumi_lkm was loaded concurrently; ownership was not acquired");
         return false;
     }
-    set_error("init_module " + path + ": " + std::strerror(init_errno));
+    const std::string init_error = "init_module " + path + ": " +
+                                   std::strerror(init_errno);
+    set_error(helper_result == HelperLoadResult::Failure
+                  ? finit_error + "; helper fallback: " + helper_error + "; " + init_error
+                  : init_error);
     return false;
 }
 

@@ -42,6 +42,16 @@ set as Kasumi/YukiSU: `android12-5.10`, `android13-5.10`, `android13-5.15`,
 loader deliberately keeps assets external to the binary, so Kagami can remain
 a standalone metamodule and update compatible KMI builds independently.
 
+The daemon first uses `finit_module`. On failure, its bundled
+`lkmloader` helper patches unresolved ELF symbols from the built-in
+kernel section of `/proc/kallsyms`, writes the patched image to a sealed memfd,
+and calls `finit_module`. It falls back to `init_module` only when the fd-based
+path is unavailable. The helper is independent of KernelSU userspace and
+receives the same Kasumi ownership nonce as the direct load path.
+An exact `ENOEXEC` vermagic mismatch from newly emitted kernel-log records
+rebuilds `.modinfo` and is retried once; unrelated `ENOEXEC` failures are not
+rewritten.
+
 When Kasumi is selected for a module, its module tree is materialized in the
 shared Kagami mirror at `/dev/kagami_mirror` by default. OverlayFS uses the
 same mirror; configure it once with `mirror_dir`/`mirror_img` rather than a

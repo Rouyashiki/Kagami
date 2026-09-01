@@ -40,10 +40,12 @@ if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
 
 fi
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-cmake --build "$BUILD_DIR" --target kagamid -j"$JOBS"
+cmake --build "$BUILD_DIR" --target kagamid lkmloader -j"$JOBS"
 
 BIN="$BUILD_DIR/kagamid-${ABI}"
+LOADER="$BUILD_DIR/third_party/lkmloader/lkmloader"
 [ -f "$BIN" ] || { echo "error: built binary $BIN missing" >&2; exit 1; }
+[ -f "$LOADER" ] || { echo "error: built binary $LOADER missing" >&2; exit 1; }
 
 # --- module metadata ----------------------------------------------------------
 ID="$(sed -n 's/^id=//p' module/module.prop | head -1)"
@@ -60,8 +62,10 @@ rm -rf "$PKG"
 mkdir -p "$PKG" "$OUT"
 cp -R "module/." "$PKG/"
 cp "$BIN" "$PKG/kagamid-${ABI}"        # customize.sh picks the right ABI at install
+cp "$LOADER" "$PKG/lkmloader"
 find "$PKG" -name '.DS_Store' -delete 2>/dev/null || true
 chmod 0755 "$PKG/kagamid-${ABI}"
+chmod 0755 "$PKG/lkmloader"
 chmod 0644 "$PKG/module.prop"
 find "$PKG" -maxdepth 1 -name '*.sh' -exec chmod 0755 {} +
 
@@ -70,4 +74,4 @@ ZIP="$ROOT/$OUT/${ID}-${VER:-dev}-${ABI}.zip"   # absolute: zip runs from inside
 rm -f "$ZIP"
 ( cd "$PKG" && zip -r -X -q "$ZIP" . -x '.*' )
 echo "==> packaged: $ZIP"
-unzip -l "$ZIP" | awk 'NR==1||/module.prop|metamount|metainstall|metauninstall|customize|kagamid-/' || true
+unzip -l "$ZIP" | awk 'NR==1||/module.prop|metamount|metainstall|metauninstall|customize|kagamid-|lkmloader/' || true

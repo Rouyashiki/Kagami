@@ -21,14 +21,16 @@ The current tree intentionally contains only the project skeleton:
 
 - `webui/`: migrated React/Vite WebUI, renamed to Kagami/Kasumi paths and commands.
 - `src/`: C++ daemon, Kasumi control plane, and hybrid mount backends.
+- `third_party/lkmloader/`: standalone LKM loader submodule.
 - `module/`: KernelSU/APatch metamodule packaging files.
 - `CMakeLists.txt`: native binary, WebUI, and package targets.
 
 Build locally:
 
 ```sh
+git submodule update --init
 cmake -S . -B build
-cmake --build build --target kagamid
+cmake --build build --target kagamid lkmloader
 ```
 
 Build the WebUI and package:
@@ -47,6 +49,15 @@ accepted filename formats, full KMI matrix, and licensing details are in
 `module/kasumi/README.md`. If no
 compatible asset is installed, boot continues with the OverlayFS/Magic Mount
 fallback.
+
+Kagami first tries the normal `finit_module` path. If the kernel rejects a
+module because a required symbol is no longer exported, the bundled
+`lkmloader` submodule resolves undefined ELF symbols from the built-in kernel
+portion of `/proc/kallsyms`, writes the patched image to a sealed memfd, and
+retries through `finit_module`. The helper is an independent MIT-licensed
+executable and does not depend on `ksud`; `init_module` is retained only as a
+compatibility fallback when the fd-based path is unavailable. An exact
+kmsg-confirmed vermagic mismatch rebuilds `.modinfo` and is retried once.
 
 `mount_hide_mode` selects the Kasumi mount-hide level. `normal` removes
 root-owned mounts while preserving the real zygote_next shared namespace view;
