@@ -141,7 +141,7 @@ jobs:
           echo "$KAGAMI_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kagami.jks"
           echo "KAGAMI_KEYSTORE=$RUNNER_TEMP/kagami.jks" >> "$GITHUB_ENV"
 
-      - name: Build & package
+      - name: Build package & standalone manager
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           KAGAMI_KEYSTORE_PASSWORD: ${{ secrets.KAGAMI_KEYSTORE_PASSWORD }}
@@ -149,7 +149,15 @@ jobs:
           KAGAMI_KEY_PASSWORD: ${{ secrets.KAGAMI_KEY_PASSWORD }}
         run: |
           chmod +x build.sh scripts/*.sh manager/gradlew
-          ./build.sh package
+          ./build.sh package --no-manager
+          MODULE_ZIP=$(find build/arm64-v8a/out -maxdepth 1 -type f -name '*.zip' -print -quit)
+          test -n "$MODULE_ZIP"
+          MODULE_ZIP_CONTENTS=$(cmake -E tar tf "$MODULE_ZIP")
+          if grep -Eqi '(^|/)[^/]+\.apk$' <<< "$MODULE_ZIP_CONTENTS"; then
+            echo "APK files must not be bundled in the module zip."
+            exit 1
+          fi
+          ./build.sh manager
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
