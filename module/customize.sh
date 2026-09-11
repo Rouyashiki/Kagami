@@ -26,12 +26,17 @@ rm -f "$MODPATH"/kagamid-arm64-v8a \
 
 BASE_DIR="/data/adb/kagami"
 mkdir -p "$BASE_DIR"
+"$MODPATH/kagamid" prepare "$MODPATH" || abort "! Failed to prepare Kagami metadata"
 
 if [ ! -f "$BASE_DIR/config.json" ]; then
     "$MODPATH/kagamid" config gen -o "$BASE_DIR/config.json" || abort "! Failed to generate config"
 fi
 
-for ROOT_IMPL in /data/adb/ksu /data/adb/ap; do
+if [ "$(readlink /data/adb/ksu/bin/kagamid 2>/dev/null)" = "/data/adb/modules/kagami/kagamid" ]; then
+    rm -f /data/adb/ksu/bin/kagamid
+fi
+
+for ROOT_IMPL in /data/adb/ap; do
     if [ -d "$ROOT_IMPL" ]; then
         mkdir -p "$ROOT_IMPL/bin"
         ln -sf /data/adb/modules/kagami/kagamid "$ROOT_IMPL/bin/kagamid"

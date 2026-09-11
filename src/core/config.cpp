@@ -1,6 +1,8 @@
 #include "kagami/config.hpp"
 
 #include "core/json_value.hpp"
+#include "core/log.hpp"
+#include "core/runtime.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -42,41 +44,36 @@ static bool ensure_parent_dir(const std::string& path, std::string& error) {
     return true;
 }
 
-static bool write_config_atomic(const std::string& path, const std::string& data,
+bool write_file_atomic(const std::string& path, const std::string& data,
                                 std::string& error) {
-    if (!ensure_parent_dir(path, error)) {
+    if (!ensure_parent_dir(path, error)) return false;
+    std::string temporary = path + ".tmp.XXXXXX";
+    const int fd = mkostemp(temporary.data(), O_CLOEXEC);
+    if (fd < 0) {
+        error = "create " + path + ": " + std::strerror(errno);
         return false;
     }
-    const std::string temporary = path + ".tmp." + std::to_string(getpid());
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        error = "open " + temporary + ": " + std::strerror(errno);
-        return false;
-    }
-    out << data;
-    out.flush();
-    const bool write_ok = out.good();
-    out.close();
-    if (!write_ok || out.fail()) {
-        error = "write " + temporary + " failed";
-        ::remove(temporary.c_str());
-        return false;
-    }
-    const int fd = ::open(temporary.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0 || ::fsync(fd) != 0) {
-        const int saved_errno = errno;
-        if (fd >= 0) {
-            ::close(fd);
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < data.size()) {
+        const auto written = write(fd, data.data() + offset, data.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            if (written == 0) errno = EIO;
+            ok = false;
+            break;
         }
-        ::remove(temporary.c_str());
-        error = "sync " + temporary + ": " + std::strerror(saved_errno);
-        return false;
+        offset += static_cast<size_t>(written);
     }
-    ::close(fd);
-    if (::rename(temporary.c_str(), path.c_str()) != 0) {
-        const int saved_errno = errno;
-        ::remove(temporary.c_str());
-        error = "replace " + path + ": " + std::strerror(saved_errno);
+    if (ok) ok = fsync(fd) == 0;
+    int saved_errno = errno;
+    if (close(fd) != 0 && ok) {
+        ok = false;
+        saved_errno = errno;
+    }
+    if (!ok || rename(temporary.c_str(), path.c_str()) != 0) {
+        error = "write " + path + ": " + std::strerror(ok ? errno : saved_errno);
+        unlink(temporary.c_str());
         return false;
     }
     return true;
@@ -96,7 +93,7 @@ public:
             return false;
         }
         const std::string lock_path = path + ".lock";
-        fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd_ < 0) {
             error = "open " + lock_path + ": " + std::strerror(errno);
             return false;
@@ -160,7 +157,7 @@ bool write_default_config(const std::string& path, std::string& error) {
     if (!lock.acquire(path, error)) {
         return false;
     }
-    return write_config_atomic(path, default_config_json(), error);
+    return write_file_atomic(path, default_config_json(), error);
 }
 
 static std::vector<std::string> json_string_array_or_empty(const JsonValue* value) {
@@ -235,7 +232,18 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.fs_type = json_string_or(&root, "fs_type", config.fs_type);
     config.debug = json_bool_or(&root, "debug", config.debug);
     config.verbose = json_bool_or(&root, "verbose", config.verbose);
+#if defined(KAGAMI_EMBEDDED)
+    config.module_dir = runtime_modules_dir().string();
+    config.data_dir = runtime_data_dir().string();
+    config.log_file = runtime_log_file().string();
+    config.mirror_img = (runtime_data_dir() / "mirror.img").string();
+#endif
+    logging::set_debug_enabled(config.debug || config.verbose);
+#if defined(KAGAMI_EMBEDDED)
+    config.lkm_autoload = false;
+#else
     config.lkm_autoload = json_bool_or(&root, "lkm_autoload", config.lkm_autoload);
+#endif
     config.kasumi_enabled = json_bool_or(&root, "kasumi_enabled", config.kasumi_enabled);
     config.enable_kernel_debug =
         json_bool_or(&root, "enable_kernel_debug", config.enable_kernel_debug);
@@ -386,7 +394,9 @@ bool merge_config_json(const std::string& path, const std::string& updates,
         version.number_value = 3;
         root.object_value["kasumi_feature_config_version"] = std::move(version);
     }
-    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
+    const bool saved = write_file_atomic(path, stringify_json(root, 2) + "\n", error);
+    if (saved) logging::set_debug_enabled(json_bool_or(&root, "debug", false) || json_bool_or(&root, "verbose", false));
+    return saved;
 }
 
 bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error) {
@@ -414,7 +424,7 @@ bool update_lkm_autoload_config(const std::string& path, bool enabled, std::stri
     value.bool_value = enabled;
     root.object_value["lkm_autoload"] = value;
 
-    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
+    return write_file_atomic(path, stringify_json(root, 2) + "\n", error);
 }
 
 bool update_policy_config(const std::string& path, const PolicyConfig& policy, std::string& error) {
@@ -471,7 +481,7 @@ bool update_policy_config(const std::string& path, const PolicyConfig& policy, s
     policy_json.object_value["deny_uids"] = uid_array(policy.deny_uids);
     root.object_value["policy"] = policy_json;
 
-    return write_config_atomic(path, stringify_json(root, 2) + "\n", error);
+    return write_file_atomic(path, stringify_json(root, 2) + "\n", error);
 }
 
 } // namespace kagami

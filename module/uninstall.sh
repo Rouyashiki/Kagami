@@ -9,5 +9,9 @@ if [ -x "$MODDIR/kagamid" ]; then
     "$MODDIR/kagamid" daemon stop >/dev/null 2>&1 || true
 fi
 
-rm -f /data/adb/ksu/bin/kagamid /data/adb/ap/bin/kagamid
+for LINK in /data/adb/ksu/bin/kagamid /data/adb/ap/bin/kagamid; do
+    if [ "$(readlink "$LINK" 2>/dev/null)" = "$MODDIR/kagamid" ]; then
+        rm -f "$LINK"
+    fi
+done
 exit 0

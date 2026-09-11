@@ -2,8 +2,11 @@
 
 #include "core/daemon.hpp"
 #include "core/json.hpp"
+#include "core/json_value.hpp"
 #include "core/lkm.hpp"
 #include "core/runtime.hpp"
+#include "core/log.hpp"
+#include <chrono>
 #include "kagami/config.hpp"
 #include "kagami/kasumi_client.hpp"
 #include "kagami/kasumi_uapi_compat.hpp"
@@ -430,6 +433,7 @@ static int print_features_json(int bitmask) {
     return 0;
 }
 
+#if !defined(KAGAMI_EMBEDDED)
 static void print_lkm_unload_status_json() {
     const auto unload = lkm::unload_status();
     const auto& quiesce = unload.quiesce;
@@ -456,6 +460,8 @@ static void print_lkm_unload_status_json() {
               << "\"module_refs\":" << quiesce.module_refs << ","
               << "\"err\":" << quiesce.err << "}}";
 }
+
+#endif
 
 static std::string policy_owner_name(kasumi::PolicyOwner owner) {
     switch (owner) {
@@ -718,6 +724,13 @@ static int print_kasumi_snapshot_json() {
 
 static int apply_config_file(const fs::path& path, bool kernel_state_lost = false,
                              bool force_enable = false) {
+#if defined(KAGAMI_EMBEDDED)
+    if (path.lexically_normal() != config_file().lexically_normal()) {
+        errno = EINVAL;
+        std::cerr << "Embedded configuration must stay in " << config_file() << '\n';
+        return 1;
+    }
+#endif
     Config config;
     std::string error;
     if (!read_config_file(path.string(), config, error)) {
@@ -964,6 +977,13 @@ static int handle_config(const std::vector<std::string>& args) {
             }
         }
         std::string error;
+#if defined(KAGAMI_EMBEDDED)
+        if (fs::path(output).lexically_normal() != config_file().lexically_normal()) {
+            errno = EINVAL;
+            std::cerr << "Embedded configuration must stay in " << config_file() << '\n';
+            return 1;
+        }
+#endif
         if (!write_default_config(output, error)) {
             std::cerr << error << "\n";
             return 1;
@@ -1057,6 +1077,12 @@ static int handle_api(const std::vector<std::string>& args) {
         return print_storage_json();
     }
     if (sub == "lkm") {
+#if defined(KAGAMI_EMBEDDED)
+        std::cout << "{\"builtin\":true,\"available\":"
+                  << (kasumi::is_available() ? "true" : "false")
+                  << ",\"external_management\":false}\n";
+        return 0;
+#else
         const auto version = kasumi::version_info();
         const bool builtin = version.status == kasumi::Status::Available && !lkm::is_loaded();
         std::cout << "{\"loaded\":" << (lkm::is_loaded() ? "true" : "false")
@@ -1070,6 +1096,7 @@ static int handle_api(const std::vector<std::string>& args) {
         print_lkm_unload_status_json();
         std::cout << "}\n";
         return 0;
+#endif
     }
     if (sub == "kasumi") {
         return print_kasumi_snapshot_json();
@@ -1341,7 +1368,7 @@ static int handle_module(const std::vector<std::string>& args) {
         // Boot-only entry (the metamodule metamount.sh hook). Refuse once the
         // device has booted: magic mount over the live system post-boot breaks
         // mount namespaces (it propagates into adbd / service namespaces).
-        if (system_boot_completed() && std::getenv("KAGAMI_MOUNT_HERE") == nullptr) {
+        if (system_boot_completed() && !runtime_mount_here()) {
             std::cerr << "refusing module mount-all: magic mount only runs at boot via "
                          "metamount.sh; post-boot mounting breaks namespaces\n";
             return 1;
@@ -1621,6 +1648,13 @@ static int handle_kasumi(const std::vector<std::string>& args) {
     return 1;
 }
 
+#if defined(KAGAMI_EMBEDDED)
+static int handle_lkm(const std::vector<std::string>&) {
+    errno = EOPNOTSUPP;
+    std::cerr << "Embedded Kasumi is owned by YukiSU; external LKM management is unavailable\n";
+    return 1;
+}
+#else
 static int handle_lkm(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "set-autoload") {
@@ -1696,6 +1730,8 @@ static int handle_lkm(const std::vector<std::string>& args) {
     return 1;
 }
 
+#endif
+
 static int handle_hide(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "list") {
@@ -1759,6 +1795,16 @@ static int handle_recovery(const std::vector<std::string>& args) {
 }
 
 int run_command(const std::vector<std::string>& args) {
+    if (!args.empty() && args[0] == "prepare") {
+        std::string error;
+        const bool ok = prepare_runtime(error) &&
+            (args.size() < 2 || prepare_package_metadata(args[1], error)) &&
+            logging::prepare_boot_log(error);
+        logging::write(ok ? logging::Level::Info : logging::Level::Error,
+                       "startup", ok ? "private runtime metadata ready" : error);
+        if (!ok) std::cerr << error << '\n';
+        return ok ? 0 : 1;
+    }
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
         print_usage();
         return args.empty() ? 1 : 0;
@@ -1805,7 +1851,51 @@ int run_command(const std::vector<std::string>& args) {
     return 1;
 }
 
+static bool is_query(const std::vector<std::string>& args) {
+    if (args.empty()) return true;
+    const auto sub = arg_or_default(args, 1, "");
+    return args[0] == "api" || args[0] == "version" || args[0] == "help" ||
+           (args[0] == "config" && sub == "show") ||
+           (args[0] == "module" && (sub == "list" || sub == "check-conflicts")) ||
+           (args[0] == "hide" && sub == "list") ||
+           (args[0] == "kasumi" && (sub == "version" || sub == "list" || sub == "features" || sub == "hooks")) ||
+           (args[0] == "recovery" && sub == "status");
+}
+
+static std::string operation_description(const std::vector<std::string>& args) {
+    if (args.empty()) return "help";
+    std::string result = args[0] + (args.size() > 1 ? " " + args[1] : "");
+    if (args[0] == "config" && args.size() == 3 && args[1] == "merge-json") {
+        JsonValue patch;
+        std::string error;
+        if (parse_json(args[2], patch, error) && patch.is_object()) {
+            result += " keys=";
+            const std::set<std::string> public_values = {
+                "debug", "verbose", "kasumi_enabled", "builtin_mount_enabled",
+                "enable_kernel_debug", "enable_stealth", "enable_mount_hide", "mount_hide_mode",
+                "enable_maps_spoof", "enable_statfs_spoof", "enable_overlay_xattr_hide",
+                "enable_selinux_fix", "overlayfs_enabled", "magic_mount_enabled",
+                "fs_type", "mount_backend", "mountsource"
+            };
+            for (const auto& item : patch.object_value) {
+                result += item.first;
+                if (public_values.count(item.first)) result += "=" + stringify_json(item.second);
+                result += ",";
+            }
+        }
+    } else if ((args[0] == "module" || args[0] == "hide" || args[0] == "lkm") && args.size() > 2) {
+        result += " target=" + json_quote(args[2]);
+        if (args.size() > 3) result += " value=" + json_quote(args[3]);
+        if (args.size() > 4) result += " mode=" + json_quote(args[4]);
+    }
+    return result;
+}
+
 CommandResult run_command_capture(const std::vector<std::string>& args) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto operation = operation_description(args);
+    const auto level = is_query(args) ? logging::Level::Debug : logging::Level::Info;
+    logging::write(level, "command", "begin " + operation);
     std::ostringstream stdout_buffer;
     std::ostringstream stderr_buffer;
     auto* old_stdout = std::cout.rdbuf(stdout_buffer.rdbuf());
@@ -1815,6 +1905,15 @@ CommandResult run_command_capture(const std::vector<std::string>& args) {
     const int error_number = exit_code == 0 ? 0 : (errno != 0 ? errno : EIO);
     std::cout.rdbuf(old_stdout);
     std::cerr.rdbuf(old_stderr);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    logging::write(exit_code == 0 ? level : logging::Level::Error, "command",
+        operation + " result=" + (exit_code == 0 ? "ok" : "failed") +
+        " exit=" + std::to_string(exit_code) + " errno=" + std::to_string(error_number) +
+        " elapsed_ms=" + std::to_string(elapsed));
+    if (!stderr_buffer.str().empty())
+        logging::write(exit_code == 0 ? logging::Level::Warning : logging::Level::Error,
+                       "command", operation + ": " + stderr_buffer.str());
     return {exit_code, error_number, stdout_buffer.str(), stderr_buffer.str()};
 }
 

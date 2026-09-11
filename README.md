@@ -1,5 +1,21 @@
 # Kagami
 
+## Controller diagnostics and isolation
+
+The standalone controller keeps its own configuration and state in
+`/data/adb/kagami`, independently of YukiSU's embedded controller. It no longer
+installs a controller alias into YukiSU's private `ksu/bin` directory.
+
+`daemon.log` uses DEBUG, INFO, WARN and ERROR records. Debug/verbose mode enables
+query and per-rule details; mutations, backend selections and failures remain
+visible without it. The first writer of each boot rotates the previous file to
+`daemon.log.old`. Same-boot restarts preserve the current file.
+
+Installation and post-fs-data prepare controller metadata as `adb_data_file`
+with private runtime permissions. System/vendor/product payload trees retain
+their own labels. This avoids treating Kagami's control files as system payloads
+when Android init performs restorecon, without widening SELinux permissions.
+
 Kagami is a new Android metamodule skeleton. The project keeps the old web UI lineage, but the native side is being rewritten in C++ with an opt-in Kasumi mount pipeline.
 
 Backend priority:

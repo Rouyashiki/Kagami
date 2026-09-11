@@ -1,4 +1,5 @@
 #include "core/lkm.hpp"
+#include "core/log.hpp"
 
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
@@ -45,7 +46,10 @@ fs::path legacy_autoload_file() { return runtime_data_dir() / "lkm_autoload"; }
 fs::path kmi_override_file() { return runtime_data_dir() / "lkm_kmi_override"; }
 fs::path ownership_file() { return runtime_lkm_owner_file(); }
 
-void set_error(const std::string& message) { g_last_error = message; }
+void set_error(const std::string& message) {
+    g_last_error = message;
+    if (!message.empty()) logging::write(logging::Level::Error, "lkm", message);
+}
 
 std::string read_first_line(const fs::path& path) {
     std::ifstream in(path);
@@ -463,6 +467,7 @@ std::string find_asset(const std::string& requested_kmi) {
 bool load() {
     g_last_error.clear();
     if (kasumi::is_available()) {
+        logging::write(logging::Level::Info, "lkm", "Kasumi already available; skip module loading");
         return true; // Kasumi may be kernel-built-in rather than an LKM.
     }
     if (is_loaded()) {
@@ -471,6 +476,7 @@ bool load() {
     }
     const std::string kmi = get_kmi_override().empty() ? current_kmi() : get_kmi_override();
     const std::string asset = find_asset(kmi);
+    logging::write(logging::Level::Info, "lkm", "load requested kmi=" + kmi + " asset=" + asset);
     if (asset.empty()) {
         set_error("no Kasumi module asset matches " + (kmi.empty() ? std::string("this kernel") : kmi));
         return false;
@@ -508,6 +514,7 @@ bool load() {
     }
     g_unload_status = {};
     g_ready_unload_instance.clear();
+    logging::write(logging::Level::Info, "lkm", "loaded successfully; protocol and ownership verified");
     return true;
 #else
     set_error("Kasumi LKM loading requires Android/Linux");
@@ -520,6 +527,7 @@ bool autoload() {
 }
 
 bool unload(bool require_ownership) {
+    logging::write(logging::Level::Info, "lkm", "unload requested; require_ownership=" + std::to_string(require_ownership));
     g_last_error.clear();
     const UnloadStatus previous_unload = g_unload_status;
     const std::string previous_ready_instance = g_ready_unload_instance;
@@ -646,6 +654,7 @@ bool unload(bool require_ownership) {
         const int delete_errno = delete_module_nonblocking();
         g_unload_status.delete_errno = delete_errno;
         if (delete_errno == 0) {
+            logging::write(logging::Level::Info, "lkm", "unloaded successfully");
             g_ready_unload_instance.clear();
             std::error_code ec;
             fs::remove(ownership_file(), ec);

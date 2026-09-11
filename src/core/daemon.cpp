@@ -7,6 +7,7 @@
 #include "core/log.hpp"
 #include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
+#include "kagami/config.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -33,15 +34,8 @@ namespace fs = std::filesystem;
 
 static int print_status_json();
 
-static void append_log(const std::string& message) {
-    logging::append("daemon", message);
-}
-
-static std::string request_name(const std::vector<std::string>& args) {
-    if (args.empty()) {
-        return "unknown";
-    }
-    return args.size() > 1 ? args[0] + " " + args[1] : args[0];
+static void append_log(const std::string& message, logging::Level level = logging::Level::Info) {
+    logging::write(level, "daemon", message);
 }
 
 static std::string join_request(const std::vector<std::string>& args, std::size_t start) {
@@ -250,6 +244,17 @@ static bool stop_legacy_daemon() {
 }
 
 static int serve_foreground() {
+    umask(0077);
+    std::string preparation_error;
+    if (!prepare_runtime(preparation_error) || !logging::prepare_boot_log(preparation_error)) {
+        logging::write(logging::Level::Error, "daemon", preparation_error);
+        std::cerr << preparation_error << '\n';
+        return 1;
+    }
+    Config log_config;
+    std::string config_error;
+    if (read_config_file(runtime_config_file().string(), log_config, config_error))
+        logging::set_debug_enabled(log_config.debug || log_config.verbose);
     std::error_code ec;
     fs::create_directories(runtime_data_dir(), ec);
     if (ec) {
@@ -324,7 +329,12 @@ static int serve_foreground() {
     // Keep a capability FD only for built-in Kasumi or for the exact LKM
     // instance loaded by this Kagami boot. Starting without Kasumi is valid:
     // an explicit lkm load can acquire ownership later.
+#if defined(KAGAMI_EMBEDDED)
+    kasumi::set_connection_persistent(true);
+    (void)kasumi::is_available();
+#else
     (void)lkm::retain_owned_connection();
+#endif
 
     {
         std::ofstream pid(runtime_pid_file(), std::ios::trunc);
@@ -332,7 +342,7 @@ static int serve_foreground() {
             pid << getpid() << "\n";
         }
     }
-    append_log("kagamid started pid=" + std::to_string(getpid()));
+    append_log("ready pid=" + std::to_string(getpid()) + " socket=" + socket_path);
 
     bool stopping = false;
     while (!stopping) {
@@ -341,7 +351,7 @@ static int serve_foreground() {
             if (errno == EINTR) {
                 continue;
             }
-            append_log(std::string("accept failed: ") + std::strerror(errno));
+            append_log(std::string("accept failed: ") + std::strerror(errno), logging::Level::Error);
             continue;
         }
 
@@ -353,6 +363,7 @@ static int serve_foreground() {
         const auto request = read_all(client_fd, 64 * 1024);
         auto request_args = split_request(request);
         if (request_args.empty()) {
+            append_log("rejected malformed or empty request", logging::Level::Warning);
             write_all(client_fd, response_json(false, 1, EINVAL, "", "empty daemon request"));
             close(client_fd);
             continue;
@@ -384,8 +395,6 @@ static int serve_foreground() {
         }
 
         const auto result = run_command_capture(request_args);
-        append_log("request " + request_name(request_args) +
-                   " exit=" + std::to_string(result.exit_code));
         write_all(client_fd, response_json(result.exit_code == 0, result.exit_code,
                                            result.error_number, result.stdout_text,
                                            result.stderr_text));
@@ -407,6 +416,11 @@ static int start_background(bool report_status) {
         return report_status ? print_status_json() : 0;
     }
 
+    std::string preparation_error;
+    if (!prepare_runtime(preparation_error) || !logging::prepare_boot_log(preparation_error)) {
+        std::cerr << preparation_error << '\n';
+        return 1;
+    }
     std::error_code ec;
     fs::create_directories(runtime_data_dir(), ec);
     const pid_t pid = fork();
@@ -421,7 +435,7 @@ static int start_background(bool report_status) {
             dup2(null_fd, STDIN_FILENO);
             close(null_fd);
         }
-        const int log_fd = open(runtime_log_file().c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
+        const int log_fd = open(runtime_log_file().c_str(), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
             dup2(log_fd, STDERR_FILENO);
