@@ -7,49 +7,52 @@
 #include <sstream>
 #include <string>
 
-static std::string json_quote(const std::string &value) {
+namespace {
+std::string json_quote(const std::string& value) {
     std::ostringstream out;
     out << '"';
-    for (char ch : value) {
+    for (const char ch : value) {
         switch (ch) {
-            case '\\':
-                out << "\\\\";
-                break;
-            case '"':
-                out << "\\\"";
-                break;
-            case '\n':
-                out << "\\n";
-                break;
-            case '\r':
-                out << "\\r";
-                break;
-            case '\t':
-                out << "\\t";
-                break;
-            default: {
-                const auto byte = static_cast<unsigned char>(ch);
-                if (byte < 0x20) {
-                    out << "\\u00";
-                    const char *hex = "0123456789abcdef";
-                    out << hex[(byte >> 4) & 0x0f] << hex[byte & 0x0f];
-                } else {
-                    out << ch;
-                }
+        case '\\':
+            out << "\\\\";
+            break;
+        case '"':
+            out << "\\\"";
+            break;
+        case '\n':
+            out << "\\n";
+            break;
+        case '\r':
+            out << "\\r";
+            break;
+        case '\t':
+            out << "\\t";
+            break;
+        default: {
+            const auto byte = static_cast<unsigned char>(ch);
+            if (byte < 0x20) {
+                out << "\\u00";
+                const char* hex = "0123456789abcdef";
+                out << hex[(byte >> 4) & 0x0f] << hex[byte & 0x0f];
+            } else {
+                out << ch;
             }
+        }
         }
     }
     out << '"';
     return out.str();
 }
 
-static jstring to_jstring(JNIEnv *env, const std::string &value) {
+jstring to_jstring(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
 }
+}  // namespace
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_anatdx_kagami_KasumiNative_statPath(JNIEnv *env, jobject, jstring path) {
-    const char *native_path = path == nullptr ? nullptr : env->GetStringUTFChars(path, nullptr);
+extern "C" JNIEXPORT jstring JNICALL Java_com_anatdx_kagami_KasumiNative_statPath(JNIEnv* env,
+                                                                                  jobject /*thiz*/,
+                                                                                  jstring path) {
+    const char* native_path = path == nullptr ? nullptr : env->GetStringUTFChars(path, nullptr);
     struct stat st = {};
     bool ok = false;
     int saved_errno = 0;
@@ -79,7 +82,6 @@ Java_com_anatdx_kagami_KasumiNative_statPath(JNIEnv *env, jobject, jstring path)
         << "\"dev\":" << dev << ","
         << "\"dev_major\":" << major_id << ","
         << "\"dev_minor\":" << minor_id << ","
-        << "\"mode\":" << mode
-        << "}";
+        << "\"mode\":" << mode << "}";
     return to_jstring(env, out.str());
 }

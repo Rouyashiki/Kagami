@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -42,13 +41,13 @@ val (kagamiVersionName, kagamiVersionCode) = computeVersion()
 
 android {
     namespace = "com.anatdx.kagami"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.anatdx.kagami"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = kagamiVersionCode
         versionName = kagamiVersionName
 
@@ -115,7 +114,8 @@ android {
     }
 
     lint {
-        checkReleaseBuilds = false
+        checkReleaseBuilds = true
+        warningsAsErrors = true
     }
 }
 

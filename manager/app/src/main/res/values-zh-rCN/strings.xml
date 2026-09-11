@@ -60,7 +60,6 @@
     <string name="apps_state_allow">允许</string>
     <string name="apps_state_deny">拒绝</string>
     <string name="action_pick_apps">选择应用</string>
-    <string name="action_pick_path">选择路径</string>
     <string name="action_apply_app_picker">应用选择</string>
     <string name="action_resolve_path">解析</string>
     <string name="action_maps_preset_lib">预设：通用 .so</string>
@@ -68,8 +67,6 @@
     <string name="maps_picker_title">Maps 目标解析</string>
     <string name="maps_picker_desc">选择 app 安装路径或输入文件路径，自动填入 ino/dev。</string>
     <string name="maps_picker_path_hint">/system/lib64/libc.so</string>
-    <string name="maps_resolve_failed">stat 失败：%1$s</string>
-    <string name="maps_resolve_ok">已解析 ino=%1$d dev=%2$d（%3$d:%4$d）</string>
     <string name="status_native_ready">Kasumi 就绪</string>
     <string name="status_native_unavailable">Kasumi 不可用</string>
     <string name="status_daemon_ready">Daemon 就绪</string>
@@ -81,7 +78,6 @@
     <string name="label_mirror">镜像路径</string>
     <string name="label_protocol">协议</string>
     <string name="label_uid">UID</string>
-    <string name="label_protocol_override">协议覆盖</string>
     <string name="label_autoload">自动加载</string>
     <string name="label_status">状态</string>
     <string name="label_get_fd">GET_FD</string>

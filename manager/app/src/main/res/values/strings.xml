@@ -55,12 +55,11 @@
     <string name="apps_loading">Loading installed apps…</string>
     <string name="apps_select_label">Select apps</string>
     <string name="apps_select_done">Done</string>
-    <string name="apps_picked_summary">%1$d allow · %2$d deny</string>
+    <string name="apps_picked_summary">Allow: %1$d · Deny: %2$d</string>
     <string name="apps_state_off">Off</string>
     <string name="apps_state_allow">Allow</string>
     <string name="apps_state_deny">Deny</string>
     <string name="action_pick_apps">Pick apps</string>
-    <string name="action_pick_path">Pick path</string>
     <string name="action_apply_app_picker">Apply selection</string>
     <string name="action_resolve_path">Resolve</string>
     <string name="action_maps_preset_lib">Preset: generic .so</string>
@@ -68,8 +67,6 @@
     <string name="maps_picker_title">Maps target resolver</string>
     <string name="maps_picker_desc">Pick app source dir or path; ino/dev fills automatically.</string>
     <string name="maps_picker_path_hint">/system/lib64/libc.so</string>
-    <string name="maps_resolve_failed">stat failed: %1$s</string>
-    <string name="maps_resolve_ok">Resolved ino=%1$d dev=%2$d (%3$d:%4$d)</string>
     <string name="status_native_ready">Kasumi ready</string>
     <string name="status_native_unavailable">Kasumi unavailable</string>
     <string name="status_daemon_ready">Daemon ready</string>
@@ -81,7 +78,6 @@
     <string name="label_mirror">Mirror</string>
     <string name="label_protocol">Protocol</string>
     <string name="label_uid">UID</string>
-    <string name="label_protocol_override">Protocol override</string>
     <string name="label_autoload">Autoload</string>
     <string name="label_status">Status</string>
     <string name="label_get_fd">GET_FD</string>

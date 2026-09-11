@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.22.1)
 
 project(kagami_manager_native LANGUAGES CXX)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/ClangTidy.cmake")
 
 add_library(kagami_client SHARED
     kagami_jni.cpp
 )
 
 target_compile_features(kagami_client PRIVATE cxx_std_17)
+kagami_enable_clang_tidy(kagami_client)
 target_compile_options(kagami_client PRIVATE
     -Wall
     -Wextra
