@@ -12,6 +12,18 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Install clang-format
+        run: python -m pip install clang-format==22.1.8
+      - name: Check native formatting
+        run: bash scripts/check-format.sh
+
   build-kasumi-lkm:
     name: Kasumi API 17 (${{ matrix.kmi }})
     runs-on: ubuntu-latest
@@ -158,6 +170,7 @@ jobs:
             exit 1
           fi
           ./build.sh manager
+          (cd manager && ./gradlew lintDebug lintRelease --no-daemon)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
