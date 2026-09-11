@@ -1,16 +1,15 @@
 #include "mount/mount_fs.hpp"
+#include <linux/stat.h>
+#include <sys/syscall.h>
 #include <fstream>
 #include <iomanip>
-#include <linux/stat.h>
 #include <sstream>
-#include <sys/syscall.h>
 
 #include "core/log.hpp"
 #include "core/runtime.hpp"
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -19,13 +18,13 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <climits>
 
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <sstream>
 
 // Older bionic headers may not expose every propagation flag.
 #ifndef MS_SLAVE
@@ -37,15 +36,20 @@
 
 namespace kagami::mount::fsutil {
 
-constexpr const char *kSelinuxXattr = "security.selinux";
+constexpr const char* kSelinuxXattr = "security.selinux";
 
-const std::vector<std::string> kManagedPartitions = {
-    "system", "vendor", "product", "system_ext", "odm", "oem",
-};
+const std::vector<std::string>& managed_partitions() {
+    static const std::vector<std::string> partitions = {
+        "system", "vendor", "product", "system_ext", "odm", "oem",
+    };
+    return partitions;
+}
 
-void mlog(const std::string &msg, logging::Level level) { logging::write(level, "mount", msg); }
+void mlog(const std::string& msg, logging::Level level) {
+    logging::write(level, "mount", msg);
+}
 
-bool get_context(const std::string &path, std::string &out) {
+bool get_context(const std::string& path, std::string& out) {
     char buf[256];
     const ssize_t n = lgetxattr(path.c_str(), kSelinuxXattr, buf, sizeof(buf) - 1);
     if (n <= 0) {
@@ -56,12 +60,12 @@ bool get_context(const std::string &path, std::string &out) {
     return true;
 }
 
-bool set_context(const std::string &path, const std::string &ctx) {
+bool set_context(const std::string& path, const std::string& ctx) {
     return lsetxattr(path.c_str(), kSelinuxXattr, ctx.c_str(), ctx.size() + 1, 0) == 0;
 }
 
-void clone_attr(const std::string &src, const std::string &dst) {
-    struct stat st;
+void clone_attr(const std::string& src, const std::string& dst) {
+    struct stat st{};
     if (lstat(src.c_str(), &st) != 0) {
         return;
     }
@@ -75,12 +79,12 @@ void clone_attr(const std::string &src, const std::string &dst) {
     }
 }
 
-bool bind_mount(const std::string &src, const std::string &dst) {
+bool bind_mount(const std::string& src, const std::string& dst) {
     return ::mount(src.c_str(), dst.c_str(), nullptr, MS_BIND, nullptr) == 0;
 }
 
-bool mirror_entry(const std::string &src, const std::string &dst) {
-    struct stat st;
+bool mirror_entry(const std::string& src, const std::string& dst) {
+    struct stat st{};
     if (lstat(src.c_str(), &st) != 0) {
         mlog("lstat " + src + " failed: " + std::strerror(errno), logging::Level::Error);
         return false;
@@ -127,13 +131,13 @@ bool mirror_entry(const std::string &src, const std::string &dst) {
             return false;
         }
         clone_attr(src, dst);
-        DIR *d = opendir(src.c_str());
+        DIR* d = opendir(src.c_str());
         if (!d) {
             mlog("opendir " + src + " failed: " + std::strerror(errno), logging::Level::Error);
             return false;
         }
         bool ok = true;
-        struct dirent *e;
+        struct dirent* e;
         while ((e = readdir(d)) != nullptr) {
             if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
                 continue;
@@ -147,10 +151,10 @@ bool mirror_entry(const std::string &src, const std::string &dst) {
         return ok;
     }
 
-    return true; // skip device/socket/fifo nodes
+    return true;  // skip device/socket/fifo nodes
 }
 
-bool directory_is_opaque(const std::string &path, bool &opaque) {
+bool directory_is_opaque(const std::string& path, bool& opaque) {
     opaque = false;
     struct stat marker{};
     if (lstat((path + "/.replace").c_str(), &marker) == 0) {
@@ -171,8 +175,8 @@ bool directory_is_opaque(const std::string &path, bool &opaque) {
     return true;
 }
 
-bool copy_tree(const std::string &src, const std::string &dst) {
-    struct stat st;
+bool copy_tree(const std::string& src, const std::string& dst) {
+    struct stat st{};
     if (lstat(src.c_str(), &st) != 0) {
         mlog("copy_tree lstat " + src + " failed: " + std::strerror(errno), logging::Level::Error);
         return false;
@@ -213,12 +217,12 @@ bool copy_tree(const std::string &src, const std::string &dst) {
                  logging::Level::Error);
             return false;
         }
-        DIR *d = opendir(src.c_str());
+        DIR* d = opendir(src.c_str());
         if (!d) {
             return false;
         }
         bool ok = true;
-        struct dirent *e;
+        struct dirent* e;
         for (;;) {
             errno = 0;
             e = readdir(d);
@@ -299,7 +303,7 @@ bool copy_tree(const std::string &src, const std::string &dst) {
         return ok;
     }
 
-    return true; // skip device/socket/fifo nodes
+    return true;  // skip device/socket/fifo nodes
 }
 
 bool tmpfs_xattr_supported() {
@@ -315,7 +319,7 @@ bool tmpfs_xattr_supported() {
     int count;
     while ((count = gzread(file, buffer, sizeof(buffer))) > 0) {
         config.append(buffer, static_cast<size_t>(count));
-        if (config.size() > 4 * 1024 * 1024)
+        if (config.size() > 4UL * 1024 * 1024)
             break;
     }
     int error;
@@ -341,9 +345,10 @@ bool tmpfs_xattr_supported() {
     return enabled;
 }
 
-static bool kernel_umount_command(const char *op, const std::string &path) {
-    const char *ksud = nullptr;
-    for (const char *candidate : {"/data/adb/ksud", "/data/adb/ksu/bin/ksud"}) {
+namespace {
+bool kernel_umount_command(const char* op, const std::string& path) {
+    const char* ksud = nullptr;
+    for (const char* candidate : {"/data/adb/ksud", "/data/adb/ksu/bin/ksud"}) {
         if (access(candidate, X_OK) == 0) {
             ksud = candidate;
             break;
@@ -353,7 +358,7 @@ static bool kernel_umount_command(const char *op, const std::string &path) {
         return true;
     const pid_t pid = fork();
     if (pid == 0) {
-        execl(ksud, "ksud", "kernel", "umount", op, path.c_str(), static_cast<char *>(nullptr));
+        execl(ksud, "ksud", "kernel", "umount", op, path.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
     int status = 0;
@@ -368,8 +373,9 @@ static bool kernel_umount_command(const char *op, const std::string &path) {
         mlog("failed to register unmount path " + path, logging::Level::Error);
     return ok;
 }
+}  // namespace
 
-bool capture_mount_identity(const std::string &path, MountRecord &record) {
+bool capture_mount_identity(const std::string& path, MountRecord& record) {
     struct statx st{};
     constexpr unsigned mask = STATX_INO | STATX_MNT_ID;
     if (syscall(__NR_statx, AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, mask,
@@ -383,7 +389,7 @@ bool capture_mount_identity(const std::string &path, MountRecord &record) {
     return true;
 }
 
-bool mount_matches(const MountRecord &record, bool include_init) {
+bool mount_matches(const MountRecord& record, bool include_init) {
     MountRecord live;
     if (capture_mount_identity(record.path, live) && live.mount_id == record.mount_id &&
         live.device == record.device && live.inode == record.inode)
@@ -395,8 +401,8 @@ bool mount_matches(const MountRecord &record, bool include_init) {
     return mount_matches(init, false);
 }
 
-bool read_mount_journal(const std::string &journal, std::vector<MountRecord> &records,
-                        bool &legacy) {
+bool read_mount_journal(const std::string& journal, std::vector<MountRecord>& records,
+                        bool& legacy) {
     legacy = false;
     records.clear();
     std::ifstream input(journal);
@@ -405,7 +411,7 @@ bool read_mount_journal(const std::string &journal, std::vector<MountRecord> &re
     std::string line;
     if (!std::getline(input, line))
         return input.eof();
-    constexpr const char *prefix = "KAGAMI_MOUNTS_V2 ";
+    constexpr const char* prefix = "KAGAMI_MOUNTS_V2 ";
     if (line.rfind(prefix, 0) != 0) {
         legacy = true;
         do {
@@ -436,13 +442,13 @@ bool read_mount_journal(const std::string &journal, std::vector<MountRecord> &re
     return input.eof();
 }
 
-bool write_mount_journal(const std::string &journal, const std::vector<std::string> &mounts) {
+bool write_mount_journal(const std::string& journal, const std::vector<std::string>& mounts) {
     const auto boot = runtime_boot_id();
     if (boot.empty())
         return false;
     std::ostringstream data;
     data << "KAGAMI_MOUNTS_V2 " << boot << "\n";
-    for (const auto &path : mounts) {
+    for (const auto& path : mounts) {
         MountRecord record;
         if (path.find_first_of("\r\n") != std::string::npos ||
             !capture_mount_identity(path, record))
@@ -457,13 +463,13 @@ bool write_mount_journal(const std::string &journal, const std::vector<std::stri
     return ok;
 }
 
-std::string decode_mount_path(const std::string &input) {
+std::string decode_mount_path(const std::string& input) {
     std::string out;
     for (size_t i = 0; i < input.size(); ++i) {
         if (input[i] == '\\' && i + 3 < input.size() && input[i + 1] >= '0' &&
             input[i + 1] <= '3' && input[i + 2] >= '0' && input[i + 2] <= '7' &&
             input[i + 3] >= '0' && input[i + 3] <= '7') {
-            out += static_cast<char>((input[i + 1] - '0') * 64 + (input[i + 2] - '0') * 8 +
+            out += static_cast<char>(((input[i + 1] - '0') * 64) + ((input[i + 2] - '0') * 8) +
                                      input[i + 3] - '0');
             i += 3;
         } else {
@@ -473,10 +479,14 @@ std::string decode_mount_path(const std::string &input) {
     return out;
 }
 
-bool register_umount(const std::string &path) { return kernel_umount_command("add", path); }
-bool unregister_umount(const std::string &path) { return kernel_umount_command("del", path); }
+bool register_umount(const std::string& path) {
+    return kernel_umount_command("add", path);
+}
+bool unregister_umount(const std::string& path) {
+    return kernel_umount_command("del", path);
+}
 
-bool prepare_empty_mountpoint(const std::string &path) {
+bool prepare_empty_mountpoint(const std::string& path) {
     namespace fs = std::filesystem;
     const fs::path value(path);
     std::error_code ec;
@@ -494,7 +504,7 @@ bool prepare_empty_mountpoint(const std::string &path) {
     return true;
 }
 
-bool run_in_init_mount_ns(const std::function<bool()> &fn) {
+bool run_in_init_mount_ns(const std::function<bool()>& fn) {
     // Test hook: run in the *current* namespace (caller isolates via `unshare -m`)
     // so the engine can be exercised without touching the init/global namespace.
     // Detach all propagation first so test mounts can never escape this ns.
@@ -539,19 +549,19 @@ bool run_in_init_mount_ns(const std::function<bool()> &fn) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-std::string partition_mount_point(const std::string &partition) {
+std::string partition_mount_point(const std::string& partition) {
     if (partition == "system") {
         return "/system";
     }
     return "/" + partition;
 }
 
-std::string resolve_real_mount_target(const std::string &mount_point) {
+std::string resolve_real_mount_target(const std::string& mount_point) {
     char buf[PATH_MAX];
     if (realpath(mount_point.c_str(), buf) == nullptr) {
         return "";
     }
-    return std::string(buf);
+    return {buf};
 }
 
-} // namespace kagami::mount::fsutil
+}  // namespace kagami::mount::fsutil

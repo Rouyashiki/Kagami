@@ -36,4 +36,4 @@ inline std::string json_quote(const std::string& value) {
     return "\"" + json_escape(value) + "\"";
 }
 
-} // namespace kagami
+}  // namespace kagami

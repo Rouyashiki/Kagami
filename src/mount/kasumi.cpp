@@ -1,4 +1,5 @@
 #include "mount/kasumi.hpp"
+#include <iterator>
 
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
@@ -29,8 +30,12 @@ using fsutil::mlog;
 
 namespace {
 
-fs::path active_file() { return runtime_data_dir() / "run" / "kasumi_active"; }
-fs::path mapping_plan_file() { return runtime_data_dir() / "run" / "kasumi_mapping_plan"; }
+fs::path active_file() {
+    return runtime_data_dir() / "run" / "kasumi_active";
+}
+fs::path mapping_plan_file() {
+    return runtime_data_dir() / "run" / "kasumi_mapping_plan";
+}
 
 std::string current_boot_id() {
     std::ifstream in("/proc/sys/kernel/random/boot_id");
@@ -39,7 +44,7 @@ std::string current_boot_id() {
     return value;
 }
 
-bool marker_matches_current_boot(const fs::path &path) {
+bool marker_matches_current_boot(const fs::path& path) {
     const std::string boot_id = current_boot_id();
     if (boot_id.empty()) {
         return false;
@@ -49,7 +54,7 @@ bool marker_matches_current_boot(const fs::path &path) {
     return static_cast<bool>(std::getline(in, stored_boot_id)) && stored_boot_id == boot_id;
 }
 
-bool write_boot_marker(const fs::path &path, const std::string &detail = {}) {
+bool write_boot_marker(const fs::path& path, const std::string& detail = {}) {
     const std::string boot_id = current_boot_id();
     if (boot_id.empty()) {
         return false;
@@ -84,7 +89,7 @@ bool write_boot_marker(const fs::path &path, const std::string &detail = {}) {
     return true;
 }
 
-bool path_matches_rule(const std::string &path, const std::string &prefix) {
+bool path_matches_rule(const std::string& path, const std::string& prefix) {
     if (path == prefix) {
         return true;
     }
@@ -94,10 +99,10 @@ bool path_matches_rule(const std::string &path, const std::string &prefix) {
     return prefix.back() == '/' || path[prefix.size()] == '/';
 }
 
-std::string effective_mode(const std::string &path, const std::vector<ModuleRule> &rules) {
+std::string effective_mode(const std::string& path, const std::vector<ModuleRule>& rules) {
     std::string mode = "kasumi";
     std::size_t longest = 0;
-    for (const auto &rule : rules) {
+    for (const auto& rule : rules) {
         if (rule.path.empty() || rule.path.front() != '/') {
             continue;
         }
@@ -109,16 +114,16 @@ std::string effective_mode(const std::string &path, const std::vector<ModuleRule
     return mode;
 }
 
-static bool has_nested_rule(const std::string &path, const std::vector<ModuleRule> &rules) {
-    return std::any_of(rules.begin(), rules.end(), [&](const ModuleRule &rule) {
+bool has_nested_rule(const std::string& path, const std::vector<ModuleRule>& rules) {
+    return std::any_of(rules.begin(), rules.end(), [&](const ModuleRule& rule) {
         return rule.path.size() > path.size() && path_matches_rule(rule.path, path);
     });
 }
 
 // Resolve symlinked partition paths (e.g. /system/vendor -> /vendor) without
 // discarding a non-existent leaf that a module adds.
-std::string resolve_virtual_path(const std::string &value) {
-    fs::path path(value);
+std::string resolve_virtual_path(const std::string& value) {
+    const fs::path path(value);
     if (!path.has_parent_path()) {
         return value;
     }
@@ -152,13 +157,14 @@ std::vector<std::string> user_hide_rules() {
         return out;
     }
     std::stringstream data;
-    data << in.rdbuf();
+    std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+              std::ostreambuf_iterator<char>(data));
     JsonValue root;
     std::string error;
     if (!parse_json(data.str(), root, error) || !root.is_array()) {
         return out;
     }
-    for (const auto &item : root.array_value) {
+    for (const auto& item : root.array_value) {
         if (item.is_string() && !item.string_value.empty() && item.string_value.front() == '/') {
             out.push_back(item.string_value);
         }
@@ -175,7 +181,7 @@ struct RuleBatch {
     std::set<std::string> hide;
 };
 
-static bool merge_tree_supported(const fs::path &root) {
+bool merge_tree_supported(const fs::path& root) {
     bool opaque;
     if (!fsutil::directory_is_opaque(root.string(), opaque))
         return false;
@@ -200,8 +206,8 @@ static bool merge_tree_supported(const fs::path &root) {
     return !ec;
 }
 
-bool compile_tree(const fs::path &source_root, const std::string &virtual_root,
-                  const std::vector<ModuleRule> &rules, RuleBatch &batch) {
+bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
+                  const std::vector<ModuleRule>& rules, RuleBatch& batch) {
     std::error_code ec;
     if (!fs::is_directory(source_root, ec)) {
         return !ec || ec == std::errc::no_such_file_or_directory;
@@ -287,9 +293,9 @@ bool compile_tree(const fs::path &source_root, const std::string &virtual_root,
     return !ec;
 }
 
-bool disable_kernel_features(std::string *error = nullptr) {
+bool disable_kernel_features(std::string* error = nullptr) {
     bool ok = true;
-    const auto disable = [&](bool result, const char *name) {
+    const auto disable = [&](bool result, const char* name) {
         if (!result) {
             ok = false;
             if (error && error->empty()) {
@@ -306,9 +312,9 @@ bool disable_kernel_features(std::string *error = nullptr) {
     return ok;
 }
 
-} // namespace
+}  // namespace
 
-bool apply_policy_config(const PolicyConfig &policy, std::string &error) {
+bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
     ::kagami::kasumi::PolicyOwner owner = ::kagami::kasumi::PolicyOwner::Auto;
     if (policy.owner == "auto") {
         owner = ::kagami::kasumi::PolicyOwner::Auto;
@@ -350,14 +356,14 @@ bool apply_policy_config(const PolicyConfig &policy, std::string &error) {
     return true;
 }
 
-bool apply_feature_config(const Config &config, std::string &error) {
+bool apply_feature_config(const Config& config, std::string& error) {
     mlog("apply features: mount_hide=" + std::to_string(config.enable_mount_hide) +
          " mode=" + config.mount_hide_mode + " maps=" + std::to_string(config.enable_maps_spoof) +
          " statfs=" + std::to_string(config.enable_statfs_spoof) +
          " overlay_xattrs=" + std::to_string(config.enable_overlay_xattr_hide) +
          " selinux_guard=" + std::to_string(config.enable_selinux_fix));
     bool ok = true;
-    const auto apply = [&](bool result, const char *name) {
+    const auto apply = [&](bool result, const char* name) {
         if (!result) {
             if (error.empty()) {
                 error = std::string("failed to set Kasumi ") + name;
@@ -382,7 +388,7 @@ bool apply_feature_config(const Config &config, std::string &error) {
     return ok;
 }
 
-bool disable_control_state(std::string &error) {
+bool disable_control_state(std::string& error) {
     bool ok = true;
     if (!::kagami::kasumi::set_enabled(false)) {
         error = "failed to disable Kasumi";
@@ -394,9 +400,9 @@ bool disable_control_state(std::string &error) {
     return ok;
 }
 
-bool restore_persisted_hide_rules(std::string &error) {
+bool restore_persisted_hide_rules(std::string& error) {
     bool ok = true;
-    for (const auto &path : user_hide_rules()) {
+    for (const auto& path : user_hide_rules()) {
         if (!::kagami::kasumi::hide_path(path)) {
             ok = false;
         }
@@ -407,7 +413,7 @@ bool restore_persisted_hide_rules(std::string &error) {
     return ok;
 }
 
-bool deactivate(std::string &error) {
+bool deactivate(std::string& error) {
     bool ok = disable_control_state(error);
     if (!::kagami::kasumi::clear_rules()) {
         if (error.empty()) {
@@ -419,8 +425,8 @@ bool deactivate(std::string &error) {
     return ok;
 }
 
-bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config,
-                   const ModuleRuleMap &rules) {
+bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
+                   const ModuleRuleMap& rules) {
     if (!::kagami::kasumi::is_available()) {
         mlog("kasumi: backend requested but protocol is unavailable");
         return false;
@@ -447,15 +453,15 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     // /data/adb/modules; the vnode clones the source inode's SELinux SID, so no
     // relabeled mirror is needed (unlike OverlayFS, which exposes the lowerdir's
     // context). Kasumi therefore mounts no workdir.
-    const std::vector<std::string> &partitions =
-        config.partitions.empty() ? fsutil::kManagedPartitions : config.partitions;
+    const std::vector<std::string>& partitions =
+        config.partitions.empty() ? fsutil::managed_partitions() : config.partitions;
 
     RuleBatch batch;
-    for (const auto &module : modules) {
+    for (const auto& module : modules) {
         const auto rule_it = rules.find(module.id);
         const std::vector<ModuleRule> empty_rules;
-        const auto &module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
-        for (const auto &rule : module_rules) {
+        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        for (const auto& rule : module_rules) {
             if (rule.mode == "hide" && !rule.path.empty() && rule.path.front() == '/') {
                 batch.hide.insert(resolve_virtual_path(rule.path));
             }
@@ -468,17 +474,18 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     for (auto it = modules.rbegin(); it != modules.rend(); ++it) {
         const auto rule_it = rules.find(it->id);
         const std::vector<ModuleRule> empty_rules;
-        const auto &module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
         const fs::path source = it->path;
-        for (const auto &partition : partitions) {
+        for (const auto& partition : partitions) {
             if (!compile_tree(source / partition, "/" + partition, module_rules, batch))
                 return false;
         }
     }
 
     bool ok = true;
-    size_t add_count = 0, merge_count = 0;
-    for (const auto &rule : batch.mappings) {
+    size_t add_count = 0;
+    size_t merge_count = 0;
+    for (const auto& rule : batch.mappings) {
         const bool added = rule.merge ? ::kagami::kasumi::add_merge_rule(rule.path, rule.source)
                                       : ::kagami::kasumi::add_rule(rule.path, rule.source, 0);
         rule.merge ? ++merge_count : ++add_count;
@@ -487,10 +494,10 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
              added ? logging::Level::Debug : logging::Level::Error);
         ok = added && ok;
     }
-    for (const auto &path : persisted_hide_rules) {
+    for (const auto& path : persisted_hide_rules) {
         batch.hide.insert(path);
     }
-    for (const auto &path : batch.hide) {
+    for (const auto& path : batch.hide) {
         const bool hidden = ::kagami::kasumi::hide_path(path);
         mlog("hide path=" + path + (hidden ? " ok" : " failed errno=" + std::to_string(errno)),
              hidden ? logging::Level::Debug : logging::Level::Error);
@@ -512,8 +519,8 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     return ok;
 }
 
-bool unmount_all(const Config &config) {
-    (void)config; // shared storage is released centrally after OverlayFS too.
+bool unmount_all(const Config& config) {
+    (void)config;  // shared storage is released centrally after OverlayFS too.
     bool ok = true;
     if (::kagami::kasumi::module_loaded() || ::kagami::kasumi::is_available()) {
         std::string error;
@@ -528,7 +535,9 @@ bool unmount_all(const Config &config) {
     return ok;
 }
 
-bool is_active() { return marker_matches_current_boot(active_file()); }
+bool is_active() {
+    return marker_matches_current_boot(active_file());
+}
 
 void invalidate_active_state() {
     std::error_code ec;
@@ -542,7 +551,7 @@ std::vector<std::string> replayable_module_ids() {
     }
     std::ifstream in(mapping_plan_file());
     std::string line;
-    std::getline(in, line); // boot id
+    std::getline(in, line);  // boot id
     while (std::getline(in, line)) {
         if (!line.empty()) {
             ids.push_back(line);
@@ -551,15 +560,17 @@ std::vector<std::string> replayable_module_ids() {
     return ids;
 }
 
-bool has_replayable_mappings() { return !replayable_module_ids().empty(); }
+bool has_replayable_mappings() {
+    return !replayable_module_ids().empty();
+}
 
-bool record_replayable_mappings(const std::vector<ModuleEntry> &modules) {
+bool record_replayable_mappings(const std::vector<ModuleEntry>& modules) {
     if (modules.empty()) {
         clear_replayable_mappings();
         return true;
     }
     std::ostringstream ids;
-    for (const auto &module : modules) {
+    for (const auto& module : modules) {
         ids << module.id << "\n";
     }
     if (write_boot_marker(mapping_plan_file(), ids.str())) {
@@ -574,4 +585,4 @@ void clear_replayable_mappings() {
     fs::remove(mapping_plan_file(), ec);
 }
 
-} // namespace kagami::mount::kasumi
+}  // namespace kagami::mount::kasumi

@@ -1,4 +1,5 @@
 #include "core/lkm.hpp"
+#include <iterator>
 #include "core/log.hpp"
 
 #include "core/json_value.hpp"
@@ -8,9 +9,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -22,12 +23,12 @@
 
 #if defined(__linux__)
 #include <fcntl.h>
-#include <limits.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <climits>
 #endif
 
 namespace kagami::lkm {
@@ -42,13 +43,20 @@ std::string g_ready_unload_instance;
 
 constexpr const char* kModuleName = "kasumi_lkm";
 
-fs::path legacy_autoload_file() { return runtime_data_dir() / "lkm_autoload"; }
-fs::path kmi_override_file() { return runtime_data_dir() / "lkm_kmi_override"; }
-fs::path ownership_file() { return runtime_lkm_owner_file(); }
+fs::path legacy_autoload_file() {
+    return runtime_data_dir() / "lkm_autoload";
+}
+fs::path kmi_override_file() {
+    return runtime_data_dir() / "lkm_kmi_override";
+}
+fs::path ownership_file() {
+    return runtime_lkm_owner_file();
+}
 
 void set_error(const std::string& message) {
     g_last_error = message;
-    if (!message.empty()) logging::write(logging::Level::Error, "lkm", message);
+    if (!message.empty())
+        logging::write(logging::Level::Error, "lkm", message);
 }
 
 std::string read_first_line(const fs::path& path) {
@@ -96,7 +104,7 @@ std::string random_nonce() {
     static constexpr char hex[] = "0123456789abcdef";
     std::string nonce;
     nonce.reserve(bytes.size() * 2);
-    for (unsigned char byte : bytes) {
+    for (unsigned char const byte : bytes) {
         nonce.push_back(hex[byte >> 4]);
         nonce.push_back(hex[byte & 0x0f]);
     }
@@ -110,9 +118,8 @@ std::string owner_token_for_nonce(const std::string& nonce) {
 #if defined(__linux__)
     const std::string boot_id = read_first_line("/proc/sys/kernel/random/boot_id");
     if (boot_id.empty() || nonce.size() != 32 ||
-        !std::all_of(nonce.begin(), nonce.end(), [](unsigned char c) {
-            return std::isxdigit(c) != 0;
-        })) {
+        !std::all_of(nonce.begin(), nonce.end(),
+                     [](unsigned char c) { return std::isxdigit(c) != 0; })) {
         return "";
     }
     return "v2\n" + boot_id + "\n" + nonce + "\n";
@@ -168,7 +175,7 @@ std::vector<fs::path> asset_directories() {
 }
 
 #if defined(__linux__)
-enum class HelperLoadResult {
+enum class HelperLoadResult : std::uint8_t {
     Unavailable,
     Success,
     Failure,
@@ -181,8 +188,7 @@ std::string lkm_loader_path() {
         return "";
     }
     executable[length] = '\0';
-    const fs::path helper =
-        fs::path(executable).parent_path() / "lkmloader";
+    const fs::path helper = fs::path(executable).parent_path() / "lkmloader";
     struct stat st = {};
     if (stat(helper.c_str(), &st) != 0 || !S_ISREG(st.st_mode) ||
         access(helper.c_str(), X_OK) != 0) {
@@ -228,11 +234,9 @@ HelperLoadResult try_lkm_loader(const std::string& path, const std::string& para
         return HelperLoadResult::Success;
     }
     if (WIFEXITED(status)) {
-        error = "LKM loader exited with status " +
-                std::to_string(WEXITSTATUS(status));
+        error = "LKM loader exited with status " + std::to_string(WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
-        error = "LKM loader was killed by signal " +
-                std::to_string(WTERMSIG(status));
+        error = "LKM loader was killed by signal " + std::to_string(WTERMSIG(status));
     } else {
         error = "LKM loader ended with an unknown status";
     }
@@ -255,11 +259,9 @@ bool finit_module_load(const std::string& path, const char* params) {
         set_error("kasumi_lkm was loaded concurrently; ownership was not acquired");
         return false;
     }
-    const std::string finit_error = "finit_module " + path + ": " +
-                                    std::strerror(saved_errno);
+    const std::string finit_error = "finit_module " + path + ": " + std::strerror(saved_errno);
     std::string helper_error;
-    const HelperLoadResult helper_result =
-        try_lkm_loader(path, params ? params : "", helper_error);
+    const HelperLoadResult helper_result = try_lkm_loader(path, params ? params : "", helper_error);
     if (helper_result == HelperLoadResult::Success) {
         g_last_error.clear();
         return true;
@@ -306,8 +308,7 @@ bool finit_module_load(const std::string& path, const char* params) {
         set_error("kasumi_lkm was loaded concurrently; ownership was not acquired");
         return false;
     }
-    const std::string init_error = "init_module " + path + ": " +
-                                   std::strerror(init_errno);
+    const std::string init_error = "init_module " + path + ": " + std::strerror(init_errno);
     set_error(helper_result == HelperLoadResult::Failure
                   ? finit_error + "; helper fallback: " + helper_error + "; " + init_error
                   : init_error);
@@ -320,16 +321,17 @@ int delete_module_nonblocking() {
         return 0;
     }
     const int saved_errno = errno != 0 ? errno : EIO;
-    set_error(std::string("delete_module ") + kModuleName + ": " +
-              std::strerror(saved_errno));
+    set_error(std::string("delete_module ") + kModuleName + ": " + std::strerror(saved_errno));
     return saved_errno;
 }
 
 #endif
 
-} // namespace
+}  // namespace
 
-bool is_loaded() { return kasumi::module_loaded(); }
+bool is_loaded() {
+    return kasumi::module_loaded();
+}
 
 bool owns_loaded_module() {
     if (!is_loaded()) {
@@ -341,7 +343,8 @@ bool owns_loaded_module() {
     }
     std::ifstream in(ownership_file());
     std::ostringstream content;
-    content << in.rdbuf();
+    std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+              std::ostreambuf_iterator<char>(content));
     return (in.good() || in.eof()) && content.str() == current;
 }
 
@@ -367,11 +370,17 @@ bool retain_owned_connection() {
     return true;
 }
 
-std::string last_error() { return g_last_error; }
+std::string last_error() {
+    return g_last_error;
+}
 
-UnloadStatus unload_status() { return g_unload_status; }
+UnloadStatus unload_status() {
+    return g_unload_status;
+}
 
-std::string get_kmi_override() { return read_first_line(kmi_override_file()); }
+std::string get_kmi_override() {
+    return read_first_line(kmi_override_file());
+}
 
 bool set_kmi_override(const std::string& kmi) {
     if (!valid_kmi(kmi)) {
@@ -394,7 +403,8 @@ bool get_autoload() {
     std::ifstream config_file(runtime_config_file(), std::ios::binary);
     if (config_file) {
         std::ostringstream data;
-        data << config_file.rdbuf();
+        std::copy(std::istreambuf_iterator<char>(config_file), std::istreambuf_iterator<char>(),
+                  std::ostreambuf_iterator<char>(data));
         JsonValue root;
         std::string error;
         const JsonValue* value = parse_json(data.str(), root, error) && root.is_object()
@@ -432,12 +442,14 @@ std::string current_kmi() {
     }
 #endif
     const std::size_t first_dot = release.find('.');
-    const std::size_t second_dot = release.find('.', first_dot == std::string::npos ? 0 : first_dot + 1);
+    const std::size_t second_dot =
+        release.find('.', first_dot == std::string::npos ? 0 : first_dot + 1);
     const std::size_t android = release.find("-android");
     if (first_dot == std::string::npos || android == std::string::npos) {
         return "";
     }
-    const std::string major_minor = release.substr(0, second_dot == std::string::npos ? release.size() : second_dot);
+    const std::string major_minor =
+        release.substr(0, second_dot == std::string::npos ? release.size() : second_dot);
     const std::size_t version_start = android + std::strlen("-android");
     const std::size_t version_end = release.find('-', version_start);
     const std::string android_version = release.substr(version_start, version_end - version_start);
@@ -467,8 +479,9 @@ std::string find_asset(const std::string& requested_kmi) {
 bool load() {
     g_last_error.clear();
     if (kasumi::is_available()) {
-        logging::write(logging::Level::Info, "lkm", "Kasumi already available; skip module loading");
-        return true; // Kasumi may be kernel-built-in rather than an LKM.
+        logging::write(logging::Level::Info, "lkm",
+                       "Kasumi already available; skip module loading");
+        return true;  // Kasumi may be kernel-built-in rather than an LKM.
     }
     if (is_loaded()) {
         set_error("kasumi_lkm is present but its protocol is unavailable or incompatible");
@@ -478,7 +491,8 @@ bool load() {
     const std::string asset = find_asset(kmi);
     logging::write(logging::Level::Info, "lkm", "load requested kmi=" + kmi + " asset=" + asset);
     if (asset.empty()) {
-        set_error("no Kasumi module asset matches " + (kmi.empty() ? std::string("this kernel") : kmi));
+        set_error("no Kasumi module asset matches " +
+                  (kmi.empty() ? std::string("this kernel") : kmi));
         return false;
     }
 #if defined(__linux__)
@@ -514,7 +528,8 @@ bool load() {
     }
     g_unload_status = {};
     g_ready_unload_instance.clear();
-    logging::write(logging::Level::Info, "lkm", "loaded successfully; protocol and ownership verified");
+    logging::write(logging::Level::Info, "lkm",
+                   "loaded successfully; protocol and ownership verified");
     return true;
 #else
     set_error("Kasumi LKM loading requires Android/Linux");
@@ -527,7 +542,8 @@ bool autoload() {
 }
 
 bool unload(bool require_ownership) {
-    logging::write(logging::Level::Info, "lkm", "unload requested; require_ownership=" + std::to_string(require_ownership));
+    logging::write(logging::Level::Info, "lkm",
+                   "unload requested; require_ownership=" + std::to_string(require_ownership));
     g_last_error.clear();
     const UnloadStatus previous_unload = g_unload_status;
     const std::string previous_ready_instance = g_ready_unload_instance;
@@ -548,11 +564,9 @@ bool unload(bool require_ownership) {
 #if defined(__linux__)
     const std::string current_instance = module_instance_token();
     const bool retry_ready_delete =
-        !previous_ready_instance.empty() &&
-        previous_ready_instance == current_instance &&
+        !previous_ready_instance.empty() && previous_ready_instance == current_instance &&
         previous_unload.attempted && previous_unload.quiesce_supported &&
-        previous_unload.quiesce.ok &&
-        previous_unload.quiesce.state == kasumi::QuiesceState::Ready;
+        previous_unload.quiesce.ok && previous_unload.quiesce.state == kasumi::QuiesceState::Ready;
     if (!retry_ready_delete) {
         g_ready_unload_instance.clear();
     }
@@ -575,11 +589,8 @@ bool unload(bool require_ownership) {
         const auto capabilities = kasumi::feature_capabilities();
         if (!capabilities.ok) {
             g_unload_status.capability_errno = capabilities.last_errno;
-            const int saved_errno = capabilities.last_errno != 0
-                                        ? capabilities.last_errno
-                                        : EIO;
-            set_error(std::string("query Kasumi unload capability: ") +
-                      std::strerror(saved_errno));
+            const int saved_errno = capabilities.last_errno != 0 ? capabilities.last_errno : EIO;
+            set_error(std::string("query Kasumi unload capability: ") + std::strerror(saved_errno));
             errno = saved_errno;
             return false;
         }
@@ -598,9 +609,7 @@ bool unload(bool require_ownership) {
                 g_unload_status.quiesce = kasumi::prepare_unload();
                 const auto& snapshot = g_unload_status.quiesce;
                 if (!snapshot.ok) {
-                    const int saved_errno = snapshot.last_errno != 0
-                                                ? snapshot.last_errno
-                                                : EIO;
+                    const int saved_errno = snapshot.last_errno != 0 ? snapshot.last_errno : EIO;
                     std::ostringstream message;
                     message << "prepare Kasumi unload: " << std::strerror(saved_errno)
                             << " (state=" << static_cast<std::uint32_t>(snapshot.state)
@@ -627,9 +636,9 @@ bool unload(bool require_ownership) {
                 const auto& snapshot = g_unload_status.quiesce;
                 std::ostringstream message;
                 message << "Kasumi unload quiesce timed out (state="
-                        << static_cast<std::uint32_t>(snapshot.state)
-                        << ", busy_mask=0x" << std::hex << snapshot.busy_mask
-                        << std::dec << ", control_files=" << snapshot.control_files
+                        << static_cast<std::uint32_t>(snapshot.state) << ", busy_mask=0x"
+                        << std::hex << snapshot.busy_mask << std::dec
+                        << ", control_files=" << snapshot.control_files
                         << ", module_refs=" << snapshot.module_refs << ")";
                 set_error(message.str());
                 errno = EBUSY;
@@ -678,4 +687,4 @@ bool unload(bool require_ownership) {
 #endif
 }
 
-} // namespace kagami::lkm
+}  // namespace kagami::lkm

@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string_view>
 
 namespace kagami {
 
@@ -25,7 +26,8 @@ bool JsonValue::bool_or(bool fallback) const {
 }
 
 std::uint32_t JsonValue::u32_or(std::uint32_t fallback) const {
-    if (!is_number() || number_value < 0 || number_value > std::numeric_limits<std::uint32_t>::max()) {
+    if (!is_number() || number_value < 0 ||
+        number_value > std::numeric_limits<std::uint32_t>::max()) {
         return fallback;
     }
     return static_cast<std::uint32_t>(number_value);
@@ -49,7 +51,7 @@ public:
     }
 
 private:
-    const std::string& input_;
+    std::string_view input_;
     std::size_t pos_ = 0;
 
     void skip_ws() {
@@ -294,7 +296,7 @@ private:
                 ++pos_;
             }
         }
-        const std::string token = input_.substr(start, pos_ - start);
+        const std::string token(input_.substr(start, pos_ - start));
         char* end = nullptr;
         errno = 0;
         const double parsed = std::strtod(token.c_str(), &end);
@@ -320,13 +322,27 @@ void append_quoted_json_string(std::ostringstream& out, const std::string& value
     static constexpr char hex[] = "0123456789abcdef";
     for (const unsigned char c : value) {
         switch (c) {
-        case '\\': out << "\\\\"; break;
-        case '"': out << "\\\""; break;
-        case '\b': out << "\\b"; break;
-        case '\f': out << "\\f"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
+        case '\\':
+            out << "\\\\";
+            break;
+        case '"':
+            out << "\\\"";
+            break;
+        case '\b':
+            out << "\\b";
+            break;
+        case '\f':
+            out << "\\f";
+            break;
+        case '\n':
+            out << "\\n";
+            break;
+        case '\r':
+            out << "\\r";
+            break;
+        case '\t':
+            out << "\\t";
+            break;
         default:
             if (c < 0x20) {
                 out << "\\u00" << hex[(c >> 4) & 0x0f] << hex[c & 0x0f];
@@ -396,7 +412,7 @@ void append_json(std::ostringstream& out, const JsonValue& value, int indent, in
     }
 }
 
-} // namespace
+}  // namespace
 
 std::string stringify_json(const JsonValue& value, int indent) {
     std::ostringstream out;
@@ -404,4 +420,4 @@ std::string stringify_json(const JsonValue& value, int indent) {
     return out.str();
 }
 
-} // namespace kagami
+}  // namespace kagami

@@ -1,24 +1,27 @@
 #include "kagami/config.hpp"
+#include <algorithm>
+#include <iterator>
 
 #include "core/json_value.hpp"
 #include "core/log.hpp"
 #include "core/runtime.hpp"
 
-#include <cerrno>
-#include <cstdio>
-#include <cstdint>
-#include <cstring>
-#include <fstream>
-#include <sstream>
-#include <string>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 namespace kagami {
 
-static bool ensure_parent_dir(const std::string& path, std::string& error) {
+namespace {
+bool ensure_parent_dir(const std::string& path, std::string& error) {
     const auto slash = path.find_last_of('/');
     if (slash == std::string::npos || slash == 0) {
         return true;
@@ -43,10 +46,11 @@ static bool ensure_parent_dir(const std::string& path, std::string& error) {
     }
     return true;
 }
+}  // namespace
 
-bool write_file_atomic(const std::string& path, const std::string& data,
-                                std::string& error) {
-    if (!ensure_parent_dir(path, error)) return false;
+bool write_file_atomic(const std::string& path, const std::string& data, std::string& error) {
+    if (!ensure_parent_dir(path, error))
+        return false;
     std::string temporary = path + ".tmp.XXXXXX";
     const int fd = mkostemp(temporary.data(), O_CLOEXEC);
     if (fd < 0) {
@@ -57,15 +61,18 @@ bool write_file_atomic(const std::string& path, const std::string& data,
     bool ok = true;
     while (offset < data.size()) {
         const auto written = write(fd, data.data() + offset, data.size() - offset);
-        if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && errno == EINTR)
+            continue;
         if (written <= 0) {
-            if (written == 0) errno = EIO;
+            if (written == 0)
+                errno = EIO;
             ok = false;
             break;
         }
         offset += static_cast<size_t>(written);
     }
-    if (ok) ok = fsync(fd) == 0;
+    if (ok)
+        ok = fsync(fd) == 0;
     int saved_errno = errno;
     if (close(fd) != 0 && ok) {
         ok = false;
@@ -81,6 +88,11 @@ bool write_file_atomic(const std::string& path, const std::string& data,
 
 class ConfigFileLock {
 public:
+    ConfigFileLock() = default;
+    ConfigFileLock(const ConfigFileLock&) = delete;
+    ConfigFileLock& operator=(const ConfigFileLock&) = delete;
+    ConfigFileLock(ConfigFileLock&&) = delete;
+    ConfigFileLock& operator=(ConfigFileLock&&) = delete;
     ~ConfigFileLock() {
         if (fd_ >= 0) {
             (void)::flock(fd_, LOCK_UN);
@@ -160,7 +172,8 @@ bool write_default_config(const std::string& path, std::string& error) {
     return write_file_atomic(path, default_config_json(), error);
 }
 
-static std::vector<std::string> json_string_array_or_empty(const JsonValue* value) {
+namespace {
+std::vector<std::string> json_string_array_or_empty(const JsonValue* value) {
     std::vector<std::string> out;
     if (!value || !value->is_array()) {
         return out;
@@ -173,7 +186,7 @@ static std::vector<std::string> json_string_array_or_empty(const JsonValue* valu
     return out;
 }
 
-static std::vector<std::uint32_t> json_u32_array_or_empty(const JsonValue* value) {
+std::vector<std::uint32_t> json_u32_array_or_empty(const JsonValue* value) {
     std::vector<std::uint32_t> out;
     if (!value || !value->is_array()) {
         return out;
@@ -186,20 +199,21 @@ static std::vector<std::uint32_t> json_u32_array_or_empty(const JsonValue* value
     return out;
 }
 
-static bool json_bool_or(const JsonValue* root, const char* key, bool fallback) {
+bool json_bool_or(const JsonValue* root, const char* key, bool fallback) {
     const auto* value = root ? root->find(key) : nullptr;
     return value ? value->bool_or(fallback) : fallback;
 }
 
-static std::string json_string_or(const JsonValue* root, const char* key, const std::string& fallback) {
+std::string json_string_or(const JsonValue* root, const char* key, const std::string& fallback) {
     const auto* value = root ? root->find(key) : nullptr;
     return value ? value->string_or(fallback) : fallback;
 }
 
-static int json_int_or(const JsonValue* root, const char* key, int fallback) {
+int json_int_or(const JsonValue* root, const char* key, int fallback) {
     const auto* value = root ? root->find(key) : nullptr;
     return value ? static_cast<int>(value->u32_or(static_cast<std::uint32_t>(fallback))) : fallback;
 }
+}  // namespace
 
 bool parse_config_json(const std::string& json, Config& config, std::string& error) {
     JsonValue root;
@@ -225,9 +239,10 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     config.mirror_img = root.find("mirror_img")
                             ? json_string_or(&root, "mirror_img", config.mirror_img)
                             : json_string_or(&root, "overlay_img", config.mirror_img);
-    config.mirror_img_size_mb = root.find("mirror_img_size_mb")
-                                    ? json_int_or(&root, "mirror_img_size_mb", config.mirror_img_size_mb)
-                                    : json_int_or(&root, "overlay_img_size_mb", config.mirror_img_size_mb);
+    config.mirror_img_size_mb =
+        root.find("mirror_img_size_mb")
+            ? json_int_or(&root, "mirror_img_size_mb", config.mirror_img_size_mb)
+            : json_int_or(&root, "overlay_img_size_mb", config.mirror_img_size_mb);
     config.overlay_writable = json_bool_or(&root, "overlay_writable", config.overlay_writable);
     config.fs_type = json_string_or(&root, "fs_type", config.fs_type);
     config.debug = json_bool_or(&root, "debug", config.debug);
@@ -251,18 +266,15 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     const bool has_split_kasumi_features =
         json_int_or(&root, "kasumi_feature_config_version", 0) >= 2 ||
         root.find("enable_overlay_xattr_hide") != nullptr ||
-        root.find("enable_mount_hide") != nullptr ||
-        root.find("enable_maps_spoof") != nullptr ||
+        root.find("enable_mount_hide") != nullptr || root.find("enable_maps_spoof") != nullptr ||
         root.find("enable_statfs_spoof") != nullptr;
     if (has_split_kasumi_features) {
-        config.enable_overlay_xattr_hide = json_bool_or(
-            &root, "enable_overlay_xattr_hide", config.enable_overlay_xattr_hide);
+        config.enable_overlay_xattr_hide =
+            json_bool_or(&root, "enable_overlay_xattr_hide", config.enable_overlay_xattr_hide);
         config.enable_mount_hide =
             json_bool_or(&root, "enable_mount_hide", config.enable_mount_hide);
-        config.mount_hide_mode =
-            json_string_or(&root, "mount_hide_mode", config.mount_hide_mode);
-        if (config.mount_hide_mode != "normal" &&
-            config.mount_hide_mode != "aggressive") {
+        config.mount_hide_mode = json_string_or(&root, "mount_hide_mode", config.mount_hide_mode);
+        if (config.mount_hide_mode != "normal" && config.mount_hide_mode != "aggressive") {
             config.mount_hide_mode = "normal";
         }
         config.enable_maps_spoof =
@@ -280,21 +292,24 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
         config.enable_mount_hide = legacy;
         config.enable_maps_spoof = legacy;
         config.enable_statfs_spoof = legacy;
-        config.enable_selinux_fix =
-            legacy || json_bool_or(&root, "enable_selinux_fix", false);
+        config.enable_selinux_fix = legacy || json_bool_or(&root, "enable_selinux_fix", false);
         config.enable_stealth = config.enable_stealth || legacy;
     }
     config.overlayfs_enabled = json_bool_or(&root, "overlayfs_enabled", config.overlayfs_enabled);
-    config.magic_mount_enabled = json_bool_or(&root, "magic_mount_enabled", config.magic_mount_enabled);
+    config.magic_mount_enabled =
+        json_bool_or(&root, "magic_mount_enabled", config.magic_mount_enabled);
     config.mount_backend = json_string_or(&root, "mount_backend", config.mount_backend);
     config.partitions = json_string_array_or_empty(root.find("partitions"));
 
     const JsonValue* policy = root.find("policy");
     if (policy && policy->is_object()) {
         config.policy.owner = json_string_or(policy, "owner", config.policy.owner);
-        config.policy.use_allow_uids = json_bool_or(policy, "use_allow_uids", config.policy.use_allow_uids);
-        config.policy.use_deny_uids = json_bool_or(policy, "use_deny_uids", config.policy.use_deny_uids);
-        config.policy.include_isolated_uids = json_bool_or(policy, "include_isolated_uids", config.policy.include_isolated_uids);
+        config.policy.use_allow_uids =
+            json_bool_or(policy, "use_allow_uids", config.policy.use_allow_uids);
+        config.policy.use_deny_uids =
+            json_bool_or(policy, "use_deny_uids", config.policy.use_deny_uids);
+        config.policy.include_isolated_uids =
+            json_bool_or(policy, "include_isolated_uids", config.policy.include_isolated_uids);
         config.policy.allow_uids = json_u32_array_or_empty(policy->find("allow_uids"));
         config.policy.deny_uids = json_u32_array_or_empty(policy->find("deny_uids"));
     }
@@ -309,12 +324,12 @@ bool read_config_file(const std::string& path, Config& config, std::string& erro
         return false;
     }
     std::ostringstream buffer;
-    buffer << in.rdbuf();
+    std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+              std::ostreambuf_iterator<char>(buffer));
     return parse_config_json(buffer.str(), config, error);
 }
 
-bool merge_config_json(const std::string& path, const std::string& updates,
-                       std::string& error) {
+bool merge_config_json(const std::string& path, const std::string& updates, std::string& error) {
     JsonValue patch;
     if (!parse_json(updates, patch, error) || !patch.is_object()) {
         if (error.empty()) {
@@ -335,7 +350,8 @@ bool merge_config_json(const std::string& path, const std::string& updates,
     std::ifstream in(path, std::ios::binary);
     std::ostringstream input;
     if (in) {
-        input << in.rdbuf();
+        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+                  std::ostreambuf_iterator<char>(input));
     } else {
         input << default_config_json();
     }
@@ -376,10 +392,10 @@ bool merge_config_json(const std::string& path, const std::string& updates,
         root.object_value["mount_hide_mode"] = std::move(mount_hide_mode);
         root.object_value["enable_maps_spoof"] = bool_value(legacy);
         root.object_value["enable_statfs_spoof"] = bool_value(legacy);
-        root.object_value["enable_selinux_fix"] = bool_value(
-            legacy || json_bool_or(&root, "enable_selinux_fix", false));
-        root.object_value["enable_stealth"] = bool_value(
-            legacy || json_bool_or(&root, "enable_stealth", true));
+        root.object_value["enable_selinux_fix"] =
+            bool_value(legacy || json_bool_or(&root, "enable_selinux_fix", false));
+        root.object_value["enable_stealth"] =
+            bool_value(legacy || json_bool_or(&root, "enable_stealth", true));
         root.object_value.erase("enable_hidexattr");
     }
     for (const auto& [key, value] : patch.object_value) {
@@ -395,7 +411,9 @@ bool merge_config_json(const std::string& path, const std::string& updates,
         root.object_value["kasumi_feature_config_version"] = std::move(version);
     }
     const bool saved = write_file_atomic(path, stringify_json(root, 2) + "\n", error);
-    if (saved) logging::set_debug_enabled(json_bool_or(&root, "debug", false) || json_bool_or(&root, "verbose", false));
+    if (saved)
+        logging::set_debug_enabled(json_bool_or(&root, "debug", false) ||
+                                   json_bool_or(&root, "verbose", false));
     return saved;
 }
 
@@ -407,7 +425,8 @@ bool update_lkm_autoload_config(const std::string& path, bool enabled, std::stri
     std::ifstream in(path, std::ios::binary);
     std::ostringstream input;
     if (in) {
-        input << in.rdbuf();
+        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+                  std::ostreambuf_iterator<char>(input));
     } else {
         input << default_config_json();
     }
@@ -435,7 +454,8 @@ bool update_policy_config(const std::string& path, const PolicyConfig& policy, s
     std::ifstream in(path, std::ios::binary);
     std::ostringstream input;
     if (in) {
-        input << in.rdbuf();
+        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
+                  std::ostreambuf_iterator<char>(input));
     } else {
         input << default_config_json();
     }
@@ -484,4 +504,4 @@ bool update_policy_config(const std::string& path, const PolicyConfig& policy, s
     return write_file_atomic(path, stringify_json(root, 2) + "\n", error);
 }
 
-} // namespace kagami
+}  // namespace kagami

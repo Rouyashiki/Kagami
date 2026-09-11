@@ -46,4 +46,4 @@ std::vector<std::string> replayable_module_ids();
 bool record_replayable_mappings(const std::vector<ModuleEntry>& modules);
 void clear_replayable_mappings();
 
-} // namespace kagami::mount::kasumi
+}  // namespace kagami::mount::kasumi

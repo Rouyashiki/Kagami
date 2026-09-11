@@ -32,4 +32,4 @@ std::string find_asset(const std::string& kmi = "");
 std::string last_error();
 UnloadStatus unload_status();
 
-} // namespace kagami::lkm
+}  // namespace kagami::lkm

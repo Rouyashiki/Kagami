@@ -6,8 +6,8 @@
 #include "core/lkm.hpp"
 #include "core/log.hpp"
 #include "core/runtime.hpp"
-#include "kagami/kasumi_client.hpp"
 #include "kagami/config.hpp"
+#include "kagami/kasumi_client.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -32,13 +32,14 @@ namespace kagami {
 
 namespace fs = std::filesystem;
 
-static int print_status_json();
+namespace {
+int print_status_json();
 
-static void append_log(const std::string& message, logging::Level level = logging::Level::Info) {
+void append_log(const std::string& message, logging::Level level = logging::Level::Info) {
     logging::write(level, "daemon", message);
 }
 
-static std::string join_request(const std::vector<std::string>& args, std::size_t start) {
+std::string join_request(const std::vector<std::string>& args, std::size_t start) {
     std::ostringstream out;
     out << '[';
     for (std::size_t i = start; i < args.size(); ++i) {
@@ -51,7 +52,7 @@ static std::string join_request(const std::vector<std::string>& args, std::size_
     return out.str();
 }
 
-static std::vector<std::string> split_request(const std::string& request) {
+std::vector<std::string> split_request(const std::string& request) {
     std::vector<std::string> args;
     JsonValue root;
     std::string error;
@@ -69,20 +70,19 @@ static std::vector<std::string> split_request(const std::string& request) {
     return args;
 }
 
-static std::string response_json(bool ok, int exit_code, int error_number,
-                                 const std::string& out, const std::string& err) {
+std::string response_json(bool ok, int exit_code, int error_number, const std::string& out,
+                          const std::string& err) {
     std::ostringstream json;
     json << "{"
          << "\"ok\":" << (ok ? "true" : "false") << ","
          << "\"exit_code\":" << exit_code << ","
          << "\"errno\":" << error_number << ","
          << "\"stdout\":" << json_quote(out) << ","
-         << "\"stderr\":" << json_quote(err)
-         << "}\n";
+         << "\"stderr\":" << json_quote(err) << "}\n";
     return json.str();
 }
 
-static std::string status_json(bool running) {
+std::string status_json(bool running) {
     const auto pid_text = [&]() -> std::string {
         std::ifstream in(runtime_pid_file());
         std::string line;
@@ -97,13 +97,14 @@ static std::string status_json(bool running) {
         << "\"socket\":" << json_quote(runtime_socket_file().string()) << ","
         << "\"pid_file\":" << json_quote(runtime_pid_file().string()) << ","
         << "\"pid\":" << json_quote(pid_text) << ","
-        << "\"log_file\":" << json_quote(runtime_log_file().string())
-        << "}\n";
+        << "\"log_file\":" << json_quote(runtime_log_file().string()) << "}\n";
     return out.str();
 }
+}  // namespace
 
 #if defined(__linux__) || defined(__APPLE__)
-static bool write_all(int fd, const std::string& data) {
+namespace {
+bool write_all(int fd, const std::string& data) {
     const char* ptr = data.data();
     std::size_t left = data.size();
     while (left > 0) {
@@ -120,7 +121,7 @@ static bool write_all(int fd, const std::string& data) {
     return true;
 }
 
-static std::string read_all(int fd, std::size_t limit) {
+std::string read_all(int fd, std::size_t limit) {
     std::string data;
     char buffer[1024] = {};
     for (;;) {
@@ -146,7 +147,7 @@ static std::string read_all(int fd, std::size_t limit) {
     return data;
 }
 
-static std::string legacy_join_request(const std::vector<std::string>& args) {
+std::string legacy_join_request(const std::vector<std::string>& args) {
     std::ostringstream out;
     for (std::size_t i = 0; i < args.size(); ++i) {
         if (i != 0) {
@@ -158,7 +159,7 @@ static std::string legacy_join_request(const std::vector<std::string>& args) {
     return out.str();
 }
 
-static int open_client_socket(std::string& error) {
+int open_client_socket(std::string& error) {
     const auto path = runtime_socket_file().string();
     if (path.size() >= sizeof(sockaddr_un::sun_path)) {
         error = "socket path is too long: " + path;
@@ -182,7 +183,8 @@ static int open_client_socket(std::string& error) {
     return fd;
 }
 
-static int send_request(const std::vector<std::string>& args, std::size_t start, std::string& response, std::string& error) {
+int send_request(const std::vector<std::string>& args, std::size_t start, std::string& response,
+                 std::string& error) {
     const int fd = open_client_socket(error);
     if (fd < 0) {
         return 1;
@@ -193,13 +195,12 @@ static int send_request(const std::vector<std::string>& args, std::size_t start,
         return 1;
     }
     shutdown(fd, SHUT_WR);
-    response = read_all(fd, 1024 * 1024);
+    response = read_all(fd, 1024UL * 1024);
     close(fd);
     return 0;
 }
 
-static bool send_legacy_request(const std::vector<std::string>& args,
-                                std::string& response) {
+bool send_legacy_request(const std::vector<std::string>& args, std::string& response) {
     std::string error;
     const int fd = open_client_socket(error);
     if (fd < 0) {
@@ -210,19 +211,20 @@ static bool send_legacy_request(const std::vector<std::string>& args,
         return false;
     }
     shutdown(fd, SHUT_WR);
-    response = read_all(fd, 1024 * 1024);
+    response = read_all(fd, 1024UL * 1024);
     close(fd);
     return !response.empty();
 }
 
-static bool daemon_running() {
-    std::vector<std::string> ping = {"daemon", "ping"};
+bool daemon_running() {
+    const std::vector<std::string> ping = {"daemon", "ping"};
     std::string response;
     std::string error;
-    return send_request(ping, 0, response, error) == 0 && response.find("\"ok\":true") != std::string::npos;
+    return send_request(ping, 0, response, error) == 0 &&
+           response.find("\"ok\":true") != std::string::npos;
 }
 
-static bool stop_legacy_daemon() {
+bool stop_legacy_daemon() {
     std::string response;
 
     if (!send_legacy_request({"daemon", "ping"}, response) ||
@@ -243,7 +245,7 @@ static bool stop_legacy_daemon() {
     return false;
 }
 
-static int serve_foreground() {
+int serve_foreground() {
     umask(0077);
     std::string preparation_error;
     if (!prepare_runtime(preparation_error) || !logging::prepare_boot_log(preparation_error)) {
@@ -351,16 +353,16 @@ static int serve_foreground() {
             if (errno == EINTR) {
                 continue;
             }
-            append_log(std::string("accept failed: ") + std::strerror(errno), logging::Level::Error);
+            append_log(std::string("accept failed: ") + std::strerror(errno),
+                       logging::Level::Error);
             continue;
         }
 
         timeval timeout = {};
         timeout.tv_sec = 5;
-        (void)setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
-                         &timeout, sizeof(timeout));
+        (void)setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
-        const auto request = read_all(client_fd, 64 * 1024);
+        const auto request = read_all(client_fd, 64UL * 1024);
         auto request_args = split_request(request);
         if (request_args.empty()) {
             append_log("rejected malformed or empty request", logging::Level::Warning);
@@ -382,22 +384,24 @@ static int serve_foreground() {
             continue;
         }
 
-        if (request_args[0] == "daemon" && request_args.size() >= 2 && request_args[1] == "status") {
+        if (request_args[0] == "daemon" && request_args.size() >= 2 &&
+            request_args[1] == "status") {
             write_all(client_fd, response_json(true, 0, 0, status_json(true), ""));
             close(client_fd);
             continue;
         }
 
         if (request_args[0] == "daemon") {
-            write_all(client_fd, response_json(false, 1, EINVAL, "", "daemon control commands cannot be forwarded\n"));
+            write_all(client_fd, response_json(false, 1, EINVAL, "",
+                                               "daemon control commands cannot be forwarded\n"));
             close(client_fd);
             continue;
         }
 
         const auto result = run_command_capture(request_args);
-        write_all(client_fd, response_json(result.exit_code == 0, result.exit_code,
-                                           result.error_number, result.stdout_text,
-                                           result.stderr_text));
+        write_all(client_fd,
+                  response_json(result.exit_code == 0, result.exit_code, result.error_number,
+                                result.stdout_text, result.stderr_text));
         close(client_fd);
     }
 
@@ -411,7 +415,7 @@ static int serve_foreground() {
     return 0;
 }
 
-static int start_background(bool report_status) {
+int start_background(bool report_status) {
     if (daemon_running()) {
         return report_status ? print_status_json() : 0;
     }
@@ -435,7 +439,8 @@ static int start_background(bool report_status) {
             dup2(null_fd, STDIN_FILENO);
             close(null_fd);
         }
-        const int log_fd = open(runtime_log_file().c_str(), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+        const int log_fd = open(runtime_log_file().c_str(),
+                                O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (log_fd >= 0) {
             dup2(log_fd, STDOUT_FILENO);
             dup2(log_fd, STDERR_FILENO);
@@ -453,6 +458,7 @@ static int start_background(bool report_status) {
     std::cerr << "kagamid did not become ready\n";
     return 1;
 }
+}  // namespace
 #endif
 
 int run_via_daemon(const std::vector<std::string>& args, bool allow_start) {
@@ -479,8 +485,7 @@ int run_via_daemon(const std::vector<std::string>& args, bool allow_start) {
     const JsonValue* code = envelope.find("exit_code");
     const JsonValue* out = envelope.find("stdout");
     const JsonValue* err = envelope.find("stderr");
-    if (!code || !code->is_number() || !out || !out->is_string() ||
-        !err || !err->is_string()) {
+    if (!code || !code->is_number() || !out || !out->is_string() || !err || !err->is_string()) {
         std::cerr << "invalid daemon response fields\n";
         return 1;
     }
@@ -494,7 +499,8 @@ int run_via_daemon(const std::vector<std::string>& args, bool allow_start) {
 #endif
 }
 
-static int print_status_json() {
+namespace {
+int print_status_json() {
 #if defined(__linux__) || defined(__APPLE__)
     const bool running = daemon_running();
 #else
@@ -503,6 +509,7 @@ static int print_status_json() {
     std::cout << status_json(running);
     return 0;
 }
+}  // namespace
 
 int run_daemon_command(const std::vector<std::string>& args) {
     const std::string sub = args.size() > 1 ? args[1] : "";
@@ -554,4 +561,4 @@ int run_daemon_command(const std::vector<std::string>& args) {
     return 1;
 }
 
-} // namespace kagami
+}  // namespace kagami

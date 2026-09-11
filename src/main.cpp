@@ -2,6 +2,8 @@
 #include "core/daemon.hpp"
 #include "core/log.hpp"
 
+#include <cstdio>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -9,7 +11,8 @@ namespace {
 
 bool runs_in_controller(const std::vector<std::string>& args) {
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" ||
-        args[0] == "version" || args[0] == "--version" || args[0] == "daemon" || args[0] == "prepare") {
+        args[0] == "version" || args[0] == "--version" || args[0] == "daemon" ||
+        args[0] == "prepare") {
         return true;
     }
     // post-fs-data may need to create the initial config before service.sh has
@@ -22,9 +25,9 @@ bool daemon_can_autostart(const std::vector<std::string>& args) {
            (args.size() > 1 && args[0] == "daemon" && args[1] == "start");
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     std::vector<std::string> args;
     args.reserve(argc > 1 ? static_cast<std::size_t>(argc - 1) : 0);
     for (int i = 1; i < argc; ++i) {
@@ -36,7 +39,13 @@ int main(int argc, char** argv) {
             return start_code;
         }
     }
-    const int exit_code = runs_in_controller(args) ? kagami::run_command(args)
-                                                   : kagami::run_via_daemon(args, false);
+    const int exit_code =
+        runs_in_controller(args) ? kagami::run_command(args) : kagami::run_via_daemon(args, false);
     return exit_code;
+} catch (const std::exception& error) {
+    (void)std::fprintf(stderr, "Kagami: %s\n", error.what());
+    return 1;
+} catch (...) {
+    (void)std::fputs("Kagami: unhandled failure\n", stderr);
+    return 1;
 }

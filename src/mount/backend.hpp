@@ -44,8 +44,8 @@ using ModuleRuleMap = std::map<std::string, std::vector<ModuleRule>>;
 
 struct MountReport {
     bool ok = false;
-    int modules = 0; // enabled modules processed
-    int mounts = 0;  // committed partition mount points
+    int modules = 0;  // enabled modules processed
+    int mounts = 0;   // committed partition mount points
     std::string backend;
     std::string detail;
 };
@@ -84,4 +84,4 @@ void recovery_boot_completed();
 void recovery_reset();
 std::string recovery_status_json();
 
-} // namespace kagami::mount
+}  // namespace kagami::mount

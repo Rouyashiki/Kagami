@@ -1,12 +1,12 @@
 #include "core/runtime.hpp"
 
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 #if defined(__ANDROID__)
 #include <sys/xattr.h>
 #endif
@@ -21,28 +21,30 @@ namespace fs = std::filesystem;
 fs::path runtime_data_dir() {
 #if defined(KAGAMI_EMBEDDED)
 #if !defined(__ANDROID__)
-    if (const char *path = std::getenv("KSU_KAGAMI_TEST_DIR"); path && *path)
+    if (const char* path = std::getenv("KSU_KAGAMI_TEST_DIR"); path && *path)
         return path;
 #endif
     return embedded_data_dir;
 #else
-    const char *path = std::getenv("KAGAMI_DATA_DIR");
+    const char* path = std::getenv("KAGAMI_DATA_DIR");
     return path && *path ? fs::path(path) : fs::path("/data/adb/kagami");
 #endif
 }
 
 fs::path runtime_modules_dir() {
 #if !defined(KAGAMI_EMBEDDED)
-    if (const char *path = std::getenv("KAGAMI_MODULES_DIR"); path && *path)
+    if (const char* path = std::getenv("KAGAMI_MODULES_DIR"); path && *path)
         return path;
 #elif !defined(__ANDROID__)
-    if (const char *path = std::getenv("KSU_KAGAMI_TEST_MODULES"); path && *path)
+    if (const char* path = std::getenv("KSU_KAGAMI_TEST_MODULES"); path && *path)
         return path;
 #endif
     return "/data/adb/modules";
 }
 
-fs::path runtime_config_file() { return runtime_data_dir() / "config.json"; }
+fs::path runtime_config_file() {
+    return runtime_data_dir() / "config.json";
+}
 
 fs::path runtime_log_file() {
 #if defined(KAGAMI_EMBEDDED)
@@ -56,8 +58,12 @@ fs::path runtime_log_file() {
 #endif
 }
 
-fs::path runtime_socket_file() { return runtime_data_dir() / "kagamid.sock"; }
-fs::path runtime_pid_file() { return runtime_data_dir() / "kagamid.pid"; }
+fs::path runtime_socket_file() {
+    return runtime_data_dir() / "kagamid.sock";
+}
+fs::path runtime_pid_file() {
+    return runtime_data_dir() / "kagamid.pid";
+}
 fs::path runtime_daemon_lock_file() {
 #if defined(KAGAMI_EMBEDDED)
     return runtime_data_dir() / "kagamid.lock";
@@ -90,7 +96,8 @@ bool runtime_mount_here() {
 #endif
 }
 
-static bool metadata(const fs::path &path, mode_t mode, std::string &error) {
+namespace {
+bool metadata(const fs::path& path, mode_t mode, std::string& error) {
     struct stat st{};
     if (lstat(path.c_str(), &st) != 0) {
         error = "lstat " + path.string() + ": " + std::strerror(errno);
@@ -119,8 +126,9 @@ static bool metadata(const fs::path &path, mode_t mode, std::string &error) {
 #endif
     return true;
 }
+}  // namespace
 
-bool prepare_private_directory(const fs::path &path, std::string &error) {
+bool prepare_private_directory(const fs::path& path, std::string& error) {
     error.clear();
     const auto normalized = path.lexically_normal();
     if (normalized.empty() || !normalized.is_absolute() || normalized == normalized.root_path() ||
@@ -148,7 +156,7 @@ bool prepare_private_directory(const fs::path &path, std::string &error) {
     return metadata(path, 0700, error);
 }
 
-bool prepare_private_file(const fs::path &path, std::string &error) {
+bool prepare_private_file(const fs::path& path, std::string& error) {
     error.clear();
     struct stat st{};
     if (lstat(path.c_str(), &st) != 0) {
@@ -164,14 +172,14 @@ bool prepare_private_file(const fs::path &path, std::string &error) {
     return metadata(path, 0600, error);
 }
 
-bool prepare_runtime(std::string &error) {
+bool prepare_runtime(std::string& error) {
     error.clear();
     if (!prepare_private_directory(runtime_data_dir(), error) ||
         !prepare_private_directory(runtime_data_dir() / "run", error) ||
         !prepare_private_directory(runtime_log_file().parent_path(), error))
         return false;
     // These are controller records, not mounted module payloads or LKM assets.
-    for (const auto *name : {"config.json", "config.json.lock", "module_mode.json",
+    for (const auto* name : {"config.json", "config.json.lock", "module_mode.json",
                              "module_rules.json", "user_hide_rules.json", "kagamid.pid",
                              "kagamid.sock", "kagamid.lock", "mirror.img", "mirror.erofs"}) {
         if (!prepare_private_file(runtime_data_dir() / name, error))
@@ -180,7 +188,7 @@ bool prepare_runtime(std::string &error) {
     return true;
 }
 
-bool prepare_package_metadata(const fs::path &path, std::string &error) {
+bool prepare_package_metadata(const fs::path& path, std::string& error) {
     error.clear();
 #if defined(KAGAMI_EMBEDDED)
     (void)path;
@@ -240,4 +248,4 @@ bool prepare_package_metadata(const fs::path &path, std::string &error) {
 #endif
 }
 
-} // namespace kagami
+}  // namespace kagami

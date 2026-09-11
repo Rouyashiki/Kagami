@@ -5,15 +5,16 @@
 
 #include <dirent.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include <climits>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -40,34 +41,35 @@ namespace kagami::mount::magic {
 namespace fs = std::filesystem;
 using fsutil::mlog;
 
-enum class NType { Regular, Directory, Symlink, Whiteout };
+enum class NType : std::uint8_t { Regular, Directory, Symlink, Whiteout };
 
 struct Node {
     std::string name;
     NType type = NType::Directory;
     std::map<std::string, Node> children;
-    std::string module_path; // backing module file; "" if mirror-only / root
-    bool replace = false;    // opaque dir (.replace / trusted.overlay.opaque)
+    std::string module_path;  // backing module file; "" if mirror-only / root
+    bool replace = false;     // opaque dir (.replace / trusted.overlay.opaque)
 };
 
 struct Walk {
-    std::vector<std::string> committed; // mount points to record for teardown
+    std::vector<std::string> committed;  // mount points to record for teardown
     int files = 0;
     int tmpfs_dirs = 0;
     int symlinks = 0;
 };
 
-static std::string state_file() {
+namespace {
+std::string state_file() {
     return (runtime_data_dir() / "run" / "magic_mounts.list").string();
 }
 
 // Report a committed mount to KernelSU for per-app unmount. Skips lib dirs:
 // pairip-protected APKs verify native libs after zygote fork, and detaching the
 // overlay mid-flight crashes them.
-static bool ksu_umount_add(const std::string &path) {
-    static const char *const kIgnore[] = {"/system/lib", "/system/lib64", "/vendor/lib",
+bool ksu_umount_add(const std::string& path) {
+    static const char* const kIgnore[] = {"/system/lib", "/system/lib64", "/vendor/lib",
                                           "/vendor/lib64"};
-    for (const char *ig : kIgnore) {
+    for (const char* ig : kIgnore) {
         const std::string p(ig);
         if (path == p || path.rfind(p + "/", 0) == 0) {
             return true;
@@ -76,21 +78,25 @@ static bool ksu_umount_add(const std::string &path) {
     return fsutil::register_umount(path);
 }
 
-static bool lexists(const std::string &p) {
-    struct stat st;
+bool lexists(const std::string& p) {
+    struct stat st{};
     return lstat(p.c_str(), &st) == 0;
 }
 
-static std::string join(const std::string &base, const std::string &name) {
-    return base == "/" ? "/" + name : base + "/" + name;
+std::string join(const std::string& base, const std::string& name) {
+    std::string path = base;
+    if (path != "/")
+        path += '/';
+    path += name;
+    return path;
 }
 
-[[noreturn]] static void scan_error(const std::string &message) {
+[[noreturn]] void scan_error(const std::string& message) {
     mlog("magic: " + message, logging::Level::Error);
     throw std::runtime_error(message);
 }
 
-static NType type_from_lstat(const std::string &path, const struct stat &st) {
+NType type_from_lstat(const std::string& path, const struct stat& st) {
     if (S_ISCHR(st.st_mode) && st.st_rdev == 0)
         return NType::Whiteout;
     if (S_ISDIR(st.st_mode))
@@ -109,14 +115,14 @@ static NType type_from_lstat(const std::string &path, const struct stat &st) {
     scan_error("unsupported module entry: " + path);
 }
 
-static bool dir_is_replace(const std::string &path) {
+bool dir_is_replace(const std::string& path) {
     bool opaque = false;
     if (!fsutil::directory_is_opaque(path, opaque))
         scan_error("cannot read replacement metadata: " + path);
     return opaque;
 }
 
-static bool clone_symlink(const std::string &src, const std::string &dst) {
+bool clone_symlink(const std::string& src, const std::string& dst) {
     char tgt[PATH_MAX];
     const ssize_t n = readlink(src.c_str(), tgt, sizeof(tgt) - 1);
     if (n < 0) {
@@ -134,14 +140,14 @@ static bool clone_symlink(const std::string &src, const std::string &dst) {
 }
 
 // Higher-priority entries win; opaque directories stop lower-layer merging.
-static bool collect_into(Node &parent, const std::string &dir) {
+bool collect_into(Node& parent, const std::string& dir) {
     const std::unique_ptr<DIR, decltype(&closedir)> directory(opendir(dir.c_str()), closedir);
     if (!directory)
         scan_error("cannot scan " + dir + ": " + std::strerror(errno));
     bool has = false;
     for (;;) {
         errno = 0;
-        const auto *entry = readdir(directory.get());
+        const auto* entry = readdir(directory.get());
         if (!entry) {
             if (errno)
                 scan_error("cannot read " + dir + ": " + std::strerror(errno));
@@ -150,14 +156,14 @@ static bool collect_into(Node &parent, const std::string &dir) {
         const std::string name = entry->d_name;
         if (name == "." || name == ".." || name == ".replace")
             continue;
-        const std::string path = dir + "/" + name;
+        const std::string path = join(dir, name);
         struct stat st{};
         if (lstat(path.c_str(), &st) != 0)
             scan_error("cannot stat " + path + ": " + std::strerror(errno));
         const NType type = type_from_lstat(path, st);
         auto existing = parent.children.find(name);
         if (existing != parent.children.end()) {
-            auto &node = existing->second;
+            auto& node = existing->second;
             if (node.type != NType::Directory || node.replace) {
                 has = true;
                 continue;
@@ -187,8 +193,8 @@ static bool collect_into(Node &parent, const std::string &dir) {
 
 // Build the merged root tree: module system/ trees, with vendor/product/... moved
 // out to root level when the device exposes them as /system/<p> symlinks.
-static std::optional<Node> collect_module_files(const std::vector<ModuleEntry> &modules,
-                                                const std::vector<std::string> &extra) {
+std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules,
+                                         const std::vector<std::string>& extra) {
     Node root;
     root.type = NType::Directory;
     Node system;
@@ -196,9 +202,9 @@ static std::optional<Node> collect_module_files(const std::vector<ModuleEntry> &
     system.type = NType::Directory;
 
     bool has = false;
-    for (const auto &m : modules) {
+    for (const auto& m : modules) {
         const std::string ms = m.path.string() + "/system";
-        struct stat st;
+        struct stat st{};
         if (lstat(ms.c_str(), &st) != 0) {
             if (errno == ENOENT)
                 continue;
@@ -214,7 +220,7 @@ static std::optional<Node> collect_module_files(const std::vector<ModuleEntry> &
         return std::nullopt;
     }
 
-    const auto move_partition = [&](const std::string &part, bool require_symlink) {
+    const auto move_partition = [&](const std::string& part, bool require_symlink) {
         std::error_code ec;
         const bool ok = fs::is_directory("/" + part, ec) &&
                         (!require_symlink || fs::is_symlink("/system/" + part, ec));
@@ -234,17 +240,17 @@ static std::optional<Node> collect_module_files(const std::vector<ModuleEntry> &
         }
     };
 
-    const std::pair<const char *, bool> builtin[] = {
+    const std::pair<const char*, bool> builtin[] = {
         {"vendor", true}, {"system_ext", true}, {"product", true}, {"odm", false}};
-    for (const auto &[part, req] : builtin) {
+    for (const auto& [part, req] : builtin) {
         move_partition(part, req);
     }
-    for (const auto &part : extra) {
+    for (const auto& part : extra) {
         if (part == "system") {
             continue;
         }
         bool is_builtin = false;
-        for (const auto &bp : builtin) {
+        for (const auto& bp : builtin) {
             if (part == bp.first) {
                 is_builtin = true;
             }
@@ -260,7 +266,7 @@ static std::optional<Node> collect_module_files(const std::vector<ModuleEntry> &
 
 // Create the tmpfs skeleton dir at `work`, cloning mode/owner/SELinux context
 // from the real dir (or the module dir when the real one does not exist).
-static bool tmpfs_skeleton(const std::string &real, const std::string &work, const Node &node) {
+bool tmpfs_skeleton(const std::string& real, const std::string& work, const Node& node) {
     std::error_code ec;
     fs::create_directories(work, ec);
     if (ec) {
@@ -279,11 +285,10 @@ static bool tmpfs_skeleton(const std::string &real, const std::string &work, con
 
 // Mirror one unmodified real entry into the skeleton: dirs recursed entry by
 // entry, files bind-mounted, symlinks recreated.
-static bool mount_mirror(const std::string &real, const std::string &work,
-                         const std::string &name) {
+bool mount_mirror(const std::string& real, const std::string& work, const std::string& name) {
     const std::string r = join(real, name);
-    const std::string w = work + "/" + name;
-    struct stat st;
+    const std::string w = join(work, name);
+    struct stat st{};
     if (lstat(r.c_str(), &st) != 0) {
         return false;
     }
@@ -294,13 +299,13 @@ static bool mount_mirror(const std::string &real, const std::string &work,
         fsutil::clone_attr(r, w);
         // Mirror each child individually; binding the whole subtree could carry
         // nested mounts and break the moved skeleton.
-        DIR *d = opendir(r.c_str());
+        DIR* d = opendir(r.c_str());
         if (!d) {
             mlog("mirror opendir " + r + " failed: " + std::strerror(errno), logging::Level::Error);
             return false;
         }
         bool ok = true;
-        struct dirent *e;
+        struct dirent* e;
         for (;;) {
             errno = 0;
             e = readdir(d);
@@ -333,14 +338,14 @@ static bool mount_mirror(const std::string &real, const std::string &work,
         }
         return true;
     }
-    return true; // skip device/socket/fifo
+    return true;  // skip device/socket/fifo
 }
 
-static bool do_mount(Node &node, const std::string &real, const std::string &work, bool has_tmpfs,
-                     Walk &w);
+bool do_mount(Node& node, const std::string& real, const std::string& work, bool has_tmpfs,
+              Walk& w);
 
-static bool do_directory(Node &node, const std::string &real, const std::string &work,
-                         bool has_tmpfs, Walk &w) {
+bool do_directory(Node& node, const std::string& real, const std::string& work, bool has_tmpfs,
+                  Walk& w) {
     struct stat real_stat{};
     const int result = lstat(real.c_str(), &real_stat);
     if (result != 0 && errno != ENOENT && errno != ENOTDIR) {
@@ -352,7 +357,7 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
     bool tmpfs = !has_tmpfs && node.replace && !node.module_path.empty();
 
     if (!has_tmpfs && !tmpfs) {
-        for (auto &[name, child] : node.children) {
+        for (auto& [name, child] : node.children) {
             const std::string real_child = join(real, name);
             bool need;
             if (child.type == NType::Symlink) {
@@ -365,7 +370,7 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
             } else {
                 // A dir needs a skeleton when a child's real counterpart is not a
                 // directory (a file/symlink) or is missing.
-                struct stat st;
+                struct stat st{};
                 if (lstat(real_child.c_str(), &st) == 0) {
                     need = !S_ISDIR(st.st_mode);
                 } else {
@@ -374,8 +379,13 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
             }
             if (need) {
                 if (logging::enabled(logging::Level::Debug)) {
-                    mlog("  need-skeleton at " + real + " due to child '" + name +
-                         "' (real=" + real_child + ")");
+                    mlog(std::string("  need-skeleton at ")
+                             .append(real)
+                             .append(" due to child '")
+                             .append(name)
+                             .append("' (real=")
+                             .append(real_child)
+                             .append(")"));
                 }
                 if (node.module_path.empty()) {
                     mlog(
@@ -394,21 +404,21 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
     if (now_tmpfs && !tmpfs_skeleton(real, work, node)) {
         return false;
     }
-    if (tmpfs && !fsutil::bind_mount(work, work)) { // make the skeleton movable
+    if (tmpfs && !fsutil::bind_mount(work, work)) {  // make the skeleton movable
         mlog("self-bind " + work + " failed: " + std::strerror(errno), logging::Level::Error);
         return false;
     }
 
     // Module-overridden entries recurse; the rest are mirrored into the skeleton.
     if (real_directory && !node.replace) {
-        DIR *d = opendir(real.c_str());
+        DIR* d = opendir(real.c_str());
         if (!d) {
             mlog("magic: cannot read directory " + real + ": " + std::strerror(errno),
                  logging::Level::Error);
             return false;
         }
         {
-            struct dirent *e;
+            struct dirent* e;
             for (;;) {
                 errno = 0;
                 e = readdir(d);
@@ -427,7 +437,7 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
                 if (it != node.children.end()) {
                     Node child = std::move(it->second);
                     node.children.erase(it);
-                    if (!do_mount(child, join(real, name), work + "/" + name, now_tmpfs, w)) {
+                    if (!do_mount(child, join(real, name), join(work, name), now_tmpfs, w)) {
                         closedir(d);
                         return false;
                     }
@@ -442,8 +452,8 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
     }
 
     // Remaining children are new entries that do not exist in the real dir.
-    for (auto &[name, child] : node.children) {
-        if (!do_mount(child, join(real, name), work + "/" + name, now_tmpfs, w)) {
+    for (auto& [name, child] : node.children) {
+        if (!do_mount(child, join(real, name), join(work, name), now_tmpfs, w)) {
             return false;
         }
     }
@@ -465,8 +475,8 @@ static bool do_directory(Node &node, const std::string &real, const std::string 
     return true;
 }
 
-static bool do_mount(Node &node, const std::string &real, const std::string &work, bool has_tmpfs,
-                     Walk &w) {
+bool do_mount(Node& node, const std::string& real, const std::string& work, bool has_tmpfs,
+              Walk& w) {
     switch (node.type) {
     case NType::Symlink:
         if (node.module_path.empty()) {
@@ -481,7 +491,7 @@ static bool do_mount(Node &node, const std::string &real, const std::string &wor
     case NType::Regular: {
         if (node.module_path.empty())
             return false;
-        const std::string &target = has_tmpfs ? work : real;
+        const std::string& target = has_tmpfs ? work : real;
         if (has_tmpfs) {
             const int fd = open(target.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
             if (fd < 0)
@@ -516,7 +526,7 @@ static bool do_mount(Node &node, const std::string &real, const std::string &wor
         return true;
     }
     case NType::Whiteout:
-        return true; // absence in the skeleton hides the original
+        return true;  // absence in the skeleton hides the original
     case NType::Directory:
         return do_directory(node, real, work, has_tmpfs, w);
     }
@@ -526,7 +536,7 @@ static bool do_mount(Node &node, const std::string &real, const std::string &wor
 // Mount points whose mount source equals `source`. Our skeletons and work tmpfs
 // use config.mount_source; real partitions are block-backed, so teardown can match
 // ours without ever touching a real partition.
-static std::set<std::string> mounts_with_source(const std::string &source) {
+std::set<std::string> mounts_with_source(const std::string& source) {
     std::set<std::string> out;
     std::ifstream in("/proc/self/mountinfo");
     std::string line;
@@ -545,7 +555,8 @@ static std::set<std::string> mounts_with_source(const std::string &source) {
             continue;
         }
         std::istringstream post(line.substr(sep + 3));
-        std::string fstype, src;
+        std::string fstype;
+        std::string src;
         post >> fstype >> src;
         if (fsutil::decode_mount_path(src) == source) {
             out.insert(fsutil::decode_mount_path(f[4]));
@@ -553,17 +564,19 @@ static std::set<std::string> mounts_with_source(const std::string &source) {
     }
     return out;
 }
+}  // namespace
 
 using fsutil::MountRecord;
 
-static bool read_mounts(std::vector<MountRecord> &records, bool &legacy) {
+namespace {
+bool read_mounts(std::vector<MountRecord>& records, bool& legacy) {
     return fsutil::read_mount_journal(state_file(), records, legacy);
 }
 
-static bool rollback(const std::vector<std::string> &paths) {
-    std::set<std::string, std::greater<>> ordered(paths.begin(), paths.end());
+bool rollback(const std::vector<std::string>& paths) {
+    const std::set<std::string, std::greater<>> ordered(paths.begin(), paths.end());
     bool ok = true;
-    for (const auto &path : ordered) {
+    for (const auto& path : ordered) {
         if (umount2(path.c_str(), MNT_DETACH) != 0) {
             mlog("magic: rollback failed for " + path + ": " + std::strerror(errno),
                  logging::Level::Error);
@@ -574,8 +587,9 @@ static bool rollback(const std::vector<std::string> &paths) {
     }
     return ok;
 }
+}  // namespace
 
-bool unmount_all(const Config &config) {
+bool unmount_all(const Config& config) {
     std::vector<MountRecord> records;
     bool legacy;
     if (!read_mounts(records, legacy)) {
@@ -583,12 +597,12 @@ bool unmount_all(const Config &config) {
         return false;
     }
     std::map<std::string, MountRecord, std::greater<>> ordered;
-    for (const auto &record : records)
+    for (const auto& record : records)
         ordered.emplace(record.path, record);
     const auto old_mounts =
         legacy ? mounts_with_source(config.mount_source) : std::set<std::string>{};
     bool ok = true;
-    for (const auto &[path, record] : ordered) {
+    for (const auto& [path, record] : ordered) {
         if (legacy ? !old_mounts.count(path) : !fsutil::mount_matches(record)) {
             if (!legacy)
                 ok = fsutil::unregister_umount(path) && ok;
@@ -610,7 +624,7 @@ bool unmount_all(const Config &config) {
     return ok;
 }
 
-std::vector<std::string> active_mounts(const Config &config) {
+std::vector<std::string> active_mounts(const Config& config) {
     std::vector<MountRecord> records;
     bool legacy;
     if (!read_mounts(records, legacy))
@@ -618,18 +632,20 @@ std::vector<std::string> active_mounts(const Config &config) {
     const auto old_mounts =
         legacy ? mounts_with_source(config.mount_source) : std::set<std::string>{};
     std::vector<std::string> paths;
-    for (const auto &record : records) {
+    for (const auto& record : records) {
         if (legacy ? old_mounts.count(record.path) != 0 : fsutil::mount_matches(record, true))
             paths.push_back(record.path);
     }
     return paths;
 }
 
-static bool save_mounts(const std::vector<std::string> &mounts) {
+namespace {
+bool save_mounts(const std::vector<std::string>& mounts) {
     return fsutil::write_mount_journal(state_file(), mounts);
 }
+}  // namespace
 
-bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config) {
+bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config) {
     if (!unmount_all(config))
         return false;
 
@@ -668,7 +684,7 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
         (void)rollback(w.committed);
         return false;
     }
-    for (const auto &m : w.committed)
+    for (const auto& m : w.committed)
         ok = ksu_umount_add(m) && ok;
     if (!ok)
         (void)unmount_all(config);
@@ -677,9 +693,11 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     return ok;
 }
 
-bool is_active(const Config &config) { return !active_mounts(config).empty(); }
+bool is_active(const Config& config) {
+    return !active_mounts(config).empty();
+}
 
-bool normalize_module(const std::string &module_path) {
+bool normalize_module(const std::string& module_path) {
     struct stat st{};
     if (lstat(module_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
         return false;
@@ -689,7 +707,7 @@ bool normalize_module(const std::string &module_path) {
     };
     std::vector<Change> changes;
     std::error_code ec;
-    const auto inspect = [](const std::string &path, struct stat &value) {
+    const auto inspect = [](const std::string& path, struct stat& value) {
         if (lstat(path.c_str(), &value) == 0)
             return 1;
         return errno == ENOENT ? 0 : -1;
@@ -698,13 +716,16 @@ bool normalize_module(const std::string &module_path) {
     const int system_exists = inspect(system, st);
     if (system_exists < 0 || (system_exists && !S_ISDIR(st.st_mode)))
         return false;
-    for (const auto *part : {"vendor", "system_ext", "product", "odm", "oem"}) {
+    for (const auto* part : {"vendor", "system_ext", "product", "odm", "oem"}) {
         if (!(fs::is_directory(std::string("/") + part, ec) &&
               fs::is_symlink(std::string("/system/") + part, ec)))
             continue;
-        const std::string top = module_path + "/" + part, sys = system + "/" + part;
-        struct stat top_stat{}, sys_stat{};
-        const int has_top = inspect(top, top_stat), has_sys = inspect(sys, sys_stat);
+        const std::string top = module_path + "/" + part;
+        const std::string sys = system + "/" + part;
+        struct stat top_stat{};
+        struct stat sys_stat{};
+        const int has_top = inspect(top, top_stat);
+        const int has_sys = inspect(sys, sys_stat);
         if (has_top < 0 || has_sys < 0)
             return false;
         if (has_top && S_ISLNK(top_stat.st_mode)) {
@@ -718,14 +739,17 @@ bool normalize_module(const std::string &module_path) {
         }
         if ((has_top && !S_ISDIR(top_stat.st_mode)) || (has_sys && !S_ISDIR(sys_stat.st_mode)) ||
             (has_top && has_sys)) {
-            mlog("normalize: conflicting partition entries: " + top + " and " + sys,
+            mlog(std::string("normalize: conflicting partition entries: ")
+                     .append(top)
+                     .append(" and ")
+                     .append(sys),
                  logging::Level::Error);
             return false;
         }
         if (has_top || has_sys)
             changes.push_back({top, sys, has_top != 0});
     }
-    for (const auto &change : changes) {
+    for (const auto& change : changes) {
         if (change.move) {
             fs::create_directories(system, ec);
             if (ec)
@@ -744,4 +768,4 @@ bool normalize_module(const std::string &module_path) {
     return true;
 }
 
-} // namespace kagami::mount::magic
+}  // namespace kagami::mount::magic

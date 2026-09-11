@@ -13,6 +13,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -61,33 +62,35 @@ static constexpr unsigned kFsconfigSetString = 1u;
 static constexpr unsigned kFsconfigCmdCreate = 6u;
 static constexpr unsigned kFsmountCloexec = 0x00000001u;
 static constexpr unsigned kMoveMountEmptyPath = 0x00000004u;
-static constexpr unsigned kOpenTreeClone = 0x00000001u;   // OPEN_TREE_CLONE
-static constexpr unsigned kOpenTreeCloexec = 0x00080000u; // OPEN_TREE_CLOEXEC (== O_CLOEXEC)
+static constexpr unsigned kOpenTreeClone = 0x00000001u;    // OPEN_TREE_CLONE
+static constexpr unsigned kOpenTreeCloexec = 0x00080000u;  // OPEN_TREE_CLOEXEC (== O_CLOEXEC)
 
-static int sys_fsopen(const char *fsname, unsigned flags) {
+namespace {
+int sys_fsopen(const char* fsname, unsigned flags) {
     return static_cast<int>(syscall(__NR_fsopen, fsname, flags));
 }
-static int sys_open_tree(int dfd, const char *path, unsigned flags) {
+int sys_open_tree(int dfd, const char* path, unsigned flags) {
     return static_cast<int>(syscall(__NR_open_tree, dfd, path, flags));
 }
-static int sys_fsconfig(int fd, unsigned cmd, const char *key, const char *value, int aux) {
+int sys_fsconfig(int fd, unsigned cmd, const char* key, const char* value, int aux) {
     return static_cast<int>(syscall(__NR_fsconfig, fd, cmd, key, value, aux));
 }
-static int sys_fsmount(int fd, unsigned flags, unsigned attr) {
+int sys_fsmount(int fd, unsigned flags, unsigned attr) {
     return static_cast<int>(syscall(__NR_fsmount, fd, flags, attr));
 }
-static int sys_move_mount(int from_fd, const char *from, int to_fd, const char *to,
-                          unsigned flags) {
+int sys_move_mount(int from_fd, const char* from, int to_fd, const char* to, unsigned flags) {
     return static_cast<int>(syscall(__NR_move_mount, from_fd, from, to_fd, to, flags));
 }
+}  // namespace
 
 struct AttachedMount {
     std::string path;
     bool registered = false;
 };
 
-static bool record_mount(const std::string &target, std::vector<AttachedMount> &attached,
-                         bool register_path = true) {
+namespace {
+bool record_mount(const std::string& target, std::vector<AttachedMount>& attached,
+                  bool register_path = true) {
     attached.push_back({target, false});
     if (!register_path)
         return true;
@@ -95,24 +98,27 @@ static bool record_mount(const std::string &target, std::vector<AttachedMount> &
     return attached.back().registered;
 }
 
-static bool starts_with(const std::string &s, const std::string &prefix) {
+bool starts_with(const std::string& s, const std::string& prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
+}  // namespace
 
 struct LayerSelection {
     std::vector<std::string> dirs;
     bool include_stock = true;
 };
 
-static bool select_layers(const std::vector<std::string> &roots, const std::string &relative,
-                          LayerSelection &selected) {
+namespace {
+bool select_layers(const std::vector<std::string>& roots, const std::string& relative,
+                   LayerSelection& selected) {
     selected = {};
     std::vector<std::string> components;
-    for (const auto &component : fs::path(relative).relative_path())
+    for (const auto& component : fs::path(relative).relative_path())
         components.push_back(component.string());
-    for (const auto &root : roots) {
+    for (const auto& root : roots) {
         std::string path = root;
-        bool present = true, cutoff = false;
+        bool present = true;
+        bool cutoff = false;
         for (size_t i = 0;; ++i) {
             struct stat st{};
             if (lstat(path.c_str(), &st) != 0) {
@@ -147,10 +153,10 @@ static bool select_layers(const std::vector<std::string> &roots, const std::stri
 // Mount an overlay at dest: lower_dirs stacked over lowest, with an optional
 // writable upper/work layer. Tries the fsopen API (no length limit on the
 // lowerdir list) and falls back to classic mount(2).
-static bool mount_overlayfs(const std::vector<std::string> &lower_dirs, const std::string &lowest,
-                            const std::string &upperdir, const std::string &workdir,
-                            const std::string &dest, const std::string &source,
-                            std::vector<AttachedMount> &attached, bool include_stock = true) {
+bool mount_overlayfs(const std::vector<std::string>& lower_dirs, const std::string& lowest,
+                     const std::string& upperdir, const std::string& workdir,
+                     const std::string& dest, const std::string& source,
+                     std::vector<AttachedMount>& attached, bool include_stock = true) {
     LayerSelection selected;
     if (!select_layers(lower_dirs, "", selected) || selected.dirs.empty())
         return false;
@@ -165,7 +171,7 @@ static bool mount_overlayfs(const std::vector<std::string> &lower_dirs, const st
         selected.dirs.push_back(empty);
     }
     std::string lowerdir;
-    for (const auto &dir : selected.dirs) {
+    for (const auto& dir : selected.dirs) {
         if (!lowerdir.empty())
             lowerdir += ':';
         lowerdir += dir;
@@ -216,8 +222,8 @@ static bool mount_overlayfs(const std::vector<std::string> &lower_dirs, const st
 // the source mount tree recursively and move_mount attaches it, faithfully
 // reproducing sub-mounts even when the source path is shadowed by an overlay;
 // fall back to a classic recursive bind if the new mount API is unavailable.
-static bool rbind_mount(const std::string &src, const std::string &dst,
-                        std::vector<AttachedMount> &attached) {
+bool rbind_mount(const std::string& src, const std::string& dst,
+                 std::vector<AttachedMount>& attached) {
     const int tree =
         sys_open_tree(AT_FDCWD, src.c_str(), kOpenTreeClone | kOpenTreeCloexec | AT_RECURSIVE);
     if (tree >= 0) {
@@ -233,7 +239,7 @@ static bool rbind_mount(const std::string &src, const std::string &dst,
 
 // Mount points strictly under root (a sub-mount shadowed once we overlay root),
 // sorted shallowest-first.
-static std::vector<std::string> child_mounts(const std::string &root) {
+std::vector<std::string> child_mounts(const std::string& root) {
     std::set<std::string> found;
     std::ifstream in("/proc/self/mountinfo");
     std::string line;
@@ -257,10 +263,9 @@ static std::vector<std::string> child_mounts(const std::string &root) {
 
 // Re-establish a sub-mount that the root overlay just shadowed: overlay the
 // modules that touch it on top of the stock content, or bind the stock back.
-static bool mount_overlay_child(const std::string &mount_point, const std::string &relative,
-                                const std::vector<std::string> &module_roots,
-                                const std::string &stock, const std::string &source,
-                                std::vector<AttachedMount> &attached) {
+bool mount_overlay_child(const std::string& mount_point, const std::string& relative,
+                         const std::vector<std::string>& module_roots, const std::string& stock,
+                         const std::string& source, std::vector<AttachedMount>& attached) {
     LayerSelection selected;
     if (!select_layers(module_roots, relative, selected))
         return false;
@@ -273,9 +278,9 @@ static bool mount_overlay_child(const std::string &mount_point, const std::strin
 // Overlay module_roots over the stock partition at root, then re-overlay every
 // sub-mount the root overlay shadowed. The stock layer is the pre-overlay root,
 // reached as "." after chdir (the cwd stays pinned to it once root is covered).
-static bool mount_overlay(const std::string &root, const std::vector<std::string> &module_roots,
-                          const std::string &upperdir, const std::string &workdir,
-                          const std::string &source, std::vector<AttachedMount> &attached) {
+bool mount_overlay(const std::string& root, const std::vector<std::string>& module_roots,
+                   const std::string& upperdir, const std::string& workdir,
+                   const std::string& source, std::vector<AttachedMount>& attached) {
     mlog("overlay: " + root);
     if (chdir(root.c_str()) != 0) {
         mlog("overlay: chdir " + root + " failed: " + std::strerror(errno), logging::Level::Error);
@@ -292,10 +297,11 @@ static bool mount_overlay(const std::string &root, const std::vector<std::string
     }
     if (!selected.include_stock)
         return true;
-    for (const auto &mp : children) {
+    for (const auto& mp : children) {
         const std::string relative = mp.substr(root.size());
         const std::string stock_child = stock + relative;
-        struct stat visible{}, original{};
+        struct stat visible{};
+        struct stat original{};
         if (lstat(mp.c_str(), &visible) != 0) {
             if (errno == ENOENT || errno == ENOTDIR)
                 continue;
@@ -311,7 +317,11 @@ static bool mount_overlay(const std::string &root, const std::vector<std::string
             continue;
         }
         if (!mount_overlay_child(mp, relative, module_roots, stock_child, source, attached)) {
-            mlog("overlay: child " + mp + " failed; reverting " + root, logging::Level::Warning);
+            mlog(std::string("overlay: child ")
+                     .append(mp)
+                     .append(" failed; reverting ")
+                     .append(root),
+                 logging::Level::Warning);
             return false;
         }
     }
@@ -320,19 +330,15 @@ static bool mount_overlay(const std::string &root, const std::vector<std::string
 
 // True if name is a managed partition other than "system" (vendor/product/...).
 // These appear under a module's system/ tree and remap to /<name>.
-static bool is_sub_partition(const std::string &name, const std::vector<std::string> &parts) {
-    for (const auto &p : parts) {
-        if (p != "system" && p == name) {
-            return true;
-        }
-    }
-    return false;
+bool is_sub_partition(const std::string& name, const std::vector<std::string>& parts) {
+    return std::any_of(parts.begin(), parts.end(),
+                       [&name](const auto& part) { return part != "system" && part == name; });
 }
 
 // Record a leaf overlay op: target is the live stock dir to overlay, layer is a
 // module's content for it. Reject unrepresentable targets before attaching mounts.
-static void add_leaf(std::map<std::string, std::vector<std::string>> &ops,
-                     const std::string &target, const std::string &layer) {
+void add_leaf(std::map<std::string, std::vector<std::string>>& ops, const std::string& target,
+              const std::string& layer) {
     struct stat st{};
     if (lstat(target.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
         const std::string error = "overlay: target must be an existing directory: " + target;
@@ -347,14 +353,14 @@ static void add_leaf(std::map<std::string, std::vector<std::string>> &ops,
 // overlaid — doing so shadows its bind sub-mounts (e.g. /system/vendor, or
 // /vendor's qcrild tree) and breaks the device. Deeper sub-mounts under a leaf
 // are re-established at mount time by mount_overlay's child handling.
-static void plan_partition_root(std::map<std::string, std::vector<std::string>> &ops,
-                                const std::string &subroot, const std::string &mount) {
+void plan_partition_root(std::map<std::string, std::vector<std::string>>& ops,
+                         const std::string& subroot, const std::string& mount) {
     const std::unique_ptr<DIR, decltype(&closedir)> d(opendir(subroot.c_str()), closedir);
     if (!d) {
         return;
     }
     std::error_code ec;
-    struct dirent *e;
+    struct dirent* e;
     while ((e = readdir(d.get())) != nullptr) {
         if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
             continue;
@@ -370,18 +376,18 @@ static void plan_partition_root(std::map<std::string, std::vector<std::string>> 
 // content_dir/<id>/<part>. Under system/, managed children (vendor/product/...)
 // remap to /<part>; other system/ children and top-level partition trees become
 // depth-1 leaves. Leaves are grouped by target so multiple modules stack.
-static std::map<std::string, std::vector<std::string>>
-plan_overlays(const std::string &content_dir, const std::vector<std::string> &enabled,
-              const std::vector<std::string> &parts) {
+std::map<std::string, std::vector<std::string>> plan_overlays(
+    const std::string& content_dir, const std::vector<std::string>& enabled,
+    const std::vector<std::string>& parts) {
     std::map<std::string, std::vector<std::string>> ops;
     std::error_code ec;
-    for (const auto &id : enabled) {
-        const std::string mbase = content_dir + "/" + id;
+    for (const auto& id : enabled) {
+        const std::string mbase = (fs::path(content_dir) / id).string();
 
         const std::string sysroot = mbase + "/system";
         const std::unique_ptr<DIR, decltype(&closedir)> d(opendir(sysroot.c_str()), closedir);
         if (d) {
-            struct dirent *e;
+            struct dirent* e;
             while ((e = readdir(d.get())) != nullptr) {
                 if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
                     continue;
@@ -393,16 +399,16 @@ plan_overlays(const std::string &content_dir, const std::vector<std::string> &en
                 if (is_sub_partition(e->d_name, parts)) {
                     plan_partition_root(ops, child, std::string("/") + e->d_name);
                 } else {
-                    add_leaf(ops, std::string("/system/") + e->d_name, child);
+                    add_leaf(ops, (fs::path("/system") / e->d_name).string(), child);
                 }
             }
         }
 
-        for (const auto &p : parts) {
+        for (const auto& p : parts) {
             if (p == "system") {
                 continue;
             }
-            const std::string top = mbase + "/" + p;
+            const std::string top = (fs::path(mbase) / p).string();
             if (fs::is_directory(top, ec)) {
                 plan_partition_root(ops, top, fsutil::partition_mount_point(p));
             }
@@ -411,25 +417,25 @@ plan_overlays(const std::string &content_dir, const std::vector<std::string> &en
     return ops;
 }
 
-static std::string overlay_journal() {
+std::string overlay_journal() {
     return (runtime_data_dir() / "run" / "overlay_mounts.list").string();
 }
 
-static std::vector<std::string> our_overlays(const std::string &source) {
+std::vector<std::string> our_overlays(const std::string& source) {
     (void)source;
     std::vector<fsutil::MountRecord> records;
     bool legacy;
     std::vector<std::string> paths;
     if (!fsutil::read_mount_journal(overlay_journal(), records, legacy) || legacy)
         return paths;
-    for (const auto &record : records)
+    for (const auto& record : records)
         if (fsutil::mount_matches(record, true))
             paths.push_back(record.path);
     return paths;
 }
 
-static bool relabel_tree(const std::string &node, const std::string &target,
-                         const std::string &parent_ctx) {
+bool relabel_tree(const std::string& node, const std::string& target,
+                  const std::string& parent_ctx) {
     std::string ctx;
     if (!fsutil::get_context(target, ctx)) {
         if (errno != ENOENT || parent_ctx.empty()) {
@@ -456,8 +462,8 @@ static bool relabel_tree(const std::string &node, const std::string &target,
     return !ec;
 }
 
-static bool relabel_part(const std::string &dst, const std::string &part,
-                         const std::vector<std::string> &parts) {
+bool relabel_part(const std::string& dst, const std::string& part,
+                  const std::vector<std::string>& parts) {
     if (part != "system")
         return relabel_tree(dst, fsutil::partition_mount_point(part), "");
     std::string ctx;
@@ -476,13 +482,13 @@ static bool relabel_part(const std::string &dst, const std::string &part,
     return !ec;
 }
 
-static bool component_name(const std::string &name) {
+bool component_name(const std::string& name) {
     return !name.empty() && name != "." && name != ".." &&
            name.find_first_of("/\\") == std::string::npos && name.find('\0') == std::string::npos;
 }
 
-static bool validate_partition_tree(const fs::path &path, const std::vector<std::string> &parts,
-                                    bool system) {
+bool validate_partition_tree(const fs::path& path, const std::vector<std::string>& parts,
+                             bool system) {
     bool opaque = false;
     if (!fsutil::directory_is_opaque(path.string(), opaque))
         return false;
@@ -510,14 +516,14 @@ static bool validate_partition_tree(const fs::path &path, const std::vector<std:
 }
 
 // Rebuild the selected modules before publishing any overlay, including on ext4.
-static bool sync_content(const std::vector<ModuleEntry> &modules, const storage::Handle &base,
-                         const std::vector<std::string> &partitions) {
+bool sync_content(const std::vector<ModuleEntry>& modules, const storage::Handle& base,
+                  const std::vector<std::string>& partitions) {
     if (base.mode == storage::Mode::Erofs) {
         std::error_code ec;
-        for (const auto &module : modules) {
+        for (const auto& module : modules) {
             if (!component_name(module.id))
                 return false;
-            for (const auto &part : partitions) {
+            for (const auto& part : partitions) {
                 if (!component_name(part))
                     return false;
                 const auto tree = fs::path(base.content_dir) / module.id / part;
@@ -544,7 +550,7 @@ static bool sync_content(const std::vector<ModuleEntry> &modules, const storage:
         }
         return true;
     }
-    for (const auto &part : partitions) {
+    for (const auto& part : partitions) {
         if (!component_name(part))
             return false;
     }
@@ -555,14 +561,14 @@ static bool sync_content(const std::vector<ModuleEntry> &modules, const storage:
     fs::create_directories(base.content_dir, ec);
     if (ec)
         return false;
-    for (const auto &module : modules) {
+    for (const auto& module : modules) {
         if (!component_name(module.id) || module.id == ".rw" || module.id == "lost+found")
             return false;
         const fs::path cache = fs::path(base.content_dir) / module.id;
         fs::remove_all(cache, ec);
         if (ec)
             return false;
-        for (const auto &part : partitions) {
+        for (const auto& part : partitions) {
             const auto src = module.path / part;
             const auto status = fs::symlink_status(src, ec);
             if (ec == std::errc::no_such_file_or_directory) {
@@ -586,9 +592,10 @@ static bool sync_content(const std::vector<ModuleEntry> &modules, const storage:
     }
     return true;
 }
+}  // namespace
 
-bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config) {
-    storage::Handle base = storage::setup(config);
+bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config) {
+    const storage::Handle base = storage::setup(config);
     if (!base.ok) {
         mlog("overlay: storage base setup failed", logging::Level::Error);
         return false;
@@ -596,8 +603,8 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     mlog(std::string("overlay: base mode=") + storage::mode_name(base.mode) +
          " content=" + base.content_dir);
 
-    const std::vector<std::string> &partitions =
-        config.partitions.empty() ? fsutil::kManagedPartitions : config.partitions;
+    const std::vector<std::string>& partitions =
+        config.partitions.empty() ? fsutil::managed_partitions() : config.partitions;
 
     if (!sync_content(modules, base, partitions)) {
         mlog("overlay: content synchronization failed", logging::Level::Error);
@@ -606,7 +613,7 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
 
     std::vector<std::string> enabled;
     enabled.reserve(modules.size());
-    for (const auto &m : modules) {
+    for (const auto& m : modules) {
         enabled.push_back(m.id);
     }
 
@@ -616,7 +623,7 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     const auto ops = plan_overlays(base.content_dir, enabled, partitions);
     std::vector<AttachedMount> attached;
     bool ok = !ops.empty();
-    for (const auto &[target, layers] : ops) {
+    for (const auto& [target, layers] : ops) {
         if (layers.empty())
             continue;
         if (!mount_overlay(target, layers, "", "", config.mount_source, attached)) {
@@ -632,7 +639,7 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     }
     if (ok) {
         std::vector<std::string> paths;
-        for (const auto &entry : attached)
+        for (const auto& entry : attached)
             if (entry.registered)
                 paths.push_back(entry.path);
         ok = fsutil::write_mount_journal(overlay_journal(), paths);
@@ -652,7 +659,7 @@ bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config
     return true;
 }
 
-bool unmount_all(const Config &config) {
+bool unmount_all(const Config& config) {
     (void)config;
     std::vector<fsutil::MountRecord> records;
     bool legacy;
@@ -678,7 +685,7 @@ bool unmount_all(const Config &config) {
     return ok;
 }
 
-bool restore_xattr_hiding(const Config &config) {
+bool restore_xattr_hiding(const Config& config) {
     std::vector<fsutil::MountRecord> records;
     bool legacy;
     if (!fsutil::read_mount_journal(overlay_journal(), records, legacy) || legacy)
@@ -691,7 +698,7 @@ bool restore_xattr_hiding(const Config &config) {
     }
 
     bool ok = true;
-    for (const auto &target : our_overlays(config.mount_source)) {
+    for (const auto& target : our_overlays(config.mount_source)) {
         if (!::kagami::kasumi::hide_overlay_xattrs(target)) {
             mlog("overlay: failed to restore xattr hiding for " + target, logging::Level::Error);
             ok = false;
@@ -700,10 +707,12 @@ bool restore_xattr_hiding(const Config &config) {
     return ok;
 }
 
-std::vector<std::string> active_mounts(const Config &config) {
+std::vector<std::string> active_mounts(const Config& config) {
     return our_overlays(config.mount_source);
 }
 
-bool is_active(const Config &config) { return !our_overlays(config.mount_source).empty(); }
+bool is_active(const Config& config) {
+    return !our_overlays(config.mount_source).empty();
+}
 
-} // namespace kagami::mount::overlay
+}  // namespace kagami::mount::overlay

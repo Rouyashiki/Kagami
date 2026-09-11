@@ -38,6 +38,8 @@ set(KAGAMI_SOURCES
 )
 
 add_executable(kagamid ${KAGAMI_SOURCES})
+include(cmake/ClangTidy.cmake)
+kagami_enable_clang_tidy(kagamid)
 if(ANDROID)
     target_link_libraries(kagamid PRIVATE z)
 else()

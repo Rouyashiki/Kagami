@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -25,7 +26,7 @@ namespace kagami::mount::storage {
 namespace fs = std::filesystem;
 using fsutil::mlog;
 
-const char *mode_name(Mode mode) {
+const char* mode_name(Mode mode) {
     switch (mode) {
     case Mode::Tmpfs:
         return "tmpfs";
@@ -38,16 +39,17 @@ const char *mode_name(Mode mode) {
 }
 
 // fork/exec a tool (looked up on PATH); true on exit status 0.
-static bool run_tool(const std::vector<std::string> &argv) {
+namespace {
+bool run_tool(const std::vector<std::string>& argv) {
     if (argv.empty()) {
         errno = EINVAL;
         return false;
     }
     mlog("tool=" + argv.front() + " target=" + argv.back() + " begin", logging::Level::Debug);
-    std::vector<char *> c;
+    std::vector<char*> c;
     c.reserve(argv.size() + 1);
-    for (const auto &a : argv) {
-        c.push_back(const_cast<char *>(a.c_str()));
+    for (const auto& a : argv) {
+        c.push_back(const_cast<char*>(a.c_str()));
     }
     c.push_back(nullptr);
     const pid_t pid = fork();
@@ -80,7 +82,7 @@ static bool run_tool(const std::vector<std::string> &argv) {
     return result == 0;
 }
 
-static bool make_ext4_image(const std::string &img, int size_mb) {
+bool make_ext4_image(const std::string& img, int size_mb) {
     const std::string size = std::to_string(size_mb) + "M";
     if (!run_tool({"truncate", "-s", size, img}) && !run_tool({"fallocate", "-l", size, img})) {
         mlog("storage: failed to allocate image " + img, logging::Level::Error);
@@ -95,13 +97,21 @@ static bool make_ext4_image(const std::string &img, int size_mb) {
 }
 
 // Make a mount private and register it with KernelSU for per-app unmount.
-static bool finalize(const std::string &dir) {
+bool finalize(const std::string& dir) {
     return ::mount("none", dir.c_str(), nullptr, MS_PRIVATE, nullptr) == 0 &&
            fsutil::register_umount(dir);
 }
+}  // namespace
 
-struct PendingMounts {
-    std::vector<std::string> paths;
+class PendingMounts {
+public:
+    PendingMounts() = default;
+    PendingMounts(const PendingMounts&) = delete;
+    PendingMounts& operator=(const PendingMounts&) = delete;
+    PendingMounts(PendingMounts&&) = delete;
+    PendingMounts& operator=(PendingMounts&&) = delete;
+    void add(const std::string& path) { paths.push_back(path); }
+    void commit() { paths.clear(); }
     ~PendingMounts() {
         for (auto it = paths.rbegin(); it != paths.rend(); ++it) {
             if (umount2(it->c_str(), MNT_DETACH) != 0)
@@ -111,12 +121,16 @@ struct PendingMounts {
                 (void)fsutil::unregister_umount(*it);
         }
     }
+
+private:
+    std::vector<std::string> paths;
 };
 
 // Return the filesystem type when `path` is an exact mountpoint in this mount
 // namespace. A later backend must reuse the mirror acquired by the first one;
 // blindly detaching it would invalidate the other backend's lower trees.
-static bool mounted_mode(const std::string &path, Mode &mode) {
+namespace {
+bool mounted_mode(const std::string& path, Mode& mode) {
     std::ifstream in("/proc/self/mountinfo");
     std::string line;
     while (std::getline(in, line)) {
@@ -155,24 +169,24 @@ static bool mounted_mode(const std::string &path, Mode &mode) {
 
 // The per-boot mirror path is recorded here so status/teardown in later kagamid
 // invocations agree with the mount-all that created it.
-static std::string mirror_run_file(const Config &config) {
+std::string mirror_run_file(const Config& config) {
     const std::string base = config.data_dir.empty() ? "/data/adb/kagami" : config.data_dir;
     return base + "/run/mirror_mounts.list";
 }
 
 // "" and the retired fixed default both mean "randomize"; any other explicit
 // mirror_dir is an operator override that wins.
-static bool mirror_is_auto(const std::string &dir) {
+bool mirror_is_auto(const std::string& dir) {
     return dir.empty() || dir == "/dev/kagami_mirror";
 }
 
-static std::string random_mount_name() {
+std::string random_mount_name() {
     std::ifstream u("/dev/urandom", std::ios::binary);
     static const char hex[] = "0123456789abcdef";
     std::string name;
     for (int i = 0; i < 8; ++i) {
         unsigned char c = 0;
-        if (!u.read(reinterpret_cast<char *>(&c), 1)) {
+        if (!u.read(reinterpret_cast<char*>(&c), 1)) {
             break;
         }
         name.push_back(hex[(c >> 4) & 0xF]);
@@ -181,28 +195,26 @@ static std::string random_mount_name() {
     return name.size() == 16 ? name : std::string("kagami-fallback");
 }
 
-static bool mirror_records(const Config &config, std::vector<fsutil::MountRecord> &records) {
+bool mirror_records(const Config& config, std::vector<fsutil::MountRecord>& records) {
     bool legacy;
     return fsutil::read_mount_journal(mirror_run_file(config), records, legacy) && !legacy;
 }
-static bool mirror_owns(const Config &config, const std::string &path, bool include_init = false) {
+bool mirror_owns(const Config& config, const std::string& path, bool include_init = false) {
     std::vector<fsutil::MountRecord> records;
     if (!mirror_records(config, records))
         return false;
-    for (const auto &record : records)
-        if (record.path == path && fsutil::mount_matches(record, include_init))
-            return true;
-    return false;
+    return std::any_of(records.begin(), records.end(), [&path, include_init](const auto& record) {
+        return record.path == path && fsutil::mount_matches(record, include_init);
+    });
 }
-static std::string owned_mirror(const Config &config, bool include_init = false) {
+std::string owned_mirror(const Config& config, bool include_init = false) {
     std::vector<fsutil::MountRecord> records;
     if (!mirror_records(config, records) || records.empty() ||
         !fsutil::mount_matches(records.front(), include_init))
         return {};
     return records.front().path;
 }
-static bool record_mirror(const Config &config, const std::string &path,
-                          const std::string &rw = {}) {
+bool record_mirror(const Config& config, const std::string& path, const std::string& rw = {}) {
     std::vector<std::string> paths{path};
     if (!rw.empty())
         paths.push_back(rw);
@@ -210,31 +222,34 @@ static bool record_mirror(const Config &config, const std::string &path,
         paths.push_back(path + ".rw");
     return fsutil::write_mount_journal(mirror_run_file(config), paths);
 }
-std::string current_mirror_dir(const Config &config) {
-    const auto owned = owned_mirror(config, true);
+}  // namespace
+std::string current_mirror_dir(const Config& config) {
+    auto owned = owned_mirror(config, true);
     if (!owned.empty())
         return owned;
     return mirror_is_auto(config.mirror_dir) ? std::string{} : config.mirror_dir;
 }
 
 // Reuse this boot's committed mirror path, or choose a fresh mountpoint.
-static std::string acquire_mirror_dir(const Config &config) {
+namespace {
+std::string acquire_mirror_dir(const Config& config) {
     if (!mirror_is_auto(config.mirror_dir)) {
         return config.mirror_dir;
     }
-    const std::string existing = current_mirror_dir(config);
+    std::string existing = current_mirror_dir(config);
     if (!existing.empty()) {
         return existing;
     }
     return "/mnt/" + random_mount_name();
 }
+}  // namespace
 
-Handle setup(const Config &config) {
+Handle setup(const Config& config) {
     Handle h;
     PendingMounts pending;
-    const std::string base = acquire_mirror_dir(config); // per-boot random /mnt mountpoint
+    const std::string base = acquire_mirror_dir(config);  // per-boot random /mnt mountpoint
     h.content_dir = base;
-    const std::string img = config.mirror_img; // backing image persists on /data
+    const std::string img = config.mirror_img;  // backing image persists on /data
     std::string erofs_img = config.mirror_img;
     const auto dot = erofs_img.rfind(".img");
     if (dot != std::string::npos) {
@@ -246,9 +261,9 @@ Handle setup(const Config &config) {
     std::error_code ec;
     fs::create_directories(h.content_dir, ec);
 
-    const std::string &mode = config.fs_type;
+    const std::string& mode = config.fs_type;
     const bool want_auto = mode == "auto" || mode.empty();
-    const bool writable = config.overlay_writable; // upper/work layer is opt-in
+    const bool writable = config.overlay_writable;  // upper/work layer is opt-in
 
     if (mounted_mode(h.content_dir, h.mode)) {
         if (owned_mirror(config) != base) {
@@ -278,7 +293,7 @@ Handle setup(const Config &config) {
                              logging::Level::Error);
                         return Handle{};
                     }
-                    pending.paths.push_back(h.rw_dir);
+                    pending.add(h.rw_dir);
                     if (!finalize(h.rw_dir))
                         return Handle{};
                 }
@@ -286,7 +301,7 @@ Handle setup(const Config &config) {
         }
         if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
             return Handle{};
-        pending.paths.clear();
+        pending.commit();
         h.ok = true;
         mlog(std::string("storage: reusing shared ") + mode_name(h.mode) + " mirror");
         return h;
@@ -304,7 +319,7 @@ Handle setup(const Config &config) {
             mlog("storage: mount erofs image failed", logging::Level::Error);
             return h;
         }
-        pending.paths.push_back(h.content_dir);
+        pending.add(h.content_dir);
         if (writable) {
             // EROFS mounts the root read-only, so its optional OverlayFS
             // upper/work tmpfs must be a sibling rather than a child.
@@ -317,7 +332,7 @@ Handle setup(const Config &config) {
                      logging::Level::Error);
                 return h;
             }
-            pending.paths.push_back(h.rw_dir);
+            pending.add(h.rw_dir);
             if (!finalize(h.rw_dir))
                 return Handle{};
         }
@@ -326,7 +341,7 @@ Handle setup(const Config &config) {
         h.mode = Mode::Erofs;
         if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
             return Handle{};
-        pending.paths.clear();
+        pending.commit();
         h.ok = true;
         mlog(std::string("storage: erofs content") +
              (writable ? " + tmpfs writable layer" : " (read-only)"));
@@ -336,7 +351,7 @@ Handle setup(const Config &config) {
     const bool use_tmpfs = mode == "tmpfs" || (want_auto && fsutil::tmpfs_xattr_supported());
     if (use_tmpfs) {
         if (::mount(config.mount_source.c_str(), h.content_dir.c_str(), "tmpfs", 0, nullptr) == 0) {
-            pending.paths.push_back(h.content_dir);
+            pending.add(h.content_dir);
             if (writable) {
                 h.rw_dir = h.content_dir + "/.rw";
                 fs::create_directories(h.rw_dir, ec);
@@ -350,7 +365,7 @@ Handle setup(const Config &config) {
             h.mode = Mode::Tmpfs;
             if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
                 return Handle{};
-            pending.paths.clear();
+            pending.commit();
             h.ok = true;
             mlog(std::string("storage: selected tmpfs") +
                  (writable ? " (writable)" : " (read-only)"));
@@ -380,7 +395,7 @@ Handle setup(const Config &config) {
         mlog("storage: mount ext4 image failed", logging::Level::Error);
         return h;
     }
-    pending.paths.push_back(h.content_dir);
+    pending.add(h.content_dir);
     if (writable) {
         h.rw_dir = h.content_dir + "/.rw";
         fs::create_directories(h.rw_dir, ec);
@@ -392,13 +407,13 @@ Handle setup(const Config &config) {
     h.mode = Mode::Ext4;
     if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
         return Handle{};
-    pending.paths.clear();
+    pending.commit();
     h.ok = true;
     mlog(std::string("storage: ext4 image base") + (writable ? " (writable)" : " (read-only)"));
     return h;
 }
 
-void teardown(const Handle &handle) {
+void teardown(const Handle& handle) {
     if (!handle.ok) {
         return;
     }
@@ -408,7 +423,7 @@ void teardown(const Handle &handle) {
     umount2(handle.content_dir.c_str(), MNT_DETACH);
 }
 
-bool teardown_shared(const Config &config) {
+bool teardown_shared(const Config& config) {
     std::vector<fsutil::MountRecord> records;
     if (!mirror_records(config, records))
         return false;
@@ -432,4 +447,4 @@ bool teardown_shared(const Config &config) {
     return ok;
 }
 
-} // namespace kagami::mount::storage
+}  // namespace kagami::mount::storage

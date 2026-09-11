@@ -1,7 +1,7 @@
 #pragma once
 
-#include <string>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace kagami::kasumi {
@@ -124,7 +124,8 @@ bool add_rule(const std::string& target, const std::string& source, int type);
 bool add_merge_rule(const std::string& target, const std::string& source);
 bool hide_path(const std::string& path);
 bool delete_rule(const std::string& path);
-bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned long spoofed_ino, unsigned long spoofed_dev, const std::string& spoofed_path);
+bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned long spoofed_ino,
+                   unsigned long spoofed_dev, const std::string& spoofed_path);
 bool clear_maps_rules();
 PolicySnapshot policy_snapshot();
 bool replace_policy(PolicyOwner owner, std::uint32_t flags,
@@ -135,4 +136,4 @@ int last_getfd_errno();
 int process_uid();
 int process_euid();
 
-} // namespace kagami::kasumi
+}  // namespace kagami::kasumi

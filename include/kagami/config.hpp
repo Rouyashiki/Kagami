@@ -1,7 +1,7 @@
 #pragma once
 
-#include <string>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace kagami {
@@ -72,9 +72,8 @@ std::string default_config_json();
 bool write_default_config(const std::string& path, std::string& error);
 bool parse_config_json(const std::string& json, Config& config, std::string& error);
 bool read_config_file(const std::string& path, Config& config, std::string& error);
-bool merge_config_json(const std::string& path, const std::string& updates,
-                       std::string& error);
+bool merge_config_json(const std::string& path, const std::string& updates, std::string& error);
 bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error);
 bool update_policy_config(const std::string& path, const PolicyConfig& policy, std::string& error);
 
-} // namespace kagami
+}  // namespace kagami
