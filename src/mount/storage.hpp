@@ -16,7 +16,7 @@ namespace kagami::mount::storage {
 // fixed, /dev-anchored signature.
 enum class Mode { Tmpfs, Ext4, Erofs };
 
-const char* mode_name(Mode mode);
+const char *mode_name(Mode mode);
 
 struct Handle {
     bool ok = false;
@@ -25,24 +25,24 @@ struct Handle {
     std::string rw_dir;      // writable fs for per-partition upperdir/workdir
 };
 
-// Mount or reuse the shared mirror per config.fs_type ("auto" => tmpfs if
-// overlay xattrs work, else ext4). Must run inside the init mount namespace;
-// marks new mounts private and registers them with KernelSU. Returns
+// In auto mode, use tmpfs if /proc/config.gz enables CONFIG_TMPFS_XATTR, else ext4.
+// Must run inside the init mount namespace; marks new mounts private and
+// registers them with KernelSU. Returns
 // Handle{ok=false} on failure. Picks and persists the per-boot mount path.
-Handle setup(const Config& config);
+Handle setup(const Config &config);
 
 // The overlay mirror mountpoint in effect for this boot: an explicit non-default
 // config.mirror_dir, else the per-boot random /mnt path setup() recorded, else
 // "" when no mirror is active. Read-only; never generates a path.
-std::string current_mirror_dir(const Config& config);
+std::string current_mirror_dir(const Config &config);
 
 // Unmount an acquired base (content + writable). The ext4/erofs image is left
 // on disk. Backend code should normally use teardown_shared() after both
 // OverlayFS and Kasumi are inactive.
-void teardown(const Handle& handle);
+void teardown(const Handle &handle);
 
 // Detach the one shared mirror after every backend has released it. Magic Mount
 // never calls setup(), so an all-Magic configuration does not create this mount.
-void teardown_shared(const Config& config);
+bool teardown_shared(const Config &config);
 
 } // namespace kagami::mount::storage

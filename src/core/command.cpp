@@ -349,8 +349,9 @@ static std::vector<MountEntry> read_mountinfo() {
         }
         std::istringstream post(line.substr(sep + 3));
         MountEntry e;
-        e.mount_point = f[4];
+        e.mount_point = mount::fsutil::decode_mount_path(f[4]);
         post >> e.fstype >> e.source;
+        e.source = mount::fsutil::decode_mount_path(e.source);
         out.push_back(e);
     }
     return out;
@@ -825,10 +826,14 @@ static int print_system_json() {
 
     // Count our live mounts (our mount source) for the stats panel.
     const Config config = current_config();
+    auto owned_paths = mount::magic::active_mounts(config);
+    const auto overlay_paths = mount::overlay::active_mounts(config);
+    owned_paths.insert(owned_paths.end(), overlay_paths.begin(), overlay_paths.end());
+    const std::set<std::string> owned(owned_paths.begin(), owned_paths.end());
     int total_mounts = 0;
     int overlay_mounts = 0;
     for (const auto& m : read_mountinfo()) {
-        if (m.source != config.mount_source) {
+        if (m.source != config.mount_source && !owned.count(m.mount_point)) {
             continue;
         }
         ++total_mounts;
@@ -1342,7 +1347,7 @@ static int handle_module(const std::vector<std::string>& args) {
                 const auto end = fs::recursive_directory_iterator();
                 for (; it != end && !ec; it.increment(ec)) {
                     if (it->is_regular_file(ec) || it->is_symlink(ec)) {
-                        owners[(fs::path("/") / part / fs::relative(it->path(), root, ec)).string()].push_back(module.id);
+                        owners[(fs::path("/") / part / it->path().lexically_relative(root)).string()].push_back(module.id);
                     }
                 }
             }

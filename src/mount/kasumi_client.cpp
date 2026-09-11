@@ -36,7 +36,7 @@ static_assert(static_cast<std::uint32_t>(MountHideMode::Aggressive) ==
 static_assert(sizeof(kasumi_quiesce_arg) == 64);
 
 static bool lkm_in_proc_modules() {
-#if defined(__linux__)
+#if defined(__linux__) && !defined(KAGAMI_EMBEDDED)
     std::ifstream modules("/proc/modules");
     std::string line;
     while (std::getline(modules, line)) {

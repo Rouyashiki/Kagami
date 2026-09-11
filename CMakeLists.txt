@@ -38,6 +38,12 @@ set(KAGAMI_SOURCES
 )
 
 add_executable(kagamid ${KAGAMI_SOURCES})
+if(ANDROID)
+    target_link_libraries(kagamid PRIVATE z)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(kagamid PRIVATE ZLIB::ZLIB)
+endif()
 target_include_directories(kagamid PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src

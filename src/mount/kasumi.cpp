@@ -30,9 +30,7 @@ using fsutil::mlog;
 namespace {
 
 fs::path active_file() { return runtime_data_dir() / "run" / "kasumi_active"; }
-fs::path mapping_plan_file() {
-    return runtime_data_dir() / "run" / "kasumi_mapping_plan";
-}
+fs::path mapping_plan_file() { return runtime_data_dir() / "run" / "kasumi_mapping_plan"; }
 
 std::string current_boot_id() {
     std::ifstream in("/proc/sys/kernel/random/boot_id");
@@ -41,18 +39,17 @@ std::string current_boot_id() {
     return value;
 }
 
-bool marker_matches_current_boot(const fs::path& path) {
+bool marker_matches_current_boot(const fs::path &path) {
     const std::string boot_id = current_boot_id();
     if (boot_id.empty()) {
         return false;
     }
     std::ifstream in(path);
     std::string stored_boot_id;
-    return static_cast<bool>(std::getline(in, stored_boot_id)) &&
-           stored_boot_id == boot_id;
+    return static_cast<bool>(std::getline(in, stored_boot_id)) && stored_boot_id == boot_id;
 }
 
-bool write_boot_marker(const fs::path& path, const std::string& detail = {}) {
+bool write_boot_marker(const fs::path &path, const std::string &detail = {}) {
     const std::string boot_id = current_boot_id();
     if (boot_id.empty()) {
         return false;
@@ -87,7 +84,7 @@ bool write_boot_marker(const fs::path& path, const std::string& detail = {}) {
     return true;
 }
 
-bool path_matches_rule(const std::string& path, const std::string& prefix) {
+bool path_matches_rule(const std::string &path, const std::string &prefix) {
     if (path == prefix) {
         return true;
     }
@@ -97,10 +94,10 @@ bool path_matches_rule(const std::string& path, const std::string& prefix) {
     return prefix.back() == '/' || path[prefix.size()] == '/';
 }
 
-std::string effective_mode(const std::string& path, const std::vector<ModuleRule>& rules) {
+std::string effective_mode(const std::string &path, const std::vector<ModuleRule> &rules) {
     std::string mode = "kasumi";
     std::size_t longest = 0;
-    for (const auto& rule : rules) {
+    for (const auto &rule : rules) {
         if (rule.path.empty() || rule.path.front() != '/') {
             continue;
         }
@@ -112,9 +109,15 @@ std::string effective_mode(const std::string& path, const std::vector<ModuleRule
     return mode;
 }
 
+static bool has_nested_rule(const std::string &path, const std::vector<ModuleRule> &rules) {
+    return std::any_of(rules.begin(), rules.end(), [&](const ModuleRule &rule) {
+        return rule.path.size() > path.size() && path_matches_rule(rule.path, path);
+    });
+}
+
 // Resolve symlinked partition paths (e.g. /system/vendor -> /vendor) without
 // discarding a non-existent leaf that a module adds.
-std::string resolve_virtual_path(const std::string& value) {
+std::string resolve_virtual_path(const std::string &value) {
     fs::path path(value);
     if (!path.has_parent_path()) {
         return value;
@@ -155,7 +158,7 @@ std::vector<std::string> user_hide_rules() {
     if (!parse_json(data.str(), root, error) || !root.is_array()) {
         return out;
     }
-    for (const auto& item : root.array_value) {
+    for (const auto &item : root.array_value) {
         if (item.is_string() && !item.string_value.empty() && item.string_value.front() == '/') {
             out.push_back(item.string_value);
         }
@@ -164,26 +167,61 @@ std::vector<std::string> user_hide_rules() {
 }
 
 struct RuleBatch {
-    std::vector<std::pair<std::string, std::string>> add;
-    std::vector<std::pair<std::string, std::string>> merge;
+    struct Mapping {
+        std::string path, source;
+        bool merge;
+    };
+    std::vector<Mapping> mappings;
     std::set<std::string> hide;
 };
 
-void compile_tree(const fs::path& source_root, const std::string& virtual_root,
-                  const std::vector<ModuleRule>& rules, RuleBatch& batch) {
+static bool merge_tree_supported(const fs::path &root) {
+    bool opaque;
+    if (!fsutil::directory_is_opaque(root.string(), opaque))
+        return false;
+    if (opaque) {
+        mlog("kasumi: directory replacement is unsupported: " + root.string(),
+             logging::Level::Error);
+        return false;
+    }
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+        const auto status = it->symlink_status(ec);
+        if (ec)
+            return false;
+        if (it->path().filename() == ".replace" ||
+            (fs::is_directory(status) &&
+             (!fsutil::directory_is_opaque(it->path().string(), opaque) || opaque))) {
+            mlog("kasumi: unsupported replacement metadata: " + it->path().string(),
+                 logging::Level::Error);
+            return false;
+        }
+    }
+    return !ec;
+}
+
+bool compile_tree(const fs::path &source_root, const std::string &virtual_root,
+                  const std::vector<ModuleRule> &rules, RuleBatch &batch) {
     std::error_code ec;
     if (!fs::is_directory(source_root, ec)) {
-        return;
+        return !ec || ec == std::errc::no_such_file_or_directory;
+    }
+    bool root_opaque;
+    if (!fsutil::directory_is_opaque(source_root.string(), root_opaque) || root_opaque) {
+        mlog("kasumi: unsupported partition replacement: " + source_root.string(),
+             logging::Level::Error);
+        return false;
     }
     auto it = fs::recursive_directory_iterator(source_root, ec);
     const auto end = fs::recursive_directory_iterator();
     for (; it != end && !ec; it.increment(ec)) {
         const fs::path source = it->path();
-        const fs::path relative = fs::relative(source, source_root, ec);
+        const fs::path relative = source.lexically_relative(source_root);
         if (ec) {
             break;
         }
-        const std::string virtual_path = resolve_virtual_path((fs::path(virtual_root) / relative).string());
+        const std::string virtual_path =
+            resolve_virtual_path((fs::path(virtual_root) / relative).string());
         std::string mode = effective_mode(virtual_path, rules);
         if (mode == "hide") {
             batch.hide.insert(virtual_path);
@@ -193,7 +231,7 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
             continue;
         }
         if (mode == "none") {
-            if (it->is_directory(ec)) {
+            if (it->is_directory(ec) && !has_nested_rule(virtual_path, rules)) {
                 it.disable_recursion_pending();
             }
             continue;
@@ -206,9 +244,14 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
             mode = "kasumi";
         }
 
+        if (source.filename() == ".replace") {
+            mlog("kasumi: unsupported replacement marker: " + source.string(),
+                 logging::Level::Error);
+            return false;
+        }
         struct stat st = {};
         if (lstat(source.c_str(), &st) != 0) {
-            continue;
+            return false;
         }
         if (S_ISCHR(st.st_mode) && major(st.st_rdev) == 0 && minor(st.st_rdev) == 0) {
             batch.hide.insert(virtual_path);
@@ -216,8 +259,11 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
         }
         if (S_ISDIR(st.st_mode)) {
             std::error_code target_ec;
-            if (fs::is_directory(virtual_path, target_ec) && !target_ec) {
-                batch.merge.emplace_back(virtual_path, source.string());
+            if (fs::is_directory(virtual_path, target_ec) && !target_ec &&
+                !has_nested_rule(virtual_path, rules)) {
+                if (!merge_tree_supported(source))
+                    return false;
+                batch.mappings.push_back({virtual_path, source.string(), true});
                 it.disable_recursion_pending();
             }
             continue;
@@ -226,21 +272,24 @@ void compile_tree(const fs::path& source_root, const std::string& virtual_root,
             if (S_ISLNK(st.st_mode)) {
                 std::error_code target_ec;
                 if (fs::is_directory(virtual_path, target_ec) && !target_ec) {
-                    mlog("kasumi: refusing to replace directory with symlink " + virtual_path);
-                    continue;
+                    mlog("kasumi: refusing to replace directory with symlink " + virtual_path,
+                         logging::Level::Error);
+                    return false;
                 }
             }
-            batch.add.emplace_back(virtual_path, source.string());
+            batch.mappings.push_back({virtual_path, source.string(), false});
         }
     }
     if (ec) {
-        mlog("kasumi: scan failed for " + source_root.string() + ": " + ec.message());
+        mlog("kasumi: scan failed for " + source_root.string() + ": " + ec.message(),
+             logging::Level::Error);
     }
+    return !ec;
 }
 
-bool disable_kernel_features(std::string* error = nullptr) {
+bool disable_kernel_features(std::string *error = nullptr) {
     bool ok = true;
-    const auto disable = [&](bool result, const char* name) {
+    const auto disable = [&](bool result, const char *name) {
         if (!result) {
             ok = false;
             if (error && error->empty()) {
@@ -259,7 +308,7 @@ bool disable_kernel_features(std::string* error = nullptr) {
 
 } // namespace
 
-bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
+bool apply_policy_config(const PolicyConfig &policy, std::string &error) {
     ::kagami::kasumi::PolicyOwner owner = ::kagami::kasumi::PolicyOwner::Auto;
     if (policy.owner == "auto") {
         owner = ::kagami::kasumi::PolicyOwner::Auto;
@@ -272,15 +321,13 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
     } else if (policy.owner == "disabled" || policy.owner == "off") {
         owner = ::kagami::kasumi::PolicyOwner::Disabled;
     } else {
-        error = policy.owner == "magisk"
-                    ? "Magisk has no Kasumi API 17 policy provider; use manual"
-                    : "invalid policy owner: " + policy.owner;
+        error = policy.owner == "magisk" ? "Magisk has no Kasumi API 17 policy provider; use manual"
+                                         : "invalid policy owner: " + policy.owner;
         return false;
     }
 
     std::uint32_t flags = 0;
-    if (policy.use_allow_uids || !policy.allow_uids.empty() ||
-        policy.include_isolated_uids ||
+    if (policy.use_allow_uids || !policy.allow_uids.empty() || policy.include_isolated_uids ||
         owner == ::kagami::kasumi::PolicyOwner::Manual) {
         flags |= KSM_POLICY_FLAG_USE_ALLOW_UIDS;
     }
@@ -296,17 +343,21 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
         error = "failed to disable Kasumi before replacing policy";
         return false;
     }
-    if (!::kagami::kasumi::replace_policy(owner, flags, policy.allow_uids,
-                                           policy.deny_uids)) {
+    if (!::kagami::kasumi::replace_policy(owner, flags, policy.allow_uids, policy.deny_uids)) {
         error = "failed to atomically replace Kasumi policy";
         return false;
     }
     return true;
 }
 
-bool apply_feature_config(const Config& config, std::string& error) {
+bool apply_feature_config(const Config &config, std::string &error) {
+    mlog("apply features: mount_hide=" + std::to_string(config.enable_mount_hide) +
+         " mode=" + config.mount_hide_mode + " maps=" + std::to_string(config.enable_maps_spoof) +
+         " statfs=" + std::to_string(config.enable_statfs_spoof) +
+         " overlay_xattrs=" + std::to_string(config.enable_overlay_xattr_hide) +
+         " selinux_guard=" + std::to_string(config.enable_selinux_fix));
     bool ok = true;
-    const auto apply = [&](bool result, const char* name) {
+    const auto apply = [&](bool result, const char *name) {
         if (!result) {
             if (error.empty()) {
                 error = std::string("failed to set Kasumi ") + name;
@@ -318,23 +369,20 @@ bool apply_feature_config(const Config& config, std::string& error) {
     apply(::kagami::kasumi::set_debug(config.enable_kernel_debug), "kernel debug");
     apply(::kagami::kasumi::set_stealth(config.enable_stealth), "stealth");
     const auto mount_hide_mode = config.mount_hide_mode == "aggressive"
-        ? ::kagami::kasumi::MountHideMode::Aggressive
-        : ::kagami::kasumi::MountHideMode::Normal;
-    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide,
-                                            mount_hide_mode),
+                                     ? ::kagami::kasumi::MountHideMode::Aggressive
+                                     : ::kagami::kasumi::MountHideMode::Normal;
+    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide, mount_hide_mode),
           "mount hide");
     apply(::kagami::kasumi::set_maps_spoof(config.enable_maps_spoof), "maps spoof");
-    apply(::kagami::kasumi::set_statfs_spoof(config.enable_statfs_spoof),
-          "statfs spoof");
-    apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix),
-          "SELinux guard");
+    apply(::kagami::kasumi::set_statfs_spoof(config.enable_statfs_spoof), "statfs spoof");
+    apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix), "SELinux guard");
     if (!ok) {
         (void)disable_kernel_features();
     }
     return ok;
 }
 
-bool disable_control_state(std::string& error) {
+bool disable_control_state(std::string &error) {
     bool ok = true;
     if (!::kagami::kasumi::set_enabled(false)) {
         error = "failed to disable Kasumi";
@@ -346,9 +394,9 @@ bool disable_control_state(std::string& error) {
     return ok;
 }
 
-bool restore_persisted_hide_rules(std::string& error) {
+bool restore_persisted_hide_rules(std::string &error) {
     bool ok = true;
-    for (const auto& path : user_hide_rules()) {
+    for (const auto &path : user_hide_rules()) {
         if (!::kagami::kasumi::hide_path(path)) {
             ok = false;
         }
@@ -359,7 +407,7 @@ bool restore_persisted_hide_rules(std::string& error) {
     return ok;
 }
 
-bool deactivate(std::string& error) {
+bool deactivate(std::string &error) {
     bool ok = disable_control_state(error);
     if (!::kagami::kasumi::clear_rules()) {
         if (error.empty()) {
@@ -371,8 +419,8 @@ bool deactivate(std::string& error) {
     return ok;
 }
 
-bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
-                   const ModuleRuleMap& rules) {
+bool mount_modules(const std::vector<ModuleEntry> &modules, const Config &config,
+                   const ModuleRuleMap &rules) {
     if (!::kagami::kasumi::is_available()) {
         mlog("kasumi: backend requested but protocol is unavailable");
         return false;
@@ -383,14 +431,14 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         const bool ok = restore_persisted_hide_rules(error);
         if (ok) {
             if (!write_boot_marker(active_file())) {
-                mlog("kasumi: failed to record restored runtime state");
+                mlog("kasumi: failed to record restored runtime state", logging::Level::Error);
             }
             mlog("kasumi: installed add=0 merge=0 hide=" +
                  std::to_string(persisted_hide_rules.size()));
         } else {
             std::error_code ec;
             fs::remove(active_file(), ec);
-            mlog("kasumi: one or more persistent hide rules failed");
+            mlog("kasumi: one or more persistent hide rules failed", logging::Level::Error);
         }
         return ok;
     }
@@ -399,15 +447,15 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     // /data/adb/modules; the vnode clones the source inode's SELinux SID, so no
     // relabeled mirror is needed (unlike OverlayFS, which exposes the lowerdir's
     // context). Kasumi therefore mounts no workdir.
-    const std::vector<std::string>& partitions =
+    const std::vector<std::string> &partitions =
         config.partitions.empty() ? fsutil::kManagedPartitions : config.partitions;
 
     RuleBatch batch;
-    for (const auto& module : modules) {
+    for (const auto &module : modules) {
         const auto rule_it = rules.find(module.id);
         const std::vector<ModuleRule> empty_rules;
-        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
-        for (const auto& rule : module_rules) {
+        const auto &module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        for (const auto &rule : module_rules) {
             if (rule.mode == "hide" && !rule.path.empty() && rule.path.front() == '/') {
                 batch.hide.insert(resolve_virtual_path(rule.path));
             }
@@ -420,44 +468,51 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     for (auto it = modules.rbegin(); it != modules.rend(); ++it) {
         const auto rule_it = rules.find(it->id);
         const std::vector<ModuleRule> empty_rules;
-        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        const auto &module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
         const fs::path source = it->path;
-        for (const auto& partition : partitions) {
-            compile_tree(source / partition, "/" + partition, module_rules, batch);
+        for (const auto &partition : partitions) {
+            if (!compile_tree(source / partition, "/" + partition, module_rules, batch))
+                return false;
         }
     }
 
     bool ok = true;
-    for (const auto& rule : batch.add) {
-        ok = ::kagami::kasumi::add_rule(rule.first, rule.second, 0) && ok;
+    size_t add_count = 0, merge_count = 0;
+    for (const auto &rule : batch.mappings) {
+        const bool added = rule.merge ? ::kagami::kasumi::add_merge_rule(rule.path, rule.source)
+                                      : ::kagami::kasumi::add_rule(rule.path, rule.source, 0);
+        rule.merge ? ++merge_count : ++add_count;
+        mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path + " source=" +
+                 rule.source + (added ? " ok" : " failed errno=" + std::to_string(errno)),
+             added ? logging::Level::Debug : logging::Level::Error);
+        ok = added && ok;
     }
-    for (const auto& rule : batch.merge) {
-        ok = ::kagami::kasumi::add_merge_rule(rule.first, rule.second) && ok;
-    }
-    for (const auto& path : persisted_hide_rules) {
+    for (const auto &path : persisted_hide_rules) {
         batch.hide.insert(path);
     }
-    for (const auto& path : batch.hide) {
-        ok = ::kagami::kasumi::hide_path(path) && ok;
+    for (const auto &path : batch.hide) {
+        const bool hidden = ::kagami::kasumi::hide_path(path);
+        mlog("hide path=" + path + (hidden ? " ok" : " failed errno=" + std::to_string(errno)),
+             hidden ? logging::Level::Debug : logging::Level::Error);
+        ok = hidden && ok;
     }
     std::error_code ec;
     fs::create_directories(active_file().parent_path(), ec);
     if (ok && !write_boot_marker(active_file())) {
         ok = false;
-        mlog("kasumi: failed to record restored runtime state");
+        mlog("kasumi: failed to record restored runtime state", logging::Level::Error);
     }
     if (ok) {
-        mlog("kasumi: installed add=" + std::to_string(batch.add.size()) +
-             " merge=" + std::to_string(batch.merge.size()) +
-             " hide=" + std::to_string(batch.hide.size()));
+        mlog("kasumi: installed add=" + std::to_string(add_count) + " merge=" +
+             std::to_string(merge_count) + " hide=" + std::to_string(batch.hide.size()));
     } else {
         fs::remove(active_file(), ec);
-        mlog("kasumi: one or more rule operations failed");
+        mlog("kasumi: one or more rule operations failed", logging::Level::Error);
     }
     return ok;
 }
 
-bool unmount_all(const Config& config) {
+bool unmount_all(const Config &config) {
     (void)config; // shared storage is released centrally after OverlayFS too.
     bool ok = true;
     if (::kagami::kasumi::module_loaded() || ::kagami::kasumi::is_available()) {
@@ -473,9 +528,7 @@ bool unmount_all(const Config& config) {
     return ok;
 }
 
-bool is_active() {
-    return marker_matches_current_boot(active_file());
-}
+bool is_active() { return marker_matches_current_boot(active_file()); }
 
 void invalidate_active_state() {
     std::error_code ec;
@@ -498,17 +551,15 @@ std::vector<std::string> replayable_module_ids() {
     return ids;
 }
 
-bool has_replayable_mappings() {
-    return !replayable_module_ids().empty();
-}
+bool has_replayable_mappings() { return !replayable_module_ids().empty(); }
 
-bool record_replayable_mappings(const std::vector<ModuleEntry>& modules) {
+bool record_replayable_mappings(const std::vector<ModuleEntry> &modules) {
     if (modules.empty()) {
         clear_replayable_mappings();
         return true;
     }
     std::ostringstream ids;
-    for (const auto& module : modules) {
+    for (const auto &module : modules) {
         ids << module.id << "\n";
     }
     if (write_boot_marker(mapping_plan_file(), ids.str())) {

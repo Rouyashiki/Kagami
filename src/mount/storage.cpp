@@ -1,11 +1,11 @@
 #include "mount/storage.hpp"
+#include "core/runtime.hpp"
 
 #include "mount/mount_fs.hpp"
 
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -25,7 +25,7 @@ namespace kagami::mount::storage {
 namespace fs = std::filesystem;
 using fsutil::mlog;
 
-const char* mode_name(Mode mode) {
+const char *mode_name(Mode mode) {
     switch (mode) {
     case Mode::Tmpfs:
         return "tmpfs";
@@ -38,15 +38,22 @@ const char* mode_name(Mode mode) {
 }
 
 // fork/exec a tool (looked up on PATH); true on exit status 0.
-static bool run_tool(const std::vector<std::string>& argv) {
-    std::vector<char*> c;
+static bool run_tool(const std::vector<std::string> &argv) {
+    if (argv.empty()) {
+        errno = EINVAL;
+        return false;
+    }
+    mlog("tool=" + argv.front() + " target=" + argv.back() + " begin", logging::Level::Debug);
+    std::vector<char *> c;
     c.reserve(argv.size() + 1);
-    for (const auto& a : argv) {
-        c.push_back(const_cast<char*>(a.c_str()));
+    for (const auto &a : argv) {
+        c.push_back(const_cast<char *>(a.c_str()));
     }
     c.push_back(nullptr);
     const pid_t pid = fork();
     if (pid < 0) {
+        mlog("tool=" + argv.front() + " fork failed: " + std::strerror(errno),
+             logging::Level::Error);
         return false;
     }
     if (pid == 0) {
@@ -54,60 +61,62 @@ static bool run_tool(const std::vector<std::string>& argv) {
         _exit(127);
     }
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-    }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-// Probe whether a mounted fs preserves the trusted.overlay.* xattrs overlayfs
-// needs for opaque dirs and whiteouts (security.selinux alone is not enough).
-static bool overlay_xattr_ok(const std::string& dir) {
-    const std::string probe = dir + "/.kagami_xattr_probe";
-    if (mkdir(probe.c_str(), 0700) != 0 && errno != EEXIST) {
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        mlog("tool=" + argv.front() + " wait failed: " + std::strerror(errno),
+             logging::Level::Error);
         return false;
     }
-    const bool ok = lsetxattr(probe.c_str(), "trusted.overlay.opaque", "y", 1, 0) == 0;
-    rmdir(probe.c_str());
-    return ok;
+    const int result = WIFEXITED(status)     ? WEXITSTATUS(status)
+                       : WIFSIGNALED(status) ? 128 + WTERMSIG(status)
+                                             : -1;
+    mlog("tool=" + argv.front() + " target=" + argv.back() + " exit=" + std::to_string(result),
+         result == 0 ? logging::Level::Debug : logging::Level::Error);
+    if (result != 0)
+        errno = EIO;
+    return result == 0;
 }
 
-static bool make_ext4_image(const std::string& img, int size_mb) {
+static bool make_ext4_image(const std::string &img, int size_mb) {
     const std::string size = std::to_string(size_mb) + "M";
-    if (!run_tool({"truncate", "-s", size, img}) &&
-        !run_tool({"fallocate", "-l", size, img})) {
-        mlog("storage: failed to allocate image " + img);
+    if (!run_tool({"truncate", "-s", size, img}) && !run_tool({"fallocate", "-l", size, img})) {
+        mlog("storage: failed to allocate image " + img, logging::Level::Error);
         return false;
     }
     if (!run_tool({"mke2fs", "-t", "ext4", "-O", "^has_journal", "-F", img}) &&
         !run_tool({"mkfs.ext4", "-O", "^has_journal", "-F", img})) {
-        mlog("storage: mke2fs failed for " + img);
+        mlog("storage: mke2fs failed for " + img, logging::Level::Error);
         return false;
     }
     return true;
 }
 
 // Make a mount private and register it with KernelSU for per-app unmount.
-static void finalize(const std::string& dir) {
-    ::mount("none", dir.c_str(), nullptr, MS_PRIVATE, nullptr);
-    const pid_t pid = fork();
-    if (pid == 0) {
-        execl("/data/adb/ksud", "ksud", "kernel", "umount", "add", dir.c_str(),
-              static_cast<char*>(nullptr));
-        execl("/data/adb/ksu/bin/ksud", "ksud", "kernel", "umount", "add", dir.c_str(),
-              static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    if (pid > 0) {
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+static bool finalize(const std::string &dir) {
+    return ::mount("none", dir.c_str(), nullptr, MS_PRIVATE, nullptr) == 0 &&
+           fsutil::register_umount(dir);
+}
+
+struct PendingMounts {
+    std::vector<std::string> paths;
+    ~PendingMounts() {
+        for (auto it = paths.rbegin(); it != paths.rend(); ++it) {
+            if (umount2(it->c_str(), MNT_DETACH) != 0)
+                mlog("storage: rollback failed for " + *it + ": " + std::strerror(errno),
+                     logging::Level::Error);
+            else
+                (void)fsutil::unregister_umount(*it);
         }
     }
-}
+};
 
 // Return the filesystem type when `path` is an exact mountpoint in this mount
 // namespace. A later backend must reuse the mirror acquired by the first one;
 // blindly detaching it would invalidate the other backend's lower trees.
-static bool mounted_mode(const std::string& path, Mode& mode) {
+static bool mounted_mode(const std::string &path, Mode &mode) {
     std::ifstream in("/proc/self/mountinfo");
     std::string line;
     while (std::getline(in, line)) {
@@ -121,7 +130,7 @@ static bool mounted_mode(const std::string& path, Mode& mode) {
         while (pre >> field) {
             fields.push_back(field);
         }
-        if (fields.size() < 5 || fields[4] != path) {
+        if (fields.size() < 5 || fsutil::decode_mount_path(fields[4]) != path) {
             continue;
         }
         std::istringstream post(line.substr(sep + 3));
@@ -146,21 +155,14 @@ static bool mounted_mode(const std::string& path, Mode& mode) {
 
 // The per-boot mirror path is recorded here so status/teardown in later kagamid
 // invocations agree with the mount-all that created it.
-static std::string mirror_run_file(const Config& config) {
+static std::string mirror_run_file(const Config &config) {
     const std::string base = config.data_dir.empty() ? "/data/adb/kagami" : config.data_dir;
-    return base + "/run/overlay_mirror";
-}
-
-static std::string read_boot_id() {
-    std::ifstream in("/proc/sys/kernel/random/boot_id");
-    std::string id;
-    std::getline(in, id);
-    return id;
+    return base + "/run/mirror_mounts.list";
 }
 
 // "" and the retired fixed default both mean "randomize"; any other explicit
 // mirror_dir is an operator override that wins.
-static bool mirror_is_auto(const std::string& dir) {
+static bool mirror_is_auto(const std::string &dir) {
     return dir.empty() || dir == "/dev/kagami_mirror";
 }
 
@@ -170,7 +172,7 @@ static std::string random_mount_name() {
     std::string name;
     for (int i = 0; i < 8; ++i) {
         unsigned char c = 0;
-        if (!u.read(reinterpret_cast<char*>(&c), 1)) {
+        if (!u.read(reinterpret_cast<char *>(&c), 1)) {
             break;
         }
         name.push_back(hex[(c >> 4) & 0xF]);
@@ -179,24 +181,44 @@ static std::string random_mount_name() {
     return name.size() == 16 ? name : std::string("kagami-fallback");
 }
 
-std::string current_mirror_dir(const Config& config) {
-    if (!mirror_is_auto(config.mirror_dir)) {
-        return config.mirror_dir;
-    }
-    const std::string boot_id = read_boot_id();
-    std::ifstream in(mirror_run_file(config));
-    std::string stored_boot;
-    std::string path;
-    if (!boot_id.empty() && std::getline(in, stored_boot) &&
-        std::getline(in, path) && stored_boot == boot_id && !path.empty()) {
-        return path;
-    }
-    return {};
+static bool mirror_records(const Config &config, std::vector<fsutil::MountRecord> &records) {
+    bool legacy;
+    return fsutil::read_mount_journal(mirror_run_file(config), records, legacy) && !legacy;
+}
+static bool mirror_owns(const Config &config, const std::string &path, bool include_init = false) {
+    std::vector<fsutil::MountRecord> records;
+    if (!mirror_records(config, records))
+        return false;
+    for (const auto &record : records)
+        if (record.path == path && fsutil::mount_matches(record, include_init))
+            return true;
+    return false;
+}
+static std::string owned_mirror(const Config &config, bool include_init = false) {
+    std::vector<fsutil::MountRecord> records;
+    if (!mirror_records(config, records) || records.empty() ||
+        !fsutil::mount_matches(records.front(), include_init))
+        return {};
+    return records.front().path;
+}
+static bool record_mirror(const Config &config, const std::string &path,
+                          const std::string &rw = {}) {
+    std::vector<std::string> paths{path};
+    if (!rw.empty())
+        paths.push_back(rw);
+    else if (mirror_owns(config, path + ".rw"))
+        paths.push_back(path + ".rw");
+    return fsutil::write_mount_journal(mirror_run_file(config), paths);
+}
+std::string current_mirror_dir(const Config &config) {
+    const auto owned = owned_mirror(config, true);
+    if (!owned.empty())
+        return owned;
+    return mirror_is_auto(config.mirror_dir) ? std::string{} : config.mirror_dir;
 }
 
-// Pick (and persist) the overlay mirror mountpoint for this boot. Reuses the
-// path already chosen earlier this boot so a repeat setup() agrees on it.
-static std::string acquire_mirror_dir(const Config& config) {
+// Reuse this boot's committed mirror path, or choose a fresh mountpoint.
+static std::string acquire_mirror_dir(const Config &config) {
     if (!mirror_is_auto(config.mirror_dir)) {
         return config.mirror_dir;
     }
@@ -204,21 +226,13 @@ static std::string acquire_mirror_dir(const Config& config) {
     if (!existing.empty()) {
         return existing;
     }
-    const std::string dir = "/mnt/" + random_mount_name();
-    std::error_code ec;
-    fs::create_directories(fs::path(mirror_run_file(config)).parent_path(), ec);
-    std::ofstream out(mirror_run_file(config), std::ios::trunc);
-    if (out) {
-        out << read_boot_id() << "\n" << dir << "\n";
-    }
-    return dir;
+    return "/mnt/" + random_mount_name();
 }
 
-Handle setup(const Config& config) {
+Handle setup(const Config &config) {
     Handle h;
+    PendingMounts pending;
     const std::string base = acquire_mirror_dir(config); // per-boot random /mnt mountpoint
-    // The mirror root is the mountpoint itself: module trees live directly at
-    // <base>/<module-id> (base is the per-boot random /mnt/<rand> mountpoint).
     h.content_dir = base;
     const std::string img = config.mirror_img; // backing image persists on /data
     std::string erofs_img = config.mirror_img;
@@ -232,35 +246,53 @@ Handle setup(const Config& config) {
     std::error_code ec;
     fs::create_directories(h.content_dir, ec);
 
-    const std::string& mode = config.fs_type;
+    const std::string &mode = config.fs_type;
     const bool want_auto = mode == "auto" || mode.empty();
     const bool writable = config.overlay_writable; // upper/work layer is opt-in
 
     if (mounted_mode(h.content_dir, h.mode)) {
+        if (owned_mirror(config) != base) {
+            mlog("storage: refusing to reuse unowned mount " + base, logging::Level::Error);
+            return h;
+        }
         if (writable) {
             h.rw_dir = h.mode == Mode::Erofs ? base + ".rw" : h.content_dir + "/.rw";
             fs::create_directories(h.rw_dir, ec);
             if (ec) {
-                mlog("storage: failed to create shared writable layer: " + ec.message());
+                mlog("storage: failed to create shared writable layer: " + ec.message(),
+                     logging::Level::Error);
                 return Handle{};
             }
             if (h.mode == Mode::Erofs) {
                 Mode rw_mode;
+                if (mounted_mode(h.rw_dir, rw_mode) && !mirror_owns(config, h.rw_dir)) {
+                    mlog("storage: refusing unowned writable layer " + h.rw_dir,
+                         logging::Level::Error);
+                    return Handle{};
+                }
                 if (!mounted_mode(h.rw_dir, rw_mode)) {
-                    if (::mount(config.mount_source.c_str(), h.rw_dir.c_str(), "tmpfs", 0, nullptr) != 0) {
+                    if (::mount(config.mount_source.c_str(), h.rw_dir.c_str(), "tmpfs", 0,
+                                nullptr) != 0) {
                         mlog("storage: shared erofs writable tmpfs failed: " +
-                             std::string(std::strerror(errno)));
+                                 std::string(std::strerror(errno)),
+                             logging::Level::Error);
                         return Handle{};
                     }
-                    finalize(h.rw_dir);
+                    pending.paths.push_back(h.rw_dir);
+                    if (!finalize(h.rw_dir))
+                        return Handle{};
                 }
             }
         }
+        if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
+            return Handle{};
+        pending.paths.clear();
         h.ok = true;
         mlog(std::string("storage: reusing shared ") + mode_name(h.mode) + " mirror");
         return h;
     }
-    umount2(h.content_dir.c_str(), MNT_DETACH); // clear an unrecognised stale mount
+    if (!fsutil::prepare_empty_mountpoint(h.content_dir))
+        return h;
 
     // erofs: read-only content image, plus a separate tmpfs writable layer if opted in.
     if (mode == "erofs") {
@@ -269,73 +301,104 @@ Handle setup(const Config& config) {
             return h;
         }
         if (!run_tool({"mount", "-t", "erofs", "-o", "loop,ro", erofs_img, h.content_dir})) {
-            mlog("storage: mount erofs image failed");
+            mlog("storage: mount erofs image failed", logging::Level::Error);
             return h;
         }
+        pending.paths.push_back(h.content_dir);
         if (writable) {
             // EROFS mounts the root read-only, so its optional OverlayFS
             // upper/work tmpfs must be a sibling rather than a child.
             h.rw_dir = base + ".rw";
             fs::create_directories(h.rw_dir, ec);
-            umount2(h.rw_dir.c_str(), MNT_DETACH);
+            if (!fsutil::prepare_empty_mountpoint(h.rw_dir))
+                return h;
             if (::mount(config.mount_source.c_str(), h.rw_dir.c_str(), "tmpfs", 0, nullptr) != 0) {
-                mlog("storage: erofs writable tmpfs failed: " + std::string(std::strerror(errno)));
-                umount2(h.content_dir.c_str(), MNT_DETACH);
+                mlog("storage: erofs writable tmpfs failed: " + std::string(std::strerror(errno)),
+                     logging::Level::Error);
                 return h;
             }
-            finalize(h.rw_dir);
+            pending.paths.push_back(h.rw_dir);
+            if (!finalize(h.rw_dir))
+                return Handle{};
         }
-        finalize(h.content_dir);
+        if (!finalize(h.content_dir))
+            return Handle{};
         h.mode = Mode::Erofs;
+        if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
+            return Handle{};
+        pending.paths.clear();
         h.ok = true;
-        mlog(std::string("storage: erofs content") + (writable ? " + tmpfs writable layer" : " (read-only)"));
+        mlog(std::string("storage: erofs content") +
+             (writable ? " + tmpfs writable layer" : " (read-only)"));
         return h;
     }
 
-    // auto/tmpfs: try tmpfs; in auto mode fall back to ext4 if overlay xattrs are
-    // unsupported. The writable layer lives inside the same tmpfs.
-    if (want_auto || mode == "tmpfs") {
+    const bool use_tmpfs = mode == "tmpfs" || (want_auto && fsutil::tmpfs_xattr_supported());
+    if (use_tmpfs) {
         if (::mount(config.mount_source.c_str(), h.content_dir.c_str(), "tmpfs", 0, nullptr) == 0) {
-            if (mode == "tmpfs" || overlay_xattr_ok(h.content_dir)) {
-                if (writable) {
-                    h.rw_dir = h.content_dir + "/.rw";
-                    fs::create_directories(h.rw_dir, ec);
+            pending.paths.push_back(h.content_dir);
+            if (writable) {
+                h.rw_dir = h.content_dir + "/.rw";
+                fs::create_directories(h.rw_dir, ec);
+                if (ec) {
+                    mlog("storage: create writable layer: " + ec.message(), logging::Level::Error);
+                    return Handle{};
                 }
-                finalize(h.content_dir);
-                h.mode = Mode::Tmpfs;
-                h.ok = true;
-                mlog(std::string("storage: tmpfs base") + (writable ? " (writable)" : " (read-only)"));
-                return h;
             }
-            mlog("storage: tmpfs lacks overlay xattr support; falling back to ext4");
-            umount2(h.content_dir.c_str(), MNT_DETACH);
-        } else if (mode == "tmpfs") {
-            mlog("storage: tmpfs mount failed: " + std::string(std::strerror(errno)));
+            if (!finalize(h.content_dir))
+                return Handle{};
+            h.mode = Mode::Tmpfs;
+            if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
+                return Handle{};
+            pending.paths.clear();
+            h.ok = true;
+            mlog(std::string("storage: selected tmpfs") +
+                 (writable ? " (writable)" : " (read-only)"));
             return h;
         }
+        mlog("storage: tmpfs mount failed: " + std::string(std::strerror(errno)) +
+                 (want_auto ? "; falling back to ext4" : ""),
+             want_auto ? logging::Level::Warning : logging::Level::Error);
+        if (!want_auto)
+            return h;
     }
 
     // ext4 loop image (forced, or the auto fallback). Writable layer lives inside.
     if (!fs::exists(img) && !make_ext4_image(img, config.mirror_img_size_mb)) {
         return h;
     }
-    run_tool({"chcon", "u:object_r:ksu_file:s0", img}); // best-effort label on the image
+    const auto relative_image =
+        fs::path(img).lexically_normal().lexically_relative(runtime_data_dir().lexically_normal());
+    if (!relative_image.empty() && *relative_image.begin() != "..") {
+        std::string metadata_error;
+        if (!prepare_private_file(img, metadata_error)) {
+            mlog("storage: " + metadata_error, logging::Level::Error);
+            return h;
+        }
+    }
     if (!run_tool({"mount", "-t", "ext4", "-o", "loop,rw,noatime", img, h.content_dir})) {
-        mlog("storage: mount ext4 image failed");
+        mlog("storage: mount ext4 image failed", logging::Level::Error);
         return h;
     }
+    pending.paths.push_back(h.content_dir);
     if (writable) {
         h.rw_dir = h.content_dir + "/.rw";
         fs::create_directories(h.rw_dir, ec);
+        if (ec)
+            return Handle{};
     }
-    finalize(h.content_dir);
+    if (!finalize(h.content_dir))
+        return Handle{};
     h.mode = Mode::Ext4;
+    if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
+        return Handle{};
+    pending.paths.clear();
     h.ok = true;
     mlog(std::string("storage: ext4 image base") + (writable ? " (writable)" : " (read-only)"));
     return h;
 }
 
-void teardown(const Handle& handle) {
+void teardown(const Handle &handle) {
     if (!handle.ok) {
         return;
     }
@@ -345,17 +408,28 @@ void teardown(const Handle& handle) {
     umount2(handle.content_dir.c_str(), MNT_DETACH);
 }
 
-void teardown_shared(const Config& config) {
-    const std::string base = current_mirror_dir(config);
-    if (base.empty()) {
-        return;
+bool teardown_shared(const Config &config) {
+    std::vector<fsutil::MountRecord> records;
+    if (!mirror_records(config, records))
+        return false;
+    bool ok = true;
+    for (auto it = records.rbegin(); it != records.rend(); ++it) {
+        if (!fsutil::mount_matches(*it))
+            continue;
+        if (umount2(it->path.c_str(), MNT_DETACH) != 0) {
+            mlog("storage: detach failed for " + it->path + ": " + std::strerror(errno),
+                 logging::Level::Error);
+            ok = false;
+        } else {
+            ok = fsutil::unregister_umount(it->path) && ok;
+        }
     }
-    // rw is only separately mounted in EROFS mode; detaching it is harmless in
-    // tmpfs/ext4 mode, where the writable layer lives inside the mirror root.
-    umount2((base + ".rw").c_str(), MNT_DETACH);
-    umount2(base.c_str(), MNT_DETACH);
-    std::error_code ec;
-    fs::remove(mirror_run_file(config), ec); // release the per-boot path record
+    if (ok) {
+        std::error_code ec;
+        fs::remove(mirror_run_file(config), ec);
+        ok = !ec;
+    }
+    return ok;
 }
 
 } // namespace kagami::mount::storage
