@@ -2,6 +2,8 @@
 
 Kagami can build and package Kasumi modules directly. The build source tracks
 [`Rouyashiki/Kasumi`](https://github.com/Rouyashiki/Kasumi) on **`main`**.
+Install `clang-format` on the host (CI uses **22.1.8**) so the helper can compare
+the shared UAPI headers using Kagami's formatting rules before building.
 
 For a prepared Android kernel/DDK tree:
 

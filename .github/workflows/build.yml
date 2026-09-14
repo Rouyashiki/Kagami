@@ -62,8 +62,15 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE/kasumi"
           test -n "${KDIR:-}"
           test -f "$KDIR/Makefile"
-          cmp include/kagami/kasumi_uapi.h kasumi/src/include/kasumi_uapi.h
-          grep -Eq '^#define KSM_PROTOCOL_VERSION 17$' kasumi/src/include/kasumi_uapi.h
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Install clang-format
+        run: python -m pip install clang-format==22.1.8
+
+      - name: Check Kasumi UAPI
+        run: bash scripts/check-kasumi-uapi.sh kasumi/src/include/kasumi_uapi.h
 
       - name: Build Kasumi LKM
         env:
