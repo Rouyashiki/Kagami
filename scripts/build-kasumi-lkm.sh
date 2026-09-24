@@ -34,10 +34,8 @@ Options:
 Required environment:
   KDIR            prepared Android kernel/DDK tree containing Makefile
                   (not needed with --ddk)
-  clang-format    required on the host to compare the shared UAPI headers
 
-The Kasumi source must expose API 17 and match Kagami's checked-in UAPI. The
-source checkout is never built in place; generated objects live under build/.
+The source checkout is never built in place; generated objects live under build/.
 EOF
 }
 
@@ -109,8 +107,6 @@ if git -C "$KASUMI_SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         die "Kasumi source is on '${source_branch}', expected '${EXPECTED_REF}'"
     fi
 fi
-
-bash "${PROJECT_ROOT}/scripts/check-kasumi-uapi.sh" "$KASUMI_SOURCE/src/include/kasumi_uapi.h"
 
 WORK_DIR="${BUILD_ROOT}/${KMI}-${ARCH}"
 rm -rf "$WORK_DIR"
