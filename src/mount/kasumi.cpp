@@ -277,8 +277,30 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
         if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
             if (S_ISLNK(st.st_mode)) {
                 std::error_code target_ec;
+                const auto target_status = fs::symlink_status(virtual_path, target_ec);
+                if (!target_ec && fs::is_symlink(target_status)) {
+                    std::error_code link_ec;
+                    const fs::path module_link = fs::read_symlink(source, link_ec);
+                    if (!link_ec) {
+                        const fs::path system_link = fs::read_symlink(virtual_path, link_ec);
+                        if (!link_ec) {
+                            const fs::path parent = fs::path(virtual_path).parent_path();
+                            const auto destination = [&](const fs::path& link) {
+                                return (link.is_absolute() ? link : parent / link)
+                                    .lexically_normal();
+                            };
+                            if (destination(module_link) == destination(system_link)) {
+                                mlog("kasumi: preserving matching symlink alias " + virtual_path +
+                                     " from " + source.string());
+                                continue;
+                            }
+                        }
+                    }
+                }
+                target_ec.clear();
                 if (fs::is_directory(virtual_path, target_ec) && !target_ec) {
-                    mlog("kasumi: refusing to replace directory with symlink " + virtual_path,
+                    mlog("kasumi: refusing to replace directory with symlink " + virtual_path +
+                             " from " + source.string(),
                          logging::Level::Error);
                     return false;
                 }
