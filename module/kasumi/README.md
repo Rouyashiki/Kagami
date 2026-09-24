@@ -28,11 +28,10 @@ the following packaged filenames, in order:
 ## Protocol baseline
 
 Every supplied LKM must implement **Kasumi API 17**. The daemon is the sole
-owner of the Kasumi client and capability FD; Manager commands are forwarded
-to that daemon against the same UAPI header, whose `KSM_PROTOCOL_VERSION` is
-17. A YukiSU hymo API 16 asset is not a compatible replacement. By default
-Kagami rejects a version mismatch and falls back to OverlayFS/Magic Mount
-rather than activating a mixed ABI.
+owner of the Kasumi client and capability FD and uses a UAPI header whose
+`KSM_PROTOCOL_VERSION` is 17. A YukiSU hymo API 16 asset is not a compatible
+replacement. By default Kagami rejects a version mismatch and falls back to
+OverlayFS/Magic Mount rather than activating a mixed ABI.
 
 GitHub Actions builds and bundles this API 17 matrix with the same DDK target
 set as Kasumi/YukiSU: `android12-5.10`, `android13-5.10`, `android13-5.15`,

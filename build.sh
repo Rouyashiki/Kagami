@@ -110,47 +110,6 @@ build_webui() {
     print_success "WebUI staged into module/webroot"
 }
 
-# Build the Kagami manager APK (release) and stage it into module/ so the
-# packaging step bundles it into the module zip. Signing comes from KAGAMI_*
-# (shell env or CI secrets); without them the APK is built unsigned. Skipped on
-# --no-manager or when no JDK is present (keeps quick local packaging working).
-MANAGER_APK_STAGED=""
-build_manager() {
-    [[ $NO_MANAGER -eq 1 ]] && { print_info "Skipping manager APK (--no-manager)"; return 0; }
-    if ! command -v java &> /dev/null; then
-        print_warning "java not found; skipping manager APK (zip won't include it)"
-        return 0
-    fi
-
-    # Gradle needs the Android SDK; honour env, else probe the usual locations.
-    if [ -z "$ANDROID_HOME" ] && [ -z "$ANDROID_SDK_ROOT" ] && [ ! -f "${PROJECT_ROOT}/manager/local.properties" ]; then
-        local sdk
-        for sdk in "$HOME/Library/Android/sdk" "$HOME/Android/Sdk" "$HOME/android-sdk" "/usr/local/lib/android/sdk"; do
-            if [ -d "$sdk" ]; then export ANDROID_HOME="$sdk"; print_info "Android SDK: $sdk"; break; fi
-        done
-    fi
-
-    print_info "Building Kagami manager APK (gradle assembleRelease)..."
-    chmod +x "${PROJECT_ROOT}/manager/gradlew" 2>/dev/null || true
-    ( cd "${PROJECT_ROOT}/manager" && ./gradlew --no-daemon ${VERBOSE:+--info} assembleRelease )
-
-    local apk_dir="${PROJECT_ROOT}/manager/app/build/outputs/apk/release"
-    local apk
-    apk="$(find "$apk_dir" -name '*.apk' 2>/dev/null | grep -vi 'unsigned' | head -n1)"
-    [ -z "$apk" ] && apk="$(find "$apk_dir" -name '*.apk' 2>/dev/null | head -n1)"
-    if [ -z "$apk" ] || [ ! -f "$apk" ]; then
-        print_error "Manager APK not found in $apk_dir after build"
-        exit 1
-    fi
-
-    MANAGER_APK_STAGED="${PROJECT_ROOT}/module/KagamiManager.apk"
-    cp "$apk" "$MANAGER_APK_STAGED"
-    case "$apk" in
-        *unsigned*) print_warning "Bundled UNSIGNED manager APK — set KAGAMI_* to sign ($(du -h "$apk" | cut -f1))" ;;
-        *) print_success "Bundled signed manager APK ($(du -h "$apk" | cut -f1))" ;;
-    esac
-}
-
 # Build and stage a KMI-tagged Kasumi API 17 asset. The helper copies the
 # Kasumi source into build/ first, so an external checkout stays untouched.
 build_kasumi_lkm() {
@@ -203,9 +162,8 @@ build_arch() {
 # Compute the unified version: v<tag>-<commitcount+10000>.
 #   tag  = latest git tag (leading v stripped), or 0.1.0 when there is none
 #   code = commit count + 10000  (e.g. the 18th commit -> 10018)
-# Exports VERSION_NAME / VERSION_CODE for the module, KAGAMI_VERSION_* for the
-# manager app's gradle build, and surfaces them to $GITHUB_ENV so CI's artifact
-# and Telegram steps use the very same string.
+# Exports VERSION_NAME / VERSION_CODE for the module and writes them to
+# $GITHUB_ENV so CI's artifact and Telegram steps use the same string.
 compute_version() {
     local tag count
     tag=$(git -C "${PROJECT_ROOT}" describe --tags --abbrev=0 2>/dev/null || echo "0.1.0")
@@ -215,7 +173,6 @@ compute_version() {
     VERSION_CODE=$((count + 10000))
     VERSION_NAME="v${tag}-${VERSION_CODE}"
     export VERSION_NAME VERSION_CODE
-    export KAGAMI_VERSION_NAME="$VERSION_NAME" KAGAMI_VERSION_CODE="$VERSION_CODE"
     if [ -n "${GITHUB_ENV:-}" ]; then
         echo "VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
         echo "VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
@@ -240,7 +197,6 @@ stamp_module_prop() {
 COMMAND="${1:-package}"
 shift || true
 NO_WEBUI=0
-NO_MANAGER=0
 BUILD_LKM=0
 USE_DDK=0
 KASUMI_SOURCE="${KASUMI_DIR:-}"
@@ -249,7 +205,6 @@ VERBOSE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-webui) NO_WEBUI=1; shift ;;
-        --no-manager) NO_MANAGER=1; shift ;;
         --with-lkm) BUILD_LKM=1; shift ;;
         --ddk) USE_DDK=1; shift ;;
         --kasumi-dir)
@@ -290,9 +245,6 @@ case $COMMAND in
     lkm)
         build_kasumi_lkm
         ;;
-    manager)
-        build_manager
-        ;;
     version)
         compute_version
         print_info "Version: ${VERSION_NAME} (versionCode=${VERSION_CODE})"
@@ -303,16 +255,14 @@ case $COMMAND in
         build_webui
         [ "$BUILD_LKM" -eq 1 ] && build_kasumi_lkm
         build_arch "arm64-v8a"
-        build_manager
         print_info "Packaging (cmake)..."
         cmake --build "${BUILD_DIR}/arm64-v8a" --target package
-        [ -n "$MANAGER_APK_STAGED" ] && rm -f "$MANAGER_APK_STAGED"
         ;;
     clean)
         rm -rf "${BUILD_DIR}"; print_success "Cleaned."
         ;;
     *)
-        echo "Usage: $0 {init|webui|manager|arm64|lkm|version|package|clean} [--no-webui] [--no-manager] [--with-lkm --ddk --kasumi-dir DIR --kmi androidNN-x.y] [--verbose]"
+        echo "Usage: $0 {init|webui|arm64|lkm|version|package|clean} [--no-webui] [--with-lkm --ddk --kasumi-dir DIR --kmi androidNN-x.y] [--verbose]"
         exit 1
         ;;
 esac

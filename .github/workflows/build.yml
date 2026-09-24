@@ -116,13 +116,6 @@ jobs:
           cp lkm/KASUMI-NOTICE lkm/KASUMI-LICENSE-GPL-2.0 module/kasumi/
           find module/kasumi -maxdepth 1 -type f -name '*_arm64_kasumi_lkm.ko' -print | sort
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -134,32 +127,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build zip
 
-      - name: Install manager NDK & CMake
-        run: |
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" "ndk;29.0.14206865" "cmake;3.22.1"
-
-      - name: Decode signing keystore
+      - name: Build module package
         env:
-          KAGAMI_KEYSTORE_BASE64: ${{ secrets.KAGAMI_KEYSTORE_BASE64 }}
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          if [ -z "$KAGAMI_KEYSTORE_BASE64" ]; then
-            echo "No KAGAMI_KEYSTORE_BASE64 secret — manager APK will be built unsigned."
-            exit 0
-          fi
-          echo "$KAGAMI_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kagami.jks"
-          echo "KAGAMI_KEYSTORE=$RUNNER_TEMP/kagami.jks" >> "$GITHUB_ENV"
-
-      - name: Build package & standalone manager
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          KAGAMI_KEYSTORE_PASSWORD: ${{ secrets.KAGAMI_KEYSTORE_PASSWORD }}
-          KAGAMI_KEY_ALIAS: ${{ secrets.KAGAMI_KEY_ALIAS }}
-          KAGAMI_KEY_PASSWORD: ${{ secrets.KAGAMI_KEY_PASSWORD }}
-        run: |
-          chmod +x build.sh scripts/*.sh manager/gradlew
-          ./build.sh package --no-manager
+          chmod +x build.sh scripts/*.sh
+          ./build.sh package
           MODULE_ZIP=$(find build/arm64-v8a/out -maxdepth 1 -type f -name '*.zip' -print -quit)
           test -n "$MODULE_ZIP"
           MODULE_ZIP_CONTENTS=$(cmake -E tar tf "$MODULE_ZIP")
@@ -167,8 +140,6 @@ jobs:
             echo "APK files must not be bundled in the module zip."
             exit 1
           fi
-          ./build.sh manager
-          (cd manager && ./gradlew lintDebug lintRelease --no-daemon)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -198,11 +169,5 @@ jobs:
           python3 -m pip install --break-system-packages --quiet telethon
           ZIP=$(ls build/arm64-v8a/out/*.zip 2>/dev/null | head -1)
           if [ -z "$ZIP" ]; then echo "No zip to upload"; exit 1; fi
-          FILES="$ZIP"
-          APK=$(ls manager/app/build/outputs/apk/release/*.apk 2>/dev/null | grep -v unsigned | head -1)
-          if [ -n "$APK" ]; then
-            cp "$APK" "$RUNNER_TEMP/KagamiManager.apk"
-            FILES="$FILES $RUNNER_TEMP/KagamiManager.apk"
-          fi
-          echo "Uploading to Telegram: $FILES"
-          python3 scripts/kagamibot.py $FILES
+          echo "Uploading to Telegram: $ZIP"
+          python3 scripts/kagamibot.py "$ZIP"

@@ -1,7 +1,0 @@
-<resources>
-    <style name="Theme.KagamiManager.Base" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:colorAccent">#006C4F</item>
-    </style>
-    <style name="Theme.KagamiManager" parent="Theme.KagamiManager.Base" />
-</resources>

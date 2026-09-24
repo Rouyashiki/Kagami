@@ -1,5 +1,0 @@
-<resources>
-    <style name="Theme.KagamiManager" parent="Theme.KagamiManager.Base">
-        <item name="android:windowLightNavigationBar">true</item>
-    </style>
-</resources>
