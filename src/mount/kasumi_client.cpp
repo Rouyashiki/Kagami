@@ -29,6 +29,7 @@ static_assert(static_cast<std::uint32_t>(MountHideMode::Normal) == KSM_MOUNT_HID
 static_assert(static_cast<std::uint32_t>(MountHideMode::Aggressive) ==
               KSM_MOUNT_HIDE_MODE_AGGRESSIVE);
 static_assert(sizeof(kasumi_quiesce_arg) == 64);
+static_assert(sizeof(kasumi_instance_arg) == 64);
 
 namespace {
 bool lkm_in_proc_modules() {
@@ -179,6 +180,16 @@ bool is_available() {
 
 bool module_loaded() {
     return lkm_in_proc_modules();
+}
+
+std::string watch_instance(int event_fd) {
+    kasumi_instance_arg arg = {};
+    arg.size = sizeof(arg);
+    arg.event_fd = event_fd;
+    if (execute(KSM_IOC_WATCH_INSTANCE, &arg) != 0) {
+        return "";
+    }
+    return {arg.nonce, sizeof(arg.nonce)};
 }
 
 void set_connection_persistent(bool persistent) {

@@ -23,6 +23,8 @@
 
 #if defined(__linux__)
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
@@ -130,8 +132,66 @@ std::string owner_token_for_nonce(const std::string& nonce) {
 
 std::string module_instance_token() {
 #if defined(__linux__)
-    return owner_token_for_nonce(
-        read_first_line("/sys/module/kasumi_lkm/parameters/kasumi_owner_nonce"));
+    // Older modules expose the token through sysfs, including after READY.
+    const std::string legacy_nonce =
+        read_first_line("/sys/module/kasumi_lkm/parameters/kasumi_owner_nonce");
+    if (!legacy_nonce.empty()) {
+        return owner_token_for_nonce(legacy_nonce);
+    }
+
+    class InstanceWatch {
+    public:
+        InstanceWatch() = default;
+        InstanceWatch(const InstanceWatch&) = delete;
+        InstanceWatch& operator=(const InstanceWatch&) = delete;
+        InstanceWatch(InstanceWatch&&) = delete;
+        InstanceWatch& operator=(InstanceWatch&&) = delete;
+        ~InstanceWatch() { reset(); }
+
+        std::string current() {
+            // This core-kernel fd survives closing the control fd for deletion.
+            // Exit/replacement signals it, invalidating the cached nonce.
+            if (live()) {
+                return token_;
+            }
+            reset();
+            fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            if (fd_ < 0) {
+                return "";
+            }
+            token_ = owner_token_for_nonce(kasumi::watch_instance(fd_));
+            if (!live()) {
+                reset();
+            }
+            return token_;
+        }
+
+    private:
+        int fd_ = -1;
+        std::string token_;
+
+        void reset() {
+            if (fd_ >= 0) {
+                close(fd_);
+                fd_ = -1;
+            }
+            token_.clear();
+        }
+
+        [[nodiscard]] bool live() const {
+            if (fd_ < 0 || token_.empty()) {
+                return false;
+            }
+            pollfd poll_fd{fd_, POLLIN, 0};
+            int rc = 0;
+            do {
+                rc = poll(&poll_fd, 1, 0);
+            } while (rc < 0 && errno == EINTR);
+            return rc == 0;
+        }
+    };
+    static InstanceWatch watch;
+    return watch.current();
 #else
     return "";
 #endif
@@ -660,6 +720,11 @@ bool unload(bool require_ownership) {
     }
 
     for (int attempt = 0; attempt < 5; ++attempt) {
+        if (!current_instance.empty() && module_instance_token() != current_instance) {
+            set_error("Kasumi LKM instance changed before deletion");
+            g_unload_status.delete_errno = ESTALE;
+            break;
+        }
         const int delete_errno = delete_module_nonblocking();
         g_unload_status.delete_errno = delete_errno;
         if (delete_errno == 0) {

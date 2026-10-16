@@ -109,6 +109,9 @@ int features();
 std::vector<std::string> feature_names(int bitmask);
 std::vector<std::string> active_modules_from_rules(const std::string& rules);
 QuiesceSnapshot prepare_unload();
+// Registers an eventfd that becomes readable when this instance is retired.
+// The caller owns event_fd and must poll it without consuming the event.
+std::string watch_instance(int event_fd);
 
 bool set_enabled(bool enable);
 bool set_debug(bool enable);

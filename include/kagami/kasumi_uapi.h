@@ -247,6 +247,19 @@ struct kasumi_quiesce_arg {
     __s32 err;
 };
 
+/* Standalone protocol-17 extension. Supply a fresh, zero-valued eventfd and
+ * zero all other input fields except size. Returns the 32-byte owner nonce
+ * (no terminator). The eventfd becomes readable at module exit or when another
+ * watch replaces it. Poll without reading: a signaled watch is permanently
+ * invalid. It does not pin the LKM, and survives terminal unload preparation.
+ */
+struct kasumi_instance_arg {
+    __u32 size;
+    __s32 event_fd;
+    __u32 reserved[6];
+    char nonce[32];
+};
+
 /*
  * Maps spoof rule: when a /proc/pid/maps line has (target_ino[, target_dev]),
  * replace ino/dev/pathname with spoofed values. target_dev 0 = match any dev.
@@ -329,5 +342,7 @@ struct kasumi_statfs_spoof_arg {
 /* Idempotent terminal transition; repeat to poll until state is READY. */
 #define KSM_IOC_PREPARE_UNLOAD _IOWR(KSM_IOC_MAGIC, 37, struct kasumi_quiesce_arg)
 #define KSM_IOC_SET_MOUNT_HIDE_MODE _IOW(KSM_IOC_MAGIC, 38, int)
+
+#define KSM_IOC_WATCH_INSTANCE _IOWR(KSM_IOC_MAGIC, 45, struct kasumi_instance_arg)
 
 #endif /* _KASUMI_UAPI_H */
