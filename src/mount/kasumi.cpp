@@ -4,7 +4,7 @@
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
-#include "kagami/kasumi_uapi.h"
+#include "kagami/kasumi_uapi_compat.hpp"
 #include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 
@@ -523,16 +523,26 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     std::map<std::string, RuleBatch::Mapping> installed_add;
     std::vector<module_runtime::RuleEvidence> evidence;
     for (const auto& rule : batch.mappings) {
+        std::string runtime_path = rule.path;
         if (rule.merge) {
             // MERGE retains distinct (target, source) pairs in the kernel.
             evidence.push_back({"MERGE", rule.path, rule.source, {rule.owner}});
         } else {
-            expected_add[rule.path] = rule;
+            // ADD follows the final symlink and keys replacements by the
+            // resolved target. Capture that key before installation; a later
+            // query must not resolve an alias that may since have changed.
+            std::error_code path_ec;
+            const auto resolved = fs::canonical(rule.path, path_ec);
+            if (!path_ec)
+                runtime_path = resolved.string();
+            // On lookup failure the kernel retains the final name. The
+            // compiler already resolved its existing parent components.
+            expected_add[runtime_path] = rule;
         }
         const bool added = rule.merge ? ::kagami::kasumi::add_merge_rule(rule.path, rule.source)
                                       : ::kagami::kasumi::add_rule(rule.path, rule.source, 0);
         if (added && !rule.merge) {
-            installed_add[rule.path] = rule;
+            installed_add[runtime_path] = rule;
         }
         rule.merge ? ++merge_count : ++add_count;
         mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path + " source=" +

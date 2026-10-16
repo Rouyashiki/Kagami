@@ -27,8 +27,8 @@ jobs:
           -DKAGAMI_PACKAGE_WEBUI=OFF
       - name: Build and test state parsing
         run: |
-          cmake --build build/native-tests --target module_runtime_test magic_runtime_test kasumi_rules_test config_read_test -j2
-          ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime|kasumi_rules|config_read)$'
+          cmake --build build/native-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test -j2
+          ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime|kasumi_rules|kasumi_runtime|config_read)$'
       - name: Test actual mounts in a private namespace
         run: sudo ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime_mounts|magic_runtime)$'
 

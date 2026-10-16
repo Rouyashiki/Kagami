@@ -103,6 +103,24 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     target_include_directories(kasumi_rules_test PRIVATE include)
     target_compile_options(kasumi_rules_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME kasumi_rules COMMAND kasumi_rules_test)
+    add_executable(kasumi_runtime_test
+        tests/native/kasumi_runtime_test.cpp
+        src/mount/kasumi.cpp
+        src/mount/mount_fs.cpp
+        src/mount/module_runtime.cpp
+        src/core/runtime.cpp
+        src/core/json_value.cpp
+        src/core/config.cpp
+        src/core/log.cpp
+    )
+    target_include_directories(kasumi_runtime_test PRIVATE include src)
+    target_compile_options(kasumi_runtime_test PRIVATE -Wall -Wextra -Wpedantic)
+    if(ANDROID)
+        target_link_libraries(kasumi_runtime_test PRIVATE z)
+    else()
+        target_link_libraries(kasumi_runtime_test PRIVATE ZLIB::ZLIB)
+    endif()
+    add_test(NAME kasumi_runtime COMMAND kasumi_runtime_test)
     add_executable(config_read_test
         tests/native/config_read_test.cpp
         src/core/config.cpp
