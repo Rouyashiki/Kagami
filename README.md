@@ -35,7 +35,8 @@ mirror at all.
 
 The current tree intentionally contains only the project skeleton:
 
-- `webui/`: migrated React/Vite WebUI, renamed to Kagami/Kasumi paths and commands.
+- `webui/`: readable Material 3 Expressive WebUI sources with offline controls.
+- `tools/webui/`: pinned dependencies and WebUI build tools.
 - `src/`: C++ daemon, Kasumi control plane, and hybrid mount backends.
 - `third_party/lkmloader/`: standalone LKM loader submodule.
 - `module/`: KernelSU/APatch metamodule packaging files.
@@ -49,11 +50,27 @@ cmake -S . -B build
 cmake --build build --target kagamid lkmloader
 ```
 
-Build the WebUI and package:
+Build the WebUI and package (requires Node.js 22 and npm):
 
 ```sh
 cmake --build build --target package
 ```
+
+For a browser preview or WebUI-only build:
+
+```sh
+cd tools/webui
+npm ci --include=dev --no-audit --no-fund
+npm run bundle
+```
+
+The bundle in `build/webui/` contains `index.html`, `config.json`, and
+`icon.svg`. Page scripts, styles, icons, and dependency notices are embedded
+in the HTML; the other two files preserve native WebUI host settings and
+shortcut support. Package targets rebuild this output and copy it into
+`webroot/`. `webui/` stays readable and does not need network access at runtime.
+To package without a WebUI, configure `-DKAGAMI_PACKAGE_WEBUI=OFF` or pass
+`--no-webui` to `build.sh package`.
 
 ## Kasumi LKM assets
 

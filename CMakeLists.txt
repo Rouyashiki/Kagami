@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 project(Kagami VERSION 0.1.0 LANGUAGES CXX)
 
 option(KAGAMI_STRIP_ANDROID_BINARY "Strip Android binaries during release builds" ON)
+option(KAGAMI_PACKAGE_WEBUI "Include the bundled WebUI in module packages" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -137,21 +138,47 @@ if(ANDROID)
     endif()
 endif()
 
-# The WebUI is the static frontend committed in module/webroot (served by
-# KernelSU WebUI X); there is no build step.
+# Keep readable sources separate from the self-contained distribution. Node
+# is only required when building the WebUI or a package that includes it.
+if(CMAKE_HOST_WIN32)
+    find_program(KAGAMI_NPM_EXECUTABLE NAMES npm.cmd npm)
+else()
+    find_program(KAGAMI_NPM_EXECUTABLE NAMES npm)
+endif()
+if(NOT KAGAMI_NPM_EXECUTABLE)
+    set(KAGAMI_NPM_EXECUTABLE npm)
+endif()
+set(KAGAMI_WEBUI_DIR "${CMAKE_SOURCE_DIR}/build/webui")
+add_custom_target(webui
+    COMMAND ${KAGAMI_NPM_EXECUTABLE} ci --include=dev --no-audit --no-fund
+    COMMAND ${KAGAMI_NPM_EXECUTABLE} run bundle
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tools/webui
+    COMMENT "Bundling the offline Kagami WebUI"
+    VERBATIM
+)
 
 set(KAGAMI_OUT_DIR "${CMAKE_BINARY_DIR}/out")
 set(KAGAMI_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package")
 set(KAGAMI_PACKAGE_ZIP "${KAGAMI_OUT_DIR}/${KAGAMI_MODULE_ID}-${KAGAMI_MODULE_VERSION}.zip")
 
+set(KAGAMI_WEBUI_PACKAGE_COMMAND)
+set(KAGAMI_WEBUI_PACKAGE_DEPENDENCY)
+if(KAGAMI_PACKAGE_WEBUI)
+    set(KAGAMI_WEBUI_PACKAGE_COMMAND
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${KAGAMI_WEBUI_DIR} ${KAGAMI_PACKAGE_DIR}/webroot)
+    set(KAGAMI_WEBUI_PACKAGE_DEPENDENCY webui)
+endif()
+
 add_custom_target(package
     COMMAND ${CMAKE_COMMAND} -E make_directory ${KAGAMI_OUT_DIR}
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${KAGAMI_PACKAGE_DIR}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/module ${KAGAMI_PACKAGE_DIR}
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${KAGAMI_PACKAGE_DIR}/webroot
+    ${KAGAMI_WEBUI_PACKAGE_COMMAND}
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:kagamid> ${KAGAMI_PACKAGE_DIR}/kagamid
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:lkmloader> ${KAGAMI_PACKAGE_DIR}/lkmloader
     COMMAND ${CMAKE_COMMAND} -E chdir ${KAGAMI_PACKAGE_DIR} ${CMAKE_COMMAND} -E tar cf ${KAGAMI_PACKAGE_ZIP} --format=zip .
-    DEPENDS kagamid lkmloader
+    DEPENDS kagamid lkmloader ${KAGAMI_WEBUI_PACKAGE_DEPENDENCY}
     COMMENT "Creating ${KAGAMI_PACKAGE_ZIP}"
     VERBATIM
 )

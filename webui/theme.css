@@ -1,183 +1,252 @@
-@font-face {
-  font-family: "Inter";
-  src: url("./fonts/Inter-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Inter";
-  src: url("./fonts/Inter-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Inter";
-  src: url("./fonts/Inter-SemiBold.woff2") format("woff2");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Inter";
-  src: url("./fonts/Inter-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Noto Sans SC";
-  src: url("./fonts/NotoSansSC-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-  unicode-range: U+4E00-9FFF, U+3400-4DBF, U+F900-FAFF, U+2F800-2FA1F;
-}
-
-@font-face {
-  font-family: "Noto Sans SC";
-  src: url("./fonts/NotoSansSC-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-  unicode-range: U+4E00-9FFF, U+3400-4DBF, U+F900-FAFF, U+2F800-2FA1F;
-}
-
-@font-face {
-  font-family: "Noto Sans SC";
-  src: url("./fonts/NotoSansSC-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-  unicode-range: U+4E00-9FFF, U+3400-4DBF, U+F900-FAFF, U+2F800-2FA1F;
-}
-
-@font-face {
-  font-family: "JetBrains Mono";
-  src: url("./fonts/JetBrainsMono-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "JetBrains Mono";
-  src: url("./fonts/JetBrainsMono-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "JetBrains Mono";
-  src: url("./fonts/JetBrainsMono-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
+/* SPDX-License-Identifier: MIT */
+/*
+ * Kagami - Material 3 Expressive color, motion and window-inset tokens.
+ * Adapted from YukiZygisk and KOWX712/ksu-webui-demo. Teal seed: #0F6C64.
+ * License: MIT
+ * Authors: KOWX712 and Anatdx
+ */
 
 :root {
-  color-scheme: light dark;
-  --window-inset-top: env(safe-area-inset-top, 0px);
-  --window-inset-bottom: env(safe-area-inset-bottom, 0px);
-  --top-inset: var(--window-inset-top, env(safe-area-inset-top, 0px));
-  --bottom-inset: var(--window-inset-bottom, env(safe-area-inset-bottom, 0px));
-  --font-ui: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  --radius-sm: 10px;
-  --radius-md: 16px;
-  --radius-lg: 24px;
-  --radius-xl: 32px;
-  --shadow-soft: 0 24px 60px rgba(15, 37, 33, 0.12);
-  --shadow-card: 0 12px 30px rgba(19, 43, 38, 0.08);
-  --panel-top-line: rgba(255, 255, 255, 0.68);
-  --panel-side-line: rgba(255, 255, 255, 0.28);
-  --panel-bottom-line: rgba(59, 82, 75, 0.14);
-  --panel-sheen: rgba(255, 255, 255, 0.3);
-  --line-soft: rgba(46, 74, 67, 0.12);
-  --line-strong: rgba(46, 74, 67, 0.22);
-  --bg: #f4f1eb;
-  --bg-elevated: rgba(255, 255, 255, 0.76);
-  --surface: rgba(255, 255, 255, 0.92);
-  --surface-muted: rgba(247, 243, 236, 0.9);
-  --surface-strong: #ffffff;
-  --text: #17221f;
-  --text-muted: #5b6a66;
-  --text-soft: #7f8d88;
-  --primary-live: var(--primary, #0f6c64);
-  --primary-strong: #0a544d;
-  --primary-soft: rgba(15, 108, 100, 0.12);
-  --secondary-live: var(--secondary, #a45829);
-  --secondary-soft: rgba(164, 88, 41, 0.12);
-  --success: #23745a;
-  --warning: #a6630c;
-  --danger: #b33c35;
-  --danger-soft: rgba(179, 60, 53, 0.12);
-  --grid-line: rgba(18, 31, 28, 0.06);
+  color-scheme: light;
+  --inset-top: var(--window-inset-top, env(safe-area-inset-top, 0px));
+  --inset-bottom: var(--window-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --kg-primary: #0f6c64;
+  --kg-on-primary: #ffffff;
+  --kg-primary-container: #9ef2e5;
+  --kg-on-primary-container: #005048;
+  --kg-secondary: #4a635e;
+  --kg-on-secondary: #ffffff;
+  --kg-secondary-container: #cce8e0;
+  --kg-on-secondary-container: #324b46;
+  --kg-tertiary: #456179;
+  --kg-on-tertiary: #ffffff;
+  --kg-tertiary-container: #cce5ff;
+  --kg-on-tertiary-container: #2d4960;
+  --kg-error: #ba1a1a;
+  --kg-on-error: #ffffff;
+  --kg-error-container: #ffdad6;
+  --kg-on-error-container: #93000a;
+  --kg-surface: #f4fbf7;
+  --kg-on-surface: #161d1b;
+  --kg-surface-variant: #dbe5e0;
+  --kg-on-surface-variant: #3f4945;
+  --kg-outline: #6f7975;
+  --kg-outline-variant: #bfc9c3;
+  --kg-surface-dim: #d5dcd8;
+  --kg-surface-bright: #f4fbf7;
+  --kg-surface-container-lowest: #ffffff;
+  --kg-surface-container-low: #eef5f1;
+  --kg-surface-container: #e8efeb;
+  --kg-surface-container-high: #e2eae5;
+  --kg-surface-container-highest: #dce4df;
+  --kg-inverse-surface: #2b322f;
+  --kg-inverse-on-surface: #edf3ef;
+  --kg-inverse-primary: #80d5c9;
+  --success: #286344;
+  --success-container: #dceee1;
+  --on-success-container: #174b30;
+  --warning: #80570c;
+  --warning-container: #fff0cd;
+  --on-warning-container: #5b4008;
+
+  --motion-short: 160ms;
+  --motion-medium: 280ms;
+  --motion-long: 420ms;
+  --motion-spring: cubic-bezier(.2, 1.15, .35, 1);
+  --motion-emphasized: cubic-bezier(.2, 0, 0, 1);
+
+  --md-sys-color-primary: var(--kg-primary);
+  --md-sys-color-on-primary: var(--kg-on-primary);
+  --md-sys-color-primary-container: var(--kg-primary-container);
+  --md-sys-color-on-primary-container: var(--kg-on-primary-container);
+  --md-sys-color-secondary: var(--kg-secondary);
+  --md-sys-color-on-secondary: var(--kg-on-secondary);
+  --md-sys-color-secondary-container: var(--kg-secondary-container);
+  --md-sys-color-on-secondary-container: var(--kg-on-secondary-container);
+  --md-sys-color-tertiary: var(--kg-tertiary);
+  --md-sys-color-on-tertiary: var(--kg-on-tertiary);
+  --md-sys-color-tertiary-container: var(--kg-tertiary-container);
+  --md-sys-color-on-tertiary-container: var(--kg-on-tertiary-container);
+  --md-sys-color-error: var(--kg-error);
+  --md-sys-color-on-error: var(--kg-on-error);
+  --md-sys-color-error-container: var(--kg-error-container);
+  --md-sys-color-on-error-container: var(--kg-on-error-container);
+  --md-sys-color-background: var(--kg-surface);
+  --md-sys-color-on-background: var(--kg-on-surface);
+  --md-sys-color-surface: var(--kg-surface);
+  --md-sys-color-on-surface: var(--kg-on-surface);
+  --md-sys-color-surface-variant: var(--kg-surface-variant);
+  --md-sys-color-on-surface-variant: var(--kg-on-surface-variant);
+  --md-sys-color-outline: var(--kg-outline);
+  --md-sys-color-outline-variant: var(--kg-outline-variant);
+  --md-sys-color-shadow: #000000;
+  --md-sys-color-scrim: #000000;
+  --md-sys-color-inverse-surface: var(--kg-inverse-surface);
+  --md-sys-color-inverse-on-surface: var(--kg-inverse-on-surface);
+  --md-sys-color-inverse-primary: var(--kg-inverse-primary);
+  --md-sys-color-surface-dim: var(--kg-surface-dim);
+  --md-sys-color-surface-bright: var(--kg-surface-bright);
+  --md-sys-color-surface-container-lowest: var(--kg-surface-container-lowest);
+  --md-sys-color-surface-container-low: var(--kg-surface-container-low);
+  --md-sys-color-surface-container: var(--kg-surface-container);
+  --md-sys-color-surface-container-high: var(--kg-surface-container-high);
+  --md-sys-color-surface-container-highest: var(--kg-surface-container-highest);
+  --md-sys-color-primary-fixed: #9ef2e5;
+  --md-sys-color-primary-fixed-dim: #80d5c9;
+  --md-sys-color-on-primary-fixed: #00201c;
+  --md-sys-color-on-primary-fixed-variant: #005048;
+  --md-sys-color-secondary-fixed: #cce8e0;
+  --md-sys-color-secondary-fixed-dim: #b1ccc5;
+  --md-sys-color-on-secondary-fixed: #06201a;
+  --md-sys-color-on-secondary-fixed-variant: #324b46;
+  --md-sys-color-tertiary-fixed: #cce5ff;
+  --md-sys-color-tertiary-fixed-dim: #accbe5;
+  --md-sys-color-on-tertiary-fixed: #001e30;
+  --md-sys-color-on-tertiary-fixed-variant: #2d4960;
+
+  --md-ref-typeface-brand: "Roboto", "Noto Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --md-ref-typeface-plain: var(--md-ref-typeface-brand);
+  --md-sys-typescale-label-large-font: var(--md-ref-typeface-plain);
+  --md-sys-typescale-label-large-size: 14px;
+  --md-sys-typescale-label-large-weight: 500;
+  --md-sys-typescale-label-large-tracking: 0;
+  --md-sys-typescale-body-large-tracking: 0;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --line-soft: rgba(158, 185, 178, 0.12);
-    --line-strong: rgba(158, 185, 178, 0.18);
-    --panel-top-line: rgba(255, 255, 255, 0.16);
-    --panel-side-line: rgba(255, 255, 255, 0.06);
-    --panel-bottom-line: rgba(0, 0, 0, 0.28);
-    --panel-sheen: rgba(255, 255, 255, 0.06);
-    --bg: #0f1412;
-    --bg-elevated: rgba(18, 24, 22, 0.72);
-    --surface: rgba(23, 30, 27, 0.88);
-    --surface-muted: rgba(17, 24, 22, 0.92);
-    --surface-strong: #18211d;
-    --text: #edf2ef;
-    --text-muted: #a2b2ad;
-    --text-soft: #7f908a;
-    --primary-live: var(--primary, #7ed3ca);
-    --primary-strong: #5fb9af;
-    --primary-soft: rgba(126, 211, 202, 0.13);
-    --secondary-live: var(--secondary, #f0b28c);
-    --secondary-soft: rgba(240, 178, 140, 0.12);
-    --success: #68c49e;
-    --warning: #f7bb5e;
-    --danger: #ff8a80;
-    --danger-soft: rgba(255, 138, 128, 0.12);
-    --grid-line: rgba(255, 255, 255, 0.04);
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --kg-primary: #80d5c9;
+    --kg-on-primary: #003731;
+    --kg-primary-container: #005048;
+    --kg-on-primary-container: #9ef2e5;
+    --kg-secondary: #b1ccc5;
+    --kg-on-secondary: #1b3530;
+    --kg-secondary-container: #324b46;
+    --kg-on-secondary-container: #cce8e0;
+    --kg-tertiary: #accbe5;
+    --kg-on-tertiary: #143248;
+    --kg-tertiary-container: #2d4960;
+    --kg-on-tertiary-container: #cce5ff;
+    --kg-error: #ffb4ab;
+    --kg-on-error: #690005;
+    --kg-error-container: #93000a;
+    --kg-on-error-container: #ffdad6;
+    --kg-surface: #0e1512;
+    --kg-on-surface: #dce4df;
+    --kg-surface-variant: #3f4945;
+    --kg-on-surface-variant: #bfc9c3;
+    --kg-outline: #89938e;
+    --kg-outline-variant: #3f4945;
+    --kg-surface-dim: #0e1512;
+    --kg-surface-bright: #343b37;
+    --kg-surface-container-lowest: #090f0d;
+    --kg-surface-container-low: #161d1b;
+    --kg-surface-container: #1a211e;
+    --kg-surface-container-high: #242c28;
+    --kg-surface-container-highest: #2f3733;
+    --kg-inverse-surface: #dce4df;
+    --kg-inverse-on-surface: #2b322f;
+    --kg-inverse-primary: #0f6c64;
+    --success: #95d5aa;
+    --success-container: #213e2d;
+    --on-success-container: #b6ebc6;
+    --warning: #edc16b;
+    --warning-container: #44371c;
+    --on-warning-container: #f5d68f;
   }
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --line-soft: rgba(158, 185, 178, 0.12);
-  --line-strong: rgba(158, 185, 178, 0.18);
-  --panel-top-line: rgba(255, 255, 255, 0.16);
-  --panel-side-line: rgba(255, 255, 255, 0.06);
-  --panel-bottom-line: rgba(0, 0, 0, 0.28);
-  --panel-sheen: rgba(255, 255, 255, 0.06);
-  --bg: #0f1412;
-  --bg-elevated: rgba(18, 24, 22, 0.72);
-  --surface: rgba(23, 30, 27, 0.88);
-  --surface-muted: rgba(17, 24, 22, 0.92);
-  --surface-strong: #18211d;
-  --text: #edf2ef;
-  --text-muted: #a2b2ad;
-  --text-soft: #7f908a;
-  --primary-live: var(--primary, #7ed3ca);
-  --primary-strong: #5fb9af;
-  --primary-soft: rgba(126, 211, 202, 0.13);
-  --secondary-live: var(--secondary, #f0b28c);
-  --secondary-soft: rgba(240, 178, 140, 0.12);
-  --success: #68c49e;
-  --warning: #f7bb5e;
-  --danger: #ff8a80;
-  --danger-soft: rgba(255, 138, 128, 0.12);
-  --grid-line: rgba(255, 255, 255, 0.04);
+  --kg-primary: #80d5c9;
+  --kg-on-primary: #003731;
+  --kg-primary-container: #005048;
+  --kg-on-primary-container: #9ef2e5;
+  --kg-secondary: #b1ccc5;
+  --kg-on-secondary: #1b3530;
+  --kg-secondary-container: #324b46;
+  --kg-on-secondary-container: #cce8e0;
+  --kg-tertiary: #accbe5;
+  --kg-on-tertiary: #143248;
+  --kg-tertiary-container: #2d4960;
+  --kg-on-tertiary-container: #cce5ff;
+  --kg-error: #ffb4ab;
+  --kg-on-error: #690005;
+  --kg-error-container: #93000a;
+  --kg-on-error-container: #ffdad6;
+  --kg-surface: #0e1512;
+  --kg-on-surface: #dce4df;
+  --kg-surface-variant: #3f4945;
+  --kg-on-surface-variant: #bfc9c3;
+  --kg-outline: #89938e;
+  --kg-outline-variant: #3f4945;
+  --kg-surface-dim: #0e1512;
+  --kg-surface-bright: #343b37;
+  --kg-surface-container-lowest: #090f0d;
+  --kg-surface-container-low: #161d1b;
+  --kg-surface-container: #1a211e;
+  --kg-surface-container-high: #242c28;
+  --kg-surface-container-highest: #2f3733;
+  --kg-inverse-surface: #dce4df;
+  --kg-inverse-on-surface: #2b322f;
+  --kg-inverse-primary: #0f6c64;
+  --success: #95d5aa;
+  --success-container: #213e2d;
+  --on-success-container: #b6ebc6;
+  --warning: #edc16b;
+  --warning-container: #44371c;
+  --on-warning-container: #f5d68f;
+}
+
+/* Automatic mode follows the complete palette supplied by the host. */
+:root:not([data-theme]) {
+  --md-sys-color-primary: var(--primary, var(--kg-primary));
+  --md-sys-color-on-primary: var(--onPrimary, var(--kg-on-primary));
+  --md-sys-color-primary-container: var(--primaryContainer, var(--kg-primary-container));
+  --md-sys-color-on-primary-container: var(--onPrimaryContainer, var(--kg-on-primary-container));
+  --md-sys-color-secondary: var(--secondary, var(--kg-secondary));
+  --md-sys-color-on-secondary: var(--onSecondary, var(--kg-on-secondary));
+  --md-sys-color-secondary-container: var(--secondaryContainer, var(--kg-secondary-container));
+  --md-sys-color-on-secondary-container: var(--onSecondaryContainer, var(--kg-on-secondary-container));
+  --md-sys-color-tertiary: var(--tertiary, var(--kg-tertiary));
+  --md-sys-color-on-tertiary: var(--onTertiary, var(--kg-on-tertiary));
+  --md-sys-color-tertiary-container: var(--tertiaryContainer, var(--kg-tertiary-container));
+  --md-sys-color-on-tertiary-container: var(--onTertiaryContainer, var(--kg-on-tertiary-container));
+  --md-sys-color-error: var(--error, var(--kg-error));
+  --md-sys-color-on-error: var(--onError, var(--kg-on-error));
+  --md-sys-color-error-container: var(--errorContainer, var(--kg-error-container));
+  --md-sys-color-on-error-container: var(--onErrorContainer, var(--kg-on-error-container));
+  --md-sys-color-background: var(--background, var(--kg-surface));
+  --md-sys-color-on-background: var(--onBackground, var(--kg-on-surface));
+  --md-sys-color-surface: var(--surface, var(--kg-surface));
+  --md-sys-color-on-surface: var(--onSurface, var(--kg-on-surface));
+  --md-sys-color-surface-variant: var(--surfaceVariant, var(--kg-surface-variant));
+  --md-sys-color-on-surface-variant: var(--onSurfaceVariant, var(--kg-on-surface-variant));
+  --md-sys-color-outline: var(--outline, var(--kg-outline));
+  --md-sys-color-outline-variant: var(--outlineVariant, var(--kg-outline-variant));
+  --md-sys-color-shadow: var(--shadow, #000000);
+  --md-sys-color-scrim: var(--scrim, #000000);
+  --md-sys-color-inverse-surface: var(--inverseSurface, var(--kg-inverse-surface));
+  --md-sys-color-inverse-on-surface: var(--inverseOnSurface, var(--kg-inverse-on-surface));
+  --md-sys-color-inverse-primary: var(--inversePrimary, var(--kg-inverse-primary));
+  --md-sys-color-surface-dim: var(--surfaceDim, var(--kg-surface-dim));
+  --md-sys-color-surface-bright: var(--surfaceBright, var(--kg-surface-bright));
+  --md-sys-color-surface-container-lowest: var(--surfaceContainerLowest, var(--kg-surface-container-lowest));
+  --md-sys-color-surface-container-low: var(--surfaceContainerLow, var(--kg-surface-container-low));
+  --md-sys-color-surface-container: var(--surfaceContainer, var(--kg-surface-container));
+  --md-sys-color-surface-container-high: var(--surfaceContainerHigh, var(--kg-surface-container-high));
+  --md-sys-color-surface-container-highest: var(--surfaceContainerHighest, var(--kg-surface-container-highest));
+  --md-sys-color-primary-fixed: var(--primaryFixed, #9ef2e5);
+  --md-sys-color-primary-fixed-dim: var(--primaryFixedDim, #80d5c9);
+  --md-sys-color-on-primary-fixed: var(--onPrimaryFixed, #00201c);
+  --md-sys-color-on-primary-fixed-variant: var(--onPrimaryFixedVariant, #005048);
+  --md-sys-color-secondary-fixed: var(--secondaryFixed, #cce8e0);
+  --md-sys-color-secondary-fixed-dim: var(--secondaryFixedDim, #b1ccc5);
+  --md-sys-color-on-secondary-fixed: var(--onSecondaryFixed, #06201a);
+  --md-sys-color-on-secondary-fixed-variant: var(--onSecondaryFixedVariant, #324b46);
+  --md-sys-color-tertiary-fixed: var(--tertiaryFixed, #cce5ff);
+  --md-sys-color-tertiary-fixed-dim: var(--tertiaryFixedDim, #accbe5);
+  --md-sys-color-on-tertiary-fixed: var(--onTertiaryFixed, #001e30);
+  --md-sys-color-on-tertiary-fixed-variant: var(--onTertiaryFixedVariant, #2d4960);
 }

@@ -9,22 +9,36 @@ export function hasKernelSU() {
   return typeof globalThis.ksu !== "undefined";
 }
 
-export function exec(command, options = {}) {
+export function exec(command, options = {}, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    if (!hasKernelSU()) {
-      resolve({ errno: 1, stdout: "", stderr: "ksu is not defined" });
+    if (!hasKernelSU() || typeof globalThis.ksu?.exec !== "function") {
+      reject(new Error("The root command bridge is unavailable"));
       return;
     }
 
     const callbackName = uniqueName("exec");
-    globalThis[callbackName] = (errno, stdout, stderr) => {
+    const timer = setTimeout(() => {
       delete globalThis[callbackName];
-      resolve({ errno, stdout, stderr });
+      const error = new Error("The root command timed out; its result could not be confirmed");
+      error.code = "BRIDGE_TIMEOUT";
+      error.outcomeUnknown = true;
+      reject(error);
+    }, timeoutMs);
+    globalThis[callbackName] = (errno, stdout, stderr) => {
+      clearTimeout(timer);
+      delete globalThis[callbackName];
+      const code = Number(errno);
+      if ((typeof errno !== "number" && typeof errno !== "string") || String(errno).trim() === "" || !Number.isInteger(code)) {
+        reject(new Error("The root command bridge returned an invalid exit status"));
+        return;
+      }
+      resolve({ errno: code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     };
 
     try {
       globalThis.ksu.exec(command, JSON.stringify(options), callbackName);
     } catch (error) {
+      clearTimeout(timer);
       delete globalThis[callbackName];
       reject(error);
     }

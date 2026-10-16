@@ -1,11 +1,12 @@
+<!-- SPDX-License-Identifier: MIT
+  Kagami WebUI. Adapted from YukiZygisk and KOWX712/ksu-webui-demo.
+  Authors: KOWX712 and Anatdx.
+-->
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-    >
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
     <link rel="icon" type="image/svg+xml" href="./icon.svg">
     <title>Kagami</title>
@@ -13,13 +14,15 @@
     <script type="module" src="./index.js"></script>
   </head>
   <body>
-    <div id="app" class="boot-shell">
-      <div class="boot-panel">
-        <div class="boot-mark">KAGAMI</div>
-        <h1>Loading control surface…</h1>
-        <p>Preparing the static WebUI.</p>
-      </div>
-    </div>
-    <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+    <div id="app" class="boot-shell"><div class="boot-panel"><span class="brand-mark" aria-hidden="true"></span><strong>Kagami</strong></div></div>
+    <div id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="editor" aria-labelledby="dialog-title">
+      <form id="editor-form" novalidate>
+        <div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" data-action="close-dialog" aria-label="Close"></button></div>
+        <div id="dialog-body"></div>
+        <p id="dialog-error" class="field-error" role="alert" hidden></p>
+        <div id="dialog-actions" class="dialog-actions"></div>
+      </form>
+    </dialog>
   </body>
 </html>

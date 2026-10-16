@@ -1,0 +1,24 @@
+{
+  "name": "kagami-webui-assets",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "bundle": "node build.mjs && node bundle.mjs",
+    "test:api": "node --test tests/api.test.mjs tests/state.test.mjs",
+    "test:browser": "node tests/browser.mjs",
+    "test:logo": "node --test tests/logo.test.mjs"
+  },
+  "dependencies": {
+    "@material/web": "2.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "fast-xml-parser": "5.11.2",
+    "html-minifier-terser": "7.2.0",
+    "lucide-static": "1.49.0",
+    "playwright-core": "1.63.0"
+  }
+}

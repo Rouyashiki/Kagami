@@ -52,8 +52,8 @@ ID="$(sed -n 's/^id=//p' module/module.prop | head -1)"
 VER="$(sed -n 's/^version=//p' module/module.prop | head -1)"
 : "${ID:?missing id in module.prop}"
 
-# --- stage the static WebUI (webui/ source -> module/webroot artifact) -------
-rm -rf module/webroot && cp -r webui module/webroot
+# --- bundle the offline WebUI -----------------------------------------------
+bash "$ROOT/build.sh" webui
 
 # --- stage the module tree (module/ + ABI binary) ----------------------------
 PKG="$BUILD_DIR/package"
@@ -61,6 +61,8 @@ OUT="$BUILD_DIR/out"
 rm -rf "$PKG"
 mkdir -p "$PKG" "$OUT"
 cp -R "module/." "$PKG/"
+rm -rf "$PKG/webroot"
+cp -R "$ROOT/build/webui" "$PKG/webroot"
 cp "$BIN" "$PKG/kagamid-${ABI}"        # customize.sh picks the right ABI at install
 cp "$LOADER" "$PKG/lkmloader"
 find "$PKG" -name '.DS_Store' -delete 2>/dev/null || true

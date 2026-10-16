@@ -96,18 +96,17 @@ check_lkm_deps() {
     fi
 }
 
-# Stage the static WebUI source (webui/) into module/webroot. webui/ is the
-# tracked source of truth; module/webroot is a generated artifact (gitignored).
+# Bundle readable sources into the three-file WebUI distribution.
 build_webui() {
     [[ $NO_WEBUI -eq 1 ]] && return 0
-    print_info "Staging WebUI (webui/ -> module/webroot)..."
-    if [[ ! -f "${PROJECT_ROOT}/webui/index.html" ]]; then
-        print_error "webui/index.html not found"
-        exit 1
-    fi
-    rm -rf "${PROJECT_ROOT}/module/webroot"
-    cp -r "${PROJECT_ROOT}/webui" "${PROJECT_ROOT}/module/webroot"
-    print_success "WebUI staged into module/webroot"
+    command -v npm &> /dev/null || { print_error "Node.js and npm are required to build the WebUI"; exit 1; }
+    print_info "Bundling WebUI (webui/ -> build/webui)..."
+    (
+        cd "${PROJECT_ROOT}/tools/webui"
+        npm ci --include=dev --no-audit --no-fund
+        npm run bundle
+    )
+    print_success "WebUI bundled into build/webui"
 }
 
 # Build and stage a KMI-tagged Kasumi API 17 asset. The helper copies the
@@ -129,6 +128,8 @@ build_kasumi_lkm() {
 build_arch() {
     local ARCH=$1
     local BUILD_SUBDIR="${BUILD_DIR}/${ARCH}"
+    local PACKAGE_WEBUI=ON
+    [[ $NO_WEBUI -eq 1 ]] && PACKAGE_WEBUI=OFF
 
     print_info "Building kagamid for ${ARCH}..."
     mkdir -p "${BUILD_SUBDIR}" "${OUT_DIR}"
@@ -138,6 +139,7 @@ build_arch() {
         -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="${ARCH}" \
         -DANDROID_PLATFORM=android-26 \
+        -DKAGAMI_PACKAGE_WEBUI="${PACKAGE_WEBUI}" \
         ${VERBOSE} \
         "${PROJECT_ROOT}"
     cmake --build "${BUILD_SUBDIR}" --target kagamid lkmloader
@@ -252,7 +254,6 @@ case $COMMAND in
     package)
         compute_version
         stamp_module_prop
-        build_webui
         [ "$BUILD_LKM" -eq 1 ] && build_kasumi_lkm
         build_arch "arm64-v8a"
         print_info "Packaging (cmake)..."

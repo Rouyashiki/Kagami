@@ -12,6 +12,60 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  native-runtime:
+    name: Native runtime state
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Configure focused native tests
+        run: >-
+          cmake -S . -B build/native-tests
+          -DKAGAMI_BUILD_NATIVE_TESTS=ON
+          -DKAGAMI_ENABLE_CLANG_TIDY=OFF
+          -DKAGAMI_PACKAGE_WEBUI=OFF
+      - name: Build and test state parsing
+        run: |
+          cmake --build build/native-tests --target module_runtime_test magic_runtime_test kasumi_rules_test config_read_test -j2
+          ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime|kasumi_rules|config_read)$'
+      - name: Test actual mounts in a private namespace
+        run: sudo ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime_mounts|magic_runtime)$'
+
+  webui:
+    name: WebUI source and bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/webui/package-lock.json
+      - name: Install WebUI dependencies
+        working-directory: tools/webui
+        run: npm ci --include=dev --no-audit --no-fund
+      - name: Bundle and check API behavior
+        working-directory: tools/webui
+        run: |
+          npm run bundle
+          npm run test:api
+      - name: Install test browser
+        working-directory: tools/webui
+        run: npx --no-install playwright-core install --with-deps chromium
+      - name: Check source and bundled browser flows
+        working-directory: tools/webui
+        run: |
+          npm run test:logo
+          npm run test:browser
+      - name: Upload WebUI browser results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: kagami-webui-tests
+          path: build/webui-tests/
+          if-no-files-found: ignore
+
   clang-format:
     runs-on: ubuntu-latest
     steps:
@@ -85,7 +139,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: build-kasumi-lkm
+    needs: [build-kasumi-lkm, webui, native-runtime]
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     steps:
@@ -122,6 +176,13 @@ jobs:
         with:
           ndk-version: r27c
 
+      - name: Setup Node.js for the offline WebUI bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/webui/package-lock.json
+
       - name: Setup CMake / Ninja / zip
         run: |
           sudo apt-get update
@@ -136,6 +197,10 @@ jobs:
           MODULE_ZIP=$(find build/arm64-v8a/out -maxdepth 1 -type f -name '*.zip' -print -quit)
           test -n "$MODULE_ZIP"
           MODULE_ZIP_CONTENTS=$(cmake -E tar tf "$MODULE_ZIP")
+          for asset in index.html config.json icon.svg; do
+            test -s "build/arm64-v8a/package/webroot/$asset"
+          done
+          test "$(find build/arm64-v8a/package/webroot -type f | wc -l)" -eq 3
           if grep -Eqi '(^|/)[^/]+\.apk$' <<< "$MODULE_ZIP_CONTENTS"; then
             echo "APK files must not be bundled in the module zip."
             exit 1

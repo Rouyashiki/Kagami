@@ -63,7 +63,7 @@ export const BUILTIN_PARTITIONS = [
 
 export const MODULE_META = {
   name: "Kagami",
-  version: "v2.2.5",
+  version: "",
   author: "Anatdx",
 };
 
@@ -76,7 +76,7 @@ export function getRuntimeMode() {
 }
 
 function apiOutput(result) {
-  return String((result && (result.stdout || result.stderr)) || "").trim();
+  return String((result && (result.stderr || result.stdout)) || "").trim();
 }
 
 function shellEscape(value) {
@@ -106,7 +106,7 @@ function normalizeConfig(rawConfig) {
     "enable_statfs_spoof",
   ];
   const hasSplitFeatures =
-    Number(raw.kasumi_feature_config_version || 0) >= KASUMI_FEATURE_CONFIG_VERSION ||
+    Number(raw.kasumi_feature_config_version || 0) >= 2 ||
     splitKeys.some((key) => hasOwn(raw, key));
 
   if (hasSplitFeatures) {
@@ -132,23 +132,85 @@ function normalizeConfig(rawConfig) {
   return normalized;
 }
 
-async function execJson(command, fallback = {}) {
-  const result = await exec(command);
-  const out = apiOutput(result);
-  if (result.errno === 0 && out) {
-    return JSON.parse(out);
-  }
-  return clone(fallback);
-}
-
-async function writeJsonFile(path, value) {
-  const escapedPath = shellEscape(path);
-  const payload = shellEscape(JSON.stringify(value, null, 2));
-  const command = `mkdir -p "$(dirname '${escapedPath}')" && printf '%s\\n' '${payload}' > '${escapedPath}'`;
+async function checkedExec(command) {
   const result = await exec(command);
   if (result.errno !== 0) {
-    throw new Error(apiOutput(result) || `Failed to write ${path}`);
+    const error = new Error(apiOutput(result) || `Command failed (${result.errno})`);
+    error.errno = result.errno;
+    throw error;
   }
+  return result;
+}
+
+async function execJson(command) {
+  const result = await checkedExec(command);
+  try {
+    return JSON.parse(result.stdout);
+  } catch (_error) {
+    throw new Error("The command returned an invalid JSON response");
+  }
+}
+
+function objectResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("The command returned an invalid object response");
+  }
+  return value;
+}
+
+function arrayResponse(value) {
+  if (!Array.isArray(value)) throw new Error("The command returned an invalid list response");
+  return value;
+}
+
+function validModuleId(id) {
+  if (typeof id !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(id) || id === "." || id === "..") {
+    throw new Error("Invalid module ID");
+  }
+}
+
+function validPath(path) {
+  if (typeof path !== "string" || !path.startsWith("/") || /[\0\r\n]/.test(path)) {
+    throw new Error("The path must be absolute and contain no line breaks");
+  }
+}
+
+function validMode(mode, rule = false) {
+  const modes = rule ? ["kasumi", "overlay", "magic", "none", "hide"] : ["auto", "kasumi", "overlay", "magic", "none"];
+  if (!modes.includes(mode)) throw new Error("Invalid mount mode");
+}
+
+function moduleRuntime(value) {
+  // Older controllers expose a configured strategy but no runtime evidence.
+  if (value == null) return { state: "unknown", backend: null, reason: null, error: null };
+  objectResponse(value);
+  const { state, backend = null, reason = null, error = null } = value;
+  if (!["mounted", "unmounted", "partial", "unknown"].includes(state)
+      || !["overlay", "magic", "kasumi", "none", null].includes(backend)
+      || (reason !== null && typeof reason !== "string")
+      || (error !== null && (typeof error !== "object" || Array.isArray(error)
+        || typeof error.code !== "string" || typeof error.message !== "string"))) {
+    throw new Error("Invalid module runtime response");
+  }
+  return { state: error ? "unknown" : state, backend, reason, error };
+}
+
+function configPatch(updates) {
+  const patch = clone(objectResponse(updates || {}));
+  for (const key of ["lkm_autoload", "__lkmAutoloadPresent", "kasumi_available", "tmpfs_xattr_supported"]) delete patch[key];
+  if (Object.keys(patch).some((key) => (key.startsWith("enable_") && key !== "enable_nuke") || key === "mount_hide_mode")) {
+    patch.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
+  }
+  return patch;
+}
+
+// Native mode/rule commands read and rewrite shared maps. Serialize all edits,
+// including edits to different modules, without blocking later retries on failure.
+let moduleWriteQueue = Promise.resolve();
+function queueModuleWrite(task) {
+  const result = moduleWriteQueue.then(task);
+  moduleWriteQueue = result.catch(() => undefined);
+  return result;
 }
 
 const mockState = {
@@ -173,6 +235,7 @@ const mockState = {
       description: "Inject zygisk into the current runtime.",
       mode: "overlay",
       strategy: "overlay",
+      runtime: { state: "mounted", backend: "overlay", reason: null, error: null },
       path: "/data/adb/modules/zygisk_next",
       rules: [{ path: "/system/bin/app_process64", mode: "overlay" }],
     },
@@ -184,6 +247,7 @@ const mockState = {
       description: "Spoof a safer device profile and properties.",
       mode: "kasumi",
       strategy: "kasumi",
+      runtime: { state: "mounted", backend: "kasumi", reason: null, error: null },
       path: "/data/adb/modules/playintegrityfix",
       rules: [
         { path: "/system/etc/security", mode: "kasumi" },
@@ -245,8 +309,13 @@ const mockState = {
   ],
   lkmStatus: {
     loaded: true,
+    builtin: false,
     autoload: true,
     kmi_override: "",
+    detected_kmi: "android14-6.1",
+    asset: "/data/adb/modules/kagami/kasumi/android14-6.1_arm64_kasumi_lkm.ko",
+    last_error: "",
+    unload: { attempted: false, quiesce_supported: true },
   },
   logs: {
     system: `[INFO] Kagami daemon initialized\n[INFO] tmpfs backend selected\n[DEBUG] active modules: zygisk_next, playintegrityfix`,
@@ -255,24 +324,47 @@ const mockState = {
 };
 
 const mockApi = {
+  async getMeta() {
+    return { ...MODULE_META, version: "Preview", module_id: "kagami", config_file: PATHS.CONFIG, log_file: PATHS.DEFAULT_LOG };
+  },
+
   async loadConfig() {
     return { ...clone(mockState.config), __lkmAutoloadPresent: true };
   },
 
   async saveConfig(updates) {
-    mockState.config = { ...mockState.config, ...clone(updates) };
+    mockState.config = { ...normalizeConfig(mockState.config), ...configPatch(updates) };
+    return { persisted: true, runtimeApplied: mockState.systemInfo.kasumiAvailable };
   },
 
   async scanModules() {
     return clone(mockState.modules);
   },
 
-  async saveModules(modules) {
-    mockState.modules = clone(modules);
+  async setModuleMode(id, mode) {
+    validModuleId(id);
+    validMode(mode);
+    const module = mockState.modules.find((item) => item.id === id);
+    if (!module) throw new Error("Module not found");
+    module.mode = mode;
   },
 
-  async saveRules(modules) {
-    mockState.modules = clone(modules);
+  async addModuleRule(id, path, mode) {
+    validModuleId(id);
+    validPath(path);
+    validMode(mode, true);
+    const module = mockState.modules.find((item) => item.id === id);
+    if (!module) throw new Error("Module not found");
+    const rule = module.rules.find((item) => item.path === path);
+    if (rule) rule.mode = mode;
+    else module.rules.push({ path, mode });
+  },
+
+  async removeModuleRule(id, path) {
+    validModuleId(id);
+    validPath(path);
+    const module = mockState.modules.find((item) => item.id === id);
+    if (module) module.rules = module.rules.filter((item) => item.path !== path);
   },
 
   async checkConflicts() {
@@ -287,8 +379,9 @@ const mockApi = {
     return ["product", "system_ext", "vendor_dlkm"];
   },
 
-  async readLogs(logPath) {
-    return clone(logPath === "kernel" ? mockState.logs.kernel : mockState.logs.system);
+  async readLogs(logPath = "system", lines = 1000) {
+    if (!Number.isInteger(lines) || lines < 1 || lines > 10000) throw new Error("Invalid log line count");
+    return (logPath === "kernel" ? mockState.logs.kernel : mockState.logs.system).split("\n").slice(-lines).join("\n");
   },
 
   async clearLogs() {
@@ -318,19 +411,25 @@ const mockApi = {
   },
 
   async getAllRules() {
-    return clone(mockState.allRules);
+    if (!mockState.systemInfo.kasumiAvailable) throw new Error("Active rules are unavailable while Kasumi cannot be queried");
+    const userSet = new Set(mockState.userHideRules);
+    return clone(mockState.allRules).map((rule) => ({ ...rule, active: true, isUserDefined: rule.type === "HIDE" && userSet.has(rule.path) }));
   },
 
   async addUserHideRule(path) {
+    validPath(path);
     if (!mockState.userHideRules.includes(path)) {
       mockState.userHideRules.unshift(path);
-      mockState.allRules.unshift({ type: "HIDE", path, isUserDefined: true });
+      if (mockState.systemInfo.kasumiAvailable) mockState.allRules.unshift({ type: "HIDE", path, isUserDefined: true });
     }
+    return { persisted: true };
   },
 
   async removeUserHideRule(path) {
+    validPath(path);
     mockState.userHideRules = mockState.userHideRules.filter((item) => item !== path);
-    mockState.allRules = mockState.allRules.filter((item) => !(item.type === "HIDE" && item.path === path && item.isUserDefined));
+    if (mockState.systemInfo.kasumiAvailable) mockState.allRules = mockState.allRules.filter((item) => !(item.type === "HIDE" && item.path === path && item.isUserDefined));
+    return { persisted: true };
   },
 
   async getLkmStatus() {
@@ -338,6 +437,7 @@ const mockApi = {
   },
 
   async lkmSetKmi(kmi) {
+    if (typeof kmi !== "string" || !/^android\d+-\d+\.\d+$/.test(kmi)) throw new Error("Invalid KMI; expected android14-6.1 format");
     mockState.lkmStatus.kmi_override = kmi;
   },
 
@@ -347,396 +447,283 @@ const mockApi = {
 
   async lkmLoad() {
     mockState.lkmStatus.loaded = true;
+    mockState.systemInfo.kasumiAvailable = true;
+    mockState.config.kasumi_available = true;
   },
 
   async lkmUnload() {
     mockState.lkmStatus.loaded = false;
+    mockState.systemInfo.kasumiAvailable = false;
+    mockState.config.kasumi_available = false;
+    mockState.allRules = [];
   },
 
   async lkmSetAutoload(on) {
+    if (typeof on !== "boolean") throw new Error("Autoload must be a boolean");
     mockState.lkmStatus.autoload = Boolean(on);
+    mockState.config.lkm_autoload = on;
   },
 };
 
 const realApi = {
+  async getMeta() {
+    const data = objectResponse(await execJson(`${PATHS.BINARY} api meta`));
+    if (typeof data.version !== "string" || !data.version) throw new Error("The module version is unavailable");
+    return { ...MODULE_META, ...data };
+  },
+
   async loadConfig() {
-    const result = await exec(`${PATHS.BINARY} config show`);
-    const out = apiOutput(result);
-    if (result.errno === 0 && out) {
-      const raw = JSON.parse(out);
-      const normalized = normalizeConfig(raw);
-      return {
-        ...clone(DEFAULT_CONFIG),
-        ...normalized,
-        __lkmAutoloadPresent: Object.prototype.hasOwnProperty.call(raw, "lkm_autoload"),
-      };
-    }
-    return { ...clone(DEFAULT_CONFIG), __lkmAutoloadPresent: false };
+    const raw = objectResponse(await execJson(`${PATHS.BINARY} config show`));
+    return {
+      ...clone(DEFAULT_CONFIG),
+      ...normalizeConfig(raw),
+      __lkmAutoloadPresent: hasOwn(raw, "lkm_autoload"),
+    };
   },
 
   async saveConfig(updates) {
-    const configUpdates = clone(updates || {});
-    delete configUpdates.lkm_autoload;
-    delete configUpdates.__lkmAutoloadPresent;
-    if (Object.keys(configUpdates).some(
-      (key) => (key.startsWith("enable_") && key !== "enable_nuke") || key === "mount_hide_mode",
-    )) {
-      configUpdates.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
-    }
-    const payload = shellEscape(JSON.stringify(configUpdates));
-    const persist = await exec(`${PATHS.BINARY} config merge-json '${payload}'`);
-    if (persist.errno !== 0) {
-      throw new Error(apiOutput(persist) || "Failed to save configuration");
-    }
-
-    const systemResult = await exec(`${PATHS.BINARY} api system`);
-    const systemOutput = apiOutput(systemResult);
-    if (systemResult.errno !== 0 || !systemOutput) {
-      throw configPersistedError(
-        apiOutput(systemResult) || "Configuration saved, but runtime state could not be queried",
-      );
-    }
-    let system;
+    const patch = configPatch(updates);
+    await checkedExec(`${PATHS.BINARY} config merge-json '${shellEscape(JSON.stringify(patch))}'`);
     try {
-      system = JSON.parse(systemOutput);
-    } catch (_error) {
-      throw configPersistedError("Configuration saved, but the runtime status response was invalid");
-    }
-    if (system.kasumi_available === true) {
-      const result = await exec(`${PATHS.BINARY} config apply`);
-      if (result.errno !== 0) {
-        await exec(`${PATHS.BINARY} kasumi disable`);
-        throw configPersistedError(
-          apiOutput(result) || "Configuration saved, but Kasumi rejected the runtime apply",
-        );
+      const system = objectResponse(await execJson(`${PATHS.BINARY} api system`));
+      if (typeof system.kasumi_available !== "boolean") throw new Error("The runtime availability response is invalid");
+      if (system.kasumi_available) {
+        try {
+          await checkedExec(`${PATHS.BINARY} config apply`);
+        } catch (error) {
+          // Preserve the existing fail-closed control path, including when a
+          // bridge timeout leaves the apply result unknown.
+          try { await checkedExec(`${PATHS.BINARY} kasumi disable`); } catch (_cleanupError) { /* original error wins */ }
+          throw error;
+        }
       }
+      return { persisted: true, runtimeApplied: system.kasumi_available };
+    } catch (cause) {
+      const error = configPersistedError(cause.message || "Configuration saved, but runtime application could not be confirmed");
+      if (cause.outcomeUnknown) error.outcomeUnknown = true;
+      throw error;
     }
   },
 
   async scanModules() {
-    const data = await execJson(`${PATHS.BINARY} module list`, []);
-    const modules = Array.isArray(data.modules) ? data.modules : Array.isArray(data) ? data : [];
-    return modules.map((item) => ({
-      id: item.id,
-      name: item.name || item.id,
-      version: item.version || "",
-      author: item.author || "",
-      description: item.description || "",
-      mode: item.mode || "auto",
-      strategy: item.strategy || "overlay",
-      path: item.path || "",
-      rules: Array.isArray(item.rules) ? item.rules : [],
-    }));
+    const data = await execJson(`${PATHS.BINARY} module list --include-inactive`);
+    const modules = arrayResponse(Array.isArray(data) ? data : objectResponse(data).modules);
+    return modules.map((item) => {
+      objectResponse(item);
+      validModuleId(item.id);
+      const rules = arrayResponse(item.rules ?? []).map((rule) => {
+        objectResponse(rule);
+        if (typeof rule.path !== "string" || typeof rule.mode !== "string") throw new Error("Invalid module rule response");
+        return { path: rule.path, mode: rule.mode };
+      });
+      return {
+        id: item.id,
+        name: item.name || item.id,
+        version: item.version || "",
+        author: item.author || "",
+        description: item.description || "",
+        mode: item.mode || "auto",
+        strategy: item.strategy || "unknown",
+        runtime: moduleRuntime(item.runtime),
+        path: item.path || "",
+        rules,
+      };
+    });
   },
 
-  async saveModules(modules) {
-    const modes = {};
-    modules.forEach((module) => {
-      if (module.mode !== "auto" && /^[a-zA-Z0-9_.-]+$/.test(module.id)) {
-        modes[module.id] = module.mode;
-      }
-    });
-    await writeJsonFile(PATHS.MODE_CONFIG, modes);
+  async setModuleMode(id, mode) {
+    validModuleId(id);
+    validMode(mode);
+    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module set-mode '${shellEscape(id)}' '${shellEscape(mode)}'`));
   },
 
-  async saveRules(modules) {
-    const rules = {};
-    modules.forEach((module) => {
-      if (Array.isArray(module.rules) && module.rules.length > 0) {
-        rules[module.id] = module.rules.map((rule) => ({ path: rule.path, mode: rule.mode }));
-      }
-    });
-    await writeJsonFile(PATHS.RULES_CONFIG, rules);
+  async addModuleRule(id, path, mode) {
+    validModuleId(id);
+    validPath(path);
+    validMode(mode, true);
+    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module add-rule '${shellEscape(id)}' '${shellEscape(path)}' '${shellEscape(mode)}'`));
+  },
+
+  async removeModuleRule(id, path) {
+    validModuleId(id);
+    validPath(path);
+    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module remove-rule '${shellEscape(id)}' '${shellEscape(path)}'`));
   },
 
   async checkConflicts() {
-    const result = await exec(`${PATHS.BINARY} module check-conflicts`);
-    const out = apiOutput(result);
-    if (result.errno === 0 && out) {
-      return JSON.parse(out);
-    }
-    return [];
+    return arrayResponse(await execJson(`${PATHS.BINARY} module check-conflicts`)).map((item) => {
+      objectResponse(item);
+      if (typeof item.file !== "string" || !Array.isArray(item.modules) || item.modules.some((id) => typeof id !== "string")) {
+        throw new Error("Invalid conflict response");
+      }
+      return item;
+    });
   },
 
   async syncPartitions() {
-    const result = await exec(`${PATHS.BINARY} config sync-partitions`);
-    if (result.errno === 0) {
-      return result.stdout || result.stderr || "";
-    }
-    throw new Error(apiOutput(result) || "sync failed");
+    return (await checkedExec(`${PATHS.BINARY} config sync-partitions`)).stdout;
   },
 
   async scanPartitionsFromModules() {
-    const result = await exec(`${PATHS.BINARY} config sync-partitions 2>&1`);
+    const output = await this.syncPartitions();
     const partitions = new Set();
-    String(result.stdout || "")
-      .split("\n")
-      .forEach((line) => {
-        const match = line.match(/Added partition:\s*(\S+)/);
-        if (match) {
-          partitions.add(match[1]);
-        }
-      });
+    for (const line of output.split("\n")) {
+      const match = line.match(/^Added partition:\s*(\S+)\s*$/);
+      if (match) partitions.add(match[1]);
+    }
     return [...partitions];
   },
 
-  async readLogs(logPath, lines = 1000) {
+  async readLogs(logPath = "system", lines = 1000) {
+    if (!Number.isInteger(lines) || lines < 1 || lines > 10000) throw new Error("Invalid log line count");
     if (logPath === "kernel") {
-      const result = await exec(`dmesg | grep -i kasumi | tail -n ${lines}`);
-      return result.stdout || "";
+      // Filtering on the JS side preserves dmesg's exit status; a shell
+      // grep/tail pipeline used to turn permission failures into empty logs.
+      const result = await checkedExec("dmesg");
+      return result.stdout.split("\n").filter((line) => /kasumi|kagamifs/i.test(line)).slice(-lines).join("\n");
     }
-
     const target = !logPath || logPath === "system" ? PATHS.DEFAULT_LOG : logPath;
-    const result = await exec(`[ -f '${shellEscape(target)}' ] && tail -n ${lines} '${shellEscape(target)}' || echo ""`);
-    if (result.errno === 0) {
-      return result.stdout || "";
-    }
-    throw new Error(apiOutput(result) || "failed to read logs");
+    validPath(target);
+    return (await checkedExec(`tail -n ${lines} '${shellEscape(target)}'`)).stdout;
   },
 
   async clearLogs() {
-    const result = await exec(`echo -n > '${shellEscape(PATHS.DEFAULT_LOG)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to clear logs");
-    }
+    await checkedExec(`printf '' > '${shellEscape(PATHS.DEFAULT_LOG)}'`);
   },
 
   async getStorageUsage() {
-    const result = await exec(`${PATHS.BINARY} api storage`);
-    const out = apiOutput(result);
-    if (result.errno === 0 && out) {
-      const data = JSON.parse(out);
-      if (!data.error) {
-        return {
-          size: data.size || "-",
-          used: data.used || "-",
-          avail: data.avail || "-",
-          percent: typeof data.percent === "number" ? data.percent : 0,
-          mode: data.mode || null,
-        };
-      }
-    }
-    return { size: "-", used: "-", avail: "-", percent: 0, mode: null };
+    const data = objectResponse(await execJson(`${PATHS.BINARY} api storage`));
+    if (data.error) throw new Error(String(data.error));
+    return {
+      ...data,
+      size: data.size || "-",
+      used: data.used || "-",
+      avail: data.avail || "-",
+      percent: typeof data.percent === "number" ? data.percent : null,
+      mode: data.mode || null,
+    };
   },
 
   async getSystemInfo() {
-    let kernel = "Unknown";
-
-    try {
-      const versionResult = await exec("cat /proc/version");
-      const stdout = String(versionResult.stdout || "");
-      const releaseMatch = stdout.match(/Linux version ([^\s]+)/);
-      if (releaseMatch) {
-        kernel = releaseMatch[1];
-      } else if (stdout.trim()) {
-        kernel = stdout.trim();
-      }
-    } catch (_error) {
-      // ignore
+    const [systemData, mountData] = await Promise.all([
+      execJson(`${PATHS.BINARY} api system`).then(objectResponse),
+      execJson(`${PATHS.BINARY} kasumi version`).then(objectResponse),
+    ]);
+    if (typeof systemData.kasumi_available !== "boolean" || typeof mountData.protocol_mismatch !== "boolean") {
+      throw new Error("Invalid Kasumi availability response");
     }
-
-    let selinux = "Unknown";
-    try {
-      const result = await exec("getenforce");
-      if (result.stdout) {
-        selinux = result.stdout.trim();
-      }
-    } catch (_error) {
-      // ignore
-    }
-
-    let systemData = {};
-    try {
-      systemData = await execJson(`${PATHS.BINARY} api system`, {});
-    } catch (_error) {
-      systemData = {};
-    }
-
-    let mountData = {};
-    try {
-      mountData = await execJson(`${PATHS.BINARY} kasumi version`, {});
-    } catch (_error) {
-      mountData = {};
-    }
-
+    const modules = arrayResponse(mountData.active_modules);
+    if (modules.some((id) => typeof id !== "string")) throw new Error("Invalid active module response");
     return {
-      kernel,
-      selinux,
+      kernel: systemData.kernel || "",
+      selinux: systemData.selinux || "",
       mountBase: systemData.mount_base || mountData.mount_base || "",
       kasumiAvailable: systemData.kasumi_available,
       kasumiStatus: systemData.kasumi_status,
-      kasumiModules: mountData.active_modules || [],
-      kasumiMismatch: mountData.protocol_mismatch || false,
-      mismatchMessage: mountData.mismatch_message,
-      hooks: systemData.hooks || mountData.hooks || "",
+      kasumiModules: modules,
+      kasumiMismatch: mountData.protocol_mismatch,
+      mismatchMessage: mountData.mismatch_message || "",
+      hooks: systemData.hooks || "",
       features: systemData.features,
       mountStats: systemData.mountStats,
       detectedPartitions: systemData.detectedPartitions,
+      backends: systemData.backends,
     };
   },
 
   async hotMount(moduleId) {
-    const result = await exec(`${PATHS.BINARY} module hot-mount '${shellEscape(moduleId)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "hot mount failed");
-    }
+    validModuleId(moduleId);
+    await checkedExec(`${PATHS.BINARY} module hot-mount '${shellEscape(moduleId)}'`);
   },
 
   async hotUnmount(moduleId) {
-    const result = await exec(`${PATHS.BINARY} module hot-unmount '${shellEscape(moduleId)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "hot unmount failed");
-    }
+    validModuleId(moduleId);
+    await checkedExec(`${PATHS.BINARY} module hot-unmount '${shellEscape(moduleId)}'`);
   },
 
   async getUserHideRules() {
-    const result = await exec(`${PATHS.BINARY} hide list`);
-    const out = apiOutput(result);
-    if (result.errno === 0 && out) {
-      try {
-        const parsed = JSON.parse(out);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      } catch (_error) {
-        return out
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line.startsWith("/"));
-      }
-    }
-    return [];
+    const paths = arrayResponse(await execJson(`${PATHS.BINARY} hide list`));
+    if (paths.some((path) => typeof path !== "string" || !path.startsWith("/"))) throw new Error("Invalid saved hide rule response");
+    return paths;
   },
 
   async getAllRules() {
-    const [userRules, output] = await Promise.all([this.getUserHideRules(), exec(`${PATHS.BINARY} kasumi list`)]);
+    const status = objectResponse(await execJson(`${PATHS.BINARY} api system`));
+    if (status.kasumi_available !== true) throw new Error("Active rules are unavailable while Kasumi cannot be queried");
+    const [userRules, data] = await Promise.all([
+      this.getUserHideRules(),
+      execJson(`${PATHS.BINARY} kasumi list`),
+    ]);
     const userSet = new Set(userRules);
     const rules = [];
-    const out = apiOutput(output);
-
-    if (output.errno === 0 && out) {
-      let parsed = false;
-      try {
-        const data = JSON.parse(out);
-        if (Array.isArray(data)) {
-          parsed = true;
-          data.forEach((rule) => {
-            if (rule.type === "INJECT") {
-              return;
-            }
-            const path = rule.path ?? rule.target ?? "";
-            rules.push({
-              type: rule.type || "UNKNOWN",
-              path,
-              target: rule.target,
-              source: rule.source,
-              isUserDefined: rule.type === "HIDE" && path && userSet.has(path),
-            });
-          });
-        }
-      } catch (_error) {
-        parsed = false;
+    let enabled = true;
+    for (const value of arrayResponse(data)) {
+      const rule = objectResponse(value);
+      if (typeof rule.type !== "string") throw new Error("Invalid active rule response");
+      // The native CLI also returns protocol, enablement and feature metadata.
+      // A disabled kernel can retain rules without applying them.
+      if (rule.type === "KASUMI") {
+        const state = /^Enabled:\s*([01])$/.exec(rule.args);
+        if (state) enabled = state[1] === "1";
+        continue;
       }
-
-      if (!parsed) {
-        out.split("\n").forEach((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) {
-            return;
-          }
-          if (trimmed.startsWith("hide ")) {
-            const path = trimmed.slice(5).trim();
-            if (path) {
-              rules.push({ type: "HIDE", path, isUserDefined: userSet.has(path) });
-            }
-            return;
-          }
-
-          const parts = trimmed.split(/\s+/);
-          const type = String(parts[0] || "").toUpperCase();
-          if (type === "INJECT") {
-            return;
-          }
-          if (type === "MERGE" || type === "ADD") {
-            rules.push({ type, path: parts[1] || "", source: parts[2], isUserDefined: false });
-          } else {
-            rules.push({ type, path: parts.slice(1).join(" "), isUserDefined: false });
-          }
-        });
+      if (!["ADD", "MERGE", "HIDE"].includes(rule.type)) continue;
+      const path = rule.path ?? rule.target;
+      if (typeof path !== "string" || !path.startsWith("/") ||
+          (rule.type !== "HIDE" && (typeof rule.source !== "string" || !rule.source.startsWith("/")))) {
+        throw new Error("Invalid active rule response");
       }
+      rules.push({ ...rule, path, isUserDefined: rule.type === "HIDE" && userSet.has(path), active: true });
     }
-
-    return rules;
+    return enabled ? rules : [];
   },
 
   async addUserHideRule(path) {
-    const result = await exec(`${PATHS.BINARY} hide add '${shellEscape(path)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to add hide rule");
-    }
+    validPath(path);
+    await checkedExec(`${PATHS.BINARY} hide add '${shellEscape(path)}'`);
+    // The CLI guarantees persistence, not kernel acceptance. Only a separate
+    // active-rule read can confirm that the rule is currently observed.
+    return { persisted: true };
   },
 
   async removeUserHideRule(path) {
-    const result = await exec(`${PATHS.BINARY} hide remove '${shellEscape(path)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to remove hide rule");
-    }
+    validPath(path);
+    await checkedExec(`${PATHS.BINARY} hide remove '${shellEscape(path)}'`);
+    return { persisted: true };
   },
 
   async getLkmStatus() {
-    const result = await exec(`${PATHS.BINARY} api lkm`);
-    const out = apiOutput(result);
-    if (result.errno !== 0 || !out) {
-      return { valid: false, loaded: false, autoload: false, kmi_override: "" };
-    }
-    let data;
-    try {
-      data = JSON.parse(out);
-    } catch (_error) {
-      return { valid: false, loaded: false, autoload: false, kmi_override: "" };
-    }
-    return {
-      valid: true,
-      loaded: data.loaded === true,
-      autoload: data.autoload === true,
-      kmi_override: data.kmi_override || "",
-    };
+    const data = objectResponse(await execJson(`${PATHS.BINARY} api lkm`));
+    if (typeof data.loaded !== "boolean" && data.builtin !== true) throw new Error("Invalid LKM status response");
+    return { ...data, valid: true };
   },
 
   async lkmSetKmi(kmi) {
-    const result = await exec(`${PATHS.BINARY} lkm set-kmi '${shellEscape(kmi)}'`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to set KMI override");
-    }
+    if (typeof kmi !== "string" || !/^android\d+-\d+\.\d+$/.test(kmi)) throw new Error("Invalid KMI; expected android14-6.1 format");
+    await checkedExec(`${PATHS.BINARY} lkm set-kmi '${shellEscape(kmi)}'`);
   },
 
   async lkmClearKmi() {
-    const result = await exec(`${PATHS.BINARY} lkm clear-kmi`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to clear KMI override");
-    }
+    await checkedExec(`${PATHS.BINARY} lkm clear-kmi`);
   },
 
   async lkmLoad() {
-    const result = await exec(`${PATHS.BINARY} lkm load`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to load LKM");
-    }
+    await checkedExec(`${PATHS.BINARY} lkm load`);
   },
 
   async lkmUnload() {
-    const result = await exec(`${PATHS.BINARY} lkm unload`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to unload LKM");
-    }
+    await checkedExec(`${PATHS.BINARY} lkm unload`);
   },
 
   async lkmSetAutoload(on) {
-    const result = await exec(`${PATHS.BINARY} lkm set-autoload ${on ? "on" : "off"}`);
-    if (result.errno !== 0) {
-      throw new Error(apiOutput(result) || "failed to set autoload");
-    }
+    if (typeof on !== "boolean") throw new Error("Autoload must be a boolean");
+    await checkedExec(`${PATHS.BINARY} lkm set-autoload ${on ? "on" : "off"}`);
   },
 };
+
+for (const implementation of [mockApi, realApi]) {
+  implementation.loadUserHideRules = implementation.getUserHideRules;
+  implementation.loadAllRules = implementation.getAllRules;
+}
 
 export const api = runtimeMode === "mock" ? mockApi : realApi;

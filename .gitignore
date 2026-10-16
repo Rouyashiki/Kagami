@@ -73,6 +73,7 @@ Testing/
 .cache/
 
 # WebUI and package outputs
+tools/webui/node_modules/
 webui/node_modules/
 webui/dist/
 module/webroot/
