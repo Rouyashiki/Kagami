@@ -5,6 +5,7 @@
 #include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
 #include "kagami/kasumi_uapi.h"
+#include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 
 #include <dirent.h>
@@ -175,10 +176,12 @@ std::vector<std::string> user_hide_rules() {
 struct RuleBatch {
     struct Mapping {
         std::string path, source;
-        bool merge;
+        bool merge = false;
+        std::string owner;
     };
     std::vector<Mapping> mappings;
     std::set<std::string> hide;
+    std::map<std::string, std::set<std::string>> hide_owners;
 };
 
 bool merge_tree_supported(const fs::path& root) {
@@ -207,7 +210,8 @@ bool merge_tree_supported(const fs::path& root) {
 }
 
 bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
-                  const std::vector<ModuleRule>& rules, RuleBatch& batch) {
+                  const std::vector<ModuleRule>& rules, RuleBatch& batch,
+                  const std::string& owner) {
     std::error_code ec;
     if (!fs::is_directory(source_root, ec)) {
         return !ec || ec == std::errc::no_such_file_or_directory;
@@ -231,6 +235,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
         std::string mode = effective_mode(virtual_path, rules);
         if (mode == "hide") {
             batch.hide.insert(virtual_path);
+            batch.hide_owners[virtual_path].insert(owner);
             if (it->is_directory(ec)) {
                 it.disable_recursion_pending();
             }
@@ -261,6 +266,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
         }
         if (S_ISCHR(st.st_mode) && major(st.st_rdev) == 0 && minor(st.st_rdev) == 0) {
             batch.hide.insert(virtual_path);
+            batch.hide_owners[virtual_path].insert(owner);
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
@@ -269,7 +275,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
                 !has_nested_rule(virtual_path, rules)) {
                 if (!merge_tree_supported(source))
                     return false;
-                batch.mappings.push_back({virtual_path, source.string(), true});
+                batch.mappings.push_back({virtual_path, source.string(), true, owner});
                 it.disable_recursion_pending();
             }
             continue;
@@ -305,7 +311,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
                     return false;
                 }
             }
-            batch.mappings.push_back({virtual_path, source.string(), false});
+            batch.mappings.push_back({virtual_path, source.string(), false, owner});
         }
     }
     if (ec) {
@@ -449,6 +455,9 @@ bool deactivate(std::string& error) {
 
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
                    const ModuleRuleMap& rules) {
+    // All kernel mutation remains in the existing order. These records only
+    // attribute the rules; readback, including the enabled gate, decides status.
+    (void)module_runtime::record_rules({}, false);
     if (!::kagami::kasumi::is_available()) {
         mlog("kasumi: backend requested but protocol is unavailable");
         return false;
@@ -468,6 +477,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
             fs::remove(active_file(), ec);
             mlog("kasumi: one or more persistent hide rules failed", logging::Level::Error);
         }
+        (void)module_runtime::record_rules({}, true);
         return ok;
     }
 
@@ -485,7 +495,9 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
         for (const auto& rule : module_rules) {
             if (rule.mode == "hide" && !rule.path.empty() && rule.path.front() == '/') {
-                batch.hide.insert(resolve_virtual_path(rule.path));
+                const auto path = resolve_virtual_path(rule.path);
+                batch.hide.insert(path);
+                batch.hide_owners[path].insert(module.id);
             }
         }
     }
@@ -499,7 +511,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
         const fs::path source = it->path;
         for (const auto& partition : partitions) {
-            if (!compile_tree(source / partition, "/" + partition, module_rules, batch))
+            if (!compile_tree(source / partition, "/" + partition, module_rules, batch, it->id))
                 return false;
         }
     }
@@ -507,14 +519,34 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     bool ok = true;
     size_t add_count = 0;
     size_t merge_count = 0;
+    std::map<std::string, RuleBatch::Mapping> expected_add;
+    std::map<std::string, RuleBatch::Mapping> installed_add;
+    std::vector<module_runtime::RuleEvidence> evidence;
     for (const auto& rule : batch.mappings) {
+        if (rule.merge) {
+            // MERGE retains distinct (target, source) pairs in the kernel.
+            evidence.push_back({"MERGE", rule.path, rule.source, {rule.owner}});
+        } else {
+            expected_add[rule.path] = rule;
+        }
         const bool added = rule.merge ? ::kagami::kasumi::add_merge_rule(rule.path, rule.source)
                                       : ::kagami::kasumi::add_rule(rule.path, rule.source, 0);
+        if (added && !rule.merge) {
+            installed_add[rule.path] = rule;
+        }
         rule.merge ? ++merge_count : ++add_count;
         mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path + " source=" +
                  rule.source + (added ? " ok" : " failed errno=" + std::to_string(errno)),
              added ? logging::Level::Debug : logging::Level::Error);
         ok = added && ok;
+    }
+    for (const auto& [path, rule] : expected_add) {
+        evidence.push_back({"ADD", path, rule.source, {rule.owner}});
+        const auto installed = installed_add.find(path);
+        if (installed != installed_add.end() && installed->second.source != rule.source) {
+            // A failed replacement may leave the earlier module's rule alive.
+            evidence.push_back({"ADD", path, installed->second.source, {installed->second.owner}});
+        }
     }
     for (const auto& path : persisted_hide_rules) {
         batch.hide.insert(path);
@@ -525,6 +557,10 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
              hidden ? logging::Level::Debug : logging::Level::Error);
         ok = hidden && ok;
     }
+    for (const auto& [path, owners] : batch.hide_owners) {
+        evidence.push_back({"HIDE", path, "", {owners.begin(), owners.end()}});
+    }
+    (void)module_runtime::record_rules(evidence, true);
     std::error_code ec;
     fs::create_directories(active_file().parent_path(), ec);
     if (ok && !write_boot_marker(active_file())) {

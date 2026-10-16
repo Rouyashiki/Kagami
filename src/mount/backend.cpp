@@ -8,6 +8,7 @@
 #include "kagami/kasumi_client.hpp"
 #include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
+#include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/overlayfs.hpp"
 #include "mount/storage.hpp"
@@ -501,7 +502,8 @@ void update_self_status(bool ok, std::size_t overlay, std::size_t magic, std::si
 }
 }  // namespace
 
-MountReport mount_all_enabled(const Config& config) {
+namespace {
+MountReport mount_all_enabled_impl(const Config& config) {
     MountReport report;
     fsutil::mlog("mount plan begin config=" + runtime_config_file().string());
 
@@ -533,6 +535,14 @@ MountReport mount_all_enabled(const Config& config) {
     }
     const auto modules = enumerate_mountable_modules(config);
     report.modules = static_cast<int>(modules.size());
+    // A claimed boot starts a fresh inventory. Backend-specific evidence is
+    // published by the child that performs the actual attachment.
+    std::vector<module_runtime::Assignment> assignments;
+    assignments.reserve(modules.size());
+    for (const auto& module : modules) {
+        assignments.push_back({module.id, "none"});
+    }
+    (void)module_runtime::assign_modules(assignments);
 
     // Bootloop protection: refuse to mount if previous boots never confirmed
     // completion, so a bad mount cannot brick boot. The counter is bumped here
@@ -594,8 +604,10 @@ MountReport mount_all_enabled(const Config& config) {
     std::vector<ModuleEntry> overlay_set;
     std::vector<ModuleEntry> magic_set;
     std::vector<ModuleEntry> kasumi_set;
+    assignments.clear();
     for (const auto& m : modules) {
         const std::string mode = resolve_module_backend(m, config, modes);
+        assignments.push_back({m.id, mode});
         fsutil::mlog("selected module=" + m.id + " backend=" + mode);
         if (mode == "overlay") {
             overlay_set.push_back(m);
@@ -606,6 +618,7 @@ MountReport mount_all_enabled(const Config& config) {
         }
         // "none" → skip
     }
+    (void)module_runtime::assign_modules(assignments);
 
     fsutil::mlog("orchestrator: overlay=" + std::to_string(overlay_set.size()) + " magic=" +
                  std::to_string(magic_set.size()) + " kasumi=" + std::to_string(kasumi_set.size()));
@@ -679,9 +692,19 @@ MountReport mount_all_enabled(const Config& config) {
     return report;
 }
 
+}  // namespace
+
+MountReport mount_all_enabled(const Config& config) {
+    module_runtime::Operation operation;
+    auto report = mount_all_enabled_impl(config);
+    operation.finish(report.ok);
+    return report;
+}
+
 bool unmount_all(const Config& config) {
+    module_runtime::Operation operation;
     // Unwind the hybrid plan from its topmost backend.
-    return fsutil::run_in_init_mount_ns([&]() {
+    const bool ok = fsutil::run_in_init_mount_ns([&]() {
         bool r = true;
         r = kasumi::unmount_all(config) && r;
         r = overlay::unmount_all(config) && r;
@@ -689,9 +712,12 @@ bool unmount_all(const Config& config) {
         r = storage::teardown_shared(config) && r;
         return r;
     });
+    operation.finish(ok);
+    return ok;
 }
 
-bool refresh_kasumi_modules(const Config& config) {
+namespace {
+bool refresh_kasumi_modules_impl(const Config& config) {
     if (!config.kasumi_enabled) {
         if (!::kagami::kasumi::module_loaded() && !::kagami::kasumi::is_available()) {
             return true;
@@ -721,11 +747,18 @@ bool refresh_kasumi_modules(const Config& config) {
             selected.push_back(module);
         }
     }
+    std::vector<module_runtime::Assignment> assignments;
+    assignments.reserve(selected.size());
+    for (const auto& module : selected) {
+        assignments.push_back({module.id, "kasumi"});
+    }
     const auto rules = load_module_rules();
     std::string error;
     const bool prepare_ok = kasumi::deactivate(error);
     if (!prepare_ok) {
         fsutil::mlog("kasumi: reset before refresh failed: " + error, logging::Level::Error);
+    } else {
+        (void)module_runtime::assign_modules(assignments, "kasumi");
     }
     const bool mount_ok = prepare_ok && fsutil::run_in_init_mount_ns([&]() {
                               return kasumi::mount_modules(selected, config, rules);
@@ -743,6 +776,15 @@ bool refresh_kasumi_modules(const Config& config) {
         std::string cleanup_error;
         (void)kasumi::deactivate(cleanup_error);
     }
+    return ok;
+}
+
+}  // namespace
+
+bool refresh_kasumi_modules(const Config& config) {
+    module_runtime::Operation operation;
+    const bool ok = refresh_kasumi_modules_impl(config);
+    operation.finish(ok);
     return ok;
 }
 

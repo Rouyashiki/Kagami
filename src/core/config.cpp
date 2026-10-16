@@ -1,5 +1,6 @@
 #include "kagami/config.hpp"
 #include <algorithm>
+#include <array>
 #include <iterator>
 
 #include "core/json_value.hpp"
@@ -317,16 +318,41 @@ bool parse_config_json(const std::string& json, Config& config, std::string& err
     return true;
 }
 
-bool read_config_file(const std::string& path, Config& config, std::string& error) {
+bool read_config_json(const std::string& path, std::string& json, std::string& error,
+                      bool allow_missing) {
+    json.clear();
+    error.clear();
     std::ifstream in(path, std::ios::binary);
     if (!in) {
+        if (allow_missing && errno == ENOENT) {
+            json = default_config_json();
+            return true;
+        }
         error = "open " + path + ": " + std::strerror(errno);
         return false;
     }
-    std::ostringstream buffer;
-    std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
-              std::ostreambuf_iterator<char>(buffer));
-    return parse_config_json(buffer.str(), config, error);
+    std::array<char, 4096> buffer{};
+    while (in.read(buffer.data(), buffer.size()))
+        json.append(buffer.data(), buffer.size());
+    json.append(buffer.data(), static_cast<std::size_t>(in.gcount()));
+    if (!in.eof() || in.bad()) {
+        error = "incomplete config read: " + path;
+        json.clear();
+        return false;
+    }
+    JsonValue root;
+    if (!parse_json(json, root, error) || !root.is_object()) {
+        if (error.empty())
+            error = "config root must be an object";
+        json.clear();
+        return false;
+    }
+    return true;
+}
+
+bool read_config_file(const std::string& path, Config& config, std::string& error) {
+    std::string json;
+    return read_config_json(path, json, error) && parse_config_json(json, config, error);
 }
 
 bool merge_config_json(const std::string& path, const std::string& updates, std::string& error) {
@@ -347,16 +373,11 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
         return false;
     }
 
-    std::ifstream in(path, std::ios::binary);
-    std::ostringstream input;
-    if (in) {
-        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
-                  std::ostreambuf_iterator<char>(input));
-    } else {
-        input << default_config_json();
-    }
+    std::string input;
+    if (!read_config_json(path, input, error, true))
+        return false;
     JsonValue root;
-    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+    if (!parse_json(input, root, error) || !root.is_object()) {
         if (error.empty()) {
             error = "config root must be an object";
         }
@@ -422,16 +443,11 @@ bool update_lkm_autoload_config(const std::string& path, bool enabled, std::stri
     if (!lock.acquire(path, error)) {
         return false;
     }
-    std::ifstream in(path, std::ios::binary);
-    std::ostringstream input;
-    if (in) {
-        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
-                  std::ostreambuf_iterator<char>(input));
-    } else {
-        input << default_config_json();
-    }
+    std::string input;
+    if (!read_config_json(path, input, error, true))
+        return false;
     JsonValue root;
-    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+    if (!parse_json(input, root, error) || !root.is_object()) {
         if (error.empty()) {
             error = "config root must be an object";
         }
@@ -451,16 +467,11 @@ bool update_policy_config(const std::string& path, const PolicyConfig& policy, s
     if (!lock.acquire(path, error)) {
         return false;
     }
-    std::ifstream in(path, std::ios::binary);
-    std::ostringstream input;
-    if (in) {
-        std::copy(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>(),
-                  std::ostreambuf_iterator<char>(input));
-    } else {
-        input << default_config_json();
-    }
+    std::string input;
+    if (!read_config_json(path, input, error, true))
+        return false;
     JsonValue root;
-    if (!parse_json(input.str(), root, error) || !root.is_object()) {
+    if (!parse_json(input, root, error) || !root.is_object()) {
         if (error.empty()) {
             error = "config root must be an object";
         }

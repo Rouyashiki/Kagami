@@ -30,6 +30,13 @@ struct FeatureCapabilities {
     bool quiesce = false;
 };
 
+struct ActiveRulesSnapshot {
+    bool ok = false;
+    int last_errno = 0;
+    bool enabled = false;
+    std::string text;
+};
+
 enum class QuiesceState : std::uint32_t {
     Active = 0,
     Draining = 1,
@@ -103,6 +110,9 @@ bool module_loaded();
 void set_connection_persistent(bool persistent);
 void release_connection();
 std::string active_rules();
+// A failed or truncated list must never be interpreted as an empty rule set.
+ActiveRulesSnapshot read_active_rules();
+ActiveRulesSnapshot decode_active_rules(const std::string& text);
 std::string hooks();
 FeatureCapabilities feature_capabilities();
 int features();

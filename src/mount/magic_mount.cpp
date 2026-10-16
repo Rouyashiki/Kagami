@@ -1,6 +1,7 @@
 #include "mount/magic_mount.hpp"
 
 #include "core/runtime.hpp"
+#include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 
 #include <dirent.h>
@@ -48,11 +49,15 @@ struct Node {
     NType type = NType::Directory;
     std::map<std::string, Node> children;
     std::string module_path;  // backing module file; "" if mirror-only / root
-    bool replace = false;     // opaque dir (.replace / trusted.overlay.opaque)
+    std::string owner;
+    std::string replace_owner;
+    bool replace = false;  // opaque dir (.replace / trusted.overlay.opaque)
 };
 
 struct Walk {
     std::vector<std::string> committed;  // mount points to record for teardown
+    std::vector<module_runtime::MountContribution> observations;
+    std::vector<std::size_t> pending_binds;
     int files = 0;
     int tmpfs_dirs = 0;
     int symlinks = 0;
@@ -140,7 +145,7 @@ bool clone_symlink(const std::string& src, const std::string& dst) {
 }
 
 // Higher-priority entries win; opaque directories stop lower-layer merging.
-bool collect_into(Node& parent, const std::string& dir) {
+bool collect_into(Node& parent, const std::string& dir, const std::string& owner) {
     const std::unique_ptr<DIR, decltype(&closedir)> directory(opendir(dir.c_str()), closedir);
     if (!directory)
         scan_error("cannot scan " + dir + ": " + std::strerror(errno));
@@ -170,19 +175,25 @@ bool collect_into(Node& parent, const std::string& dir) {
             }
             if (type != NType::Directory) {
                 node.replace = true;
+                node.replace_owner = owner;
                 has = true;
                 continue;
             }
             node.replace = dir_is_replace(path);
-            has = collect_into(node, path) || node.replace || has;
+            if (node.replace)
+                node.replace_owner = owner;
+            has = collect_into(node, path, owner) || node.replace || has;
         } else {
             Node node;
             node.name = name;
             node.type = type;
             node.module_path = path;
+            node.owner = owner;
             if (type == NType::Directory) {
                 node.replace = dir_is_replace(path);
-                collect_into(node, path);
+                if (node.replace)
+                    node.replace_owner = owner;
+                collect_into(node, path, owner);
             }
             has = true;
             parent.children.emplace(name, std::move(node));
@@ -214,7 +225,7 @@ std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules
             scan_error("module system entry is not a directory: " + ms);
         if (dir_is_replace(ms))
             scan_error("partition-root replacement is unsupported: " + ms);
-        has |= collect_into(system, ms);
+        has |= collect_into(system, ms, m.id);
     }
     if (!has) {
         return std::nullopt;
@@ -235,6 +246,7 @@ std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules
             system.children.erase(it);
             // Partition roots are not replaced wholesale; existing files can be bound individually.
             moved.module_path.clear();
+            moved.owner.clear();
             moved.replace = false;
             root.children.emplace(part, std::move(moved));
         }
@@ -344,6 +356,26 @@ bool mount_mirror(const std::string& real, const std::string& work, const std::s
 bool do_mount(Node& node, const std::string& real, const std::string& work, bool has_tmpfs,
               Walk& w);
 
+// Run before the walk consumes children. Directory metadata inherited from
+// stock is not a module contribution; replacement and newly added directories
+// are, as are symlink/whiteout nodes. File binds have independent identities.
+void contribution_owners(const Node& node, const std::string& real, std::set<std::string>& owners) {
+    struct stat st{};
+    const bool exists = lstat(real.c_str(), &st) == 0;
+    if (node.type != NType::Directory) {
+        if (node.type != NType::Regular && !node.owner.empty() &&
+            (node.type != NType::Whiteout || exists))
+            owners.insert(node.owner);
+        return;
+    }
+    if (node.replace && !node.replace_owner.empty())
+        owners.insert(node.replace_owner);
+    if ((!exists || !S_ISDIR(st.st_mode)) && !node.owner.empty())
+        owners.insert(node.owner);
+    for (const auto& [name, child] : node.children)
+        contribution_owners(child, join(real, name), owners);
+}
+
 bool do_directory(Node& node, const std::string& real, const std::string& work, bool has_tmpfs,
                   Walk& w) {
     struct stat real_stat{};
@@ -401,6 +433,13 @@ bool do_directory(Node& node, const std::string& real, const std::string& work, 
     }
 
     const bool now_tmpfs = tmpfs || has_tmpfs;
+    const auto observation_index = w.observations.size();
+    const auto pending_start = w.pending_binds.size();
+    if (tmpfs) {
+        std::set<std::string> owners;
+        contribution_owners(node, real, owners);
+        w.observations.push_back({real, {owners.begin(), owners.end()}, false, false, {}});
+    }
     if (now_tmpfs && !tmpfs_skeleton(real, work, node)) {
         return false;
     }
@@ -467,6 +506,13 @@ bool do_directory(Node& node, const std::string& real, const std::string& work, 
             return false;
         }
         w.committed.push_back(real);
+        w.observations[observation_index].committed = true;
+        // Moving the skeleton gives its payload binds their final mountpoints.
+        // Keep those identities separate from the directory they share.
+        for (std::size_t i = pending_start; i < w.pending_binds.size(); ++i) {
+            w.observations[w.pending_binds[i]].committed = true;
+        }
+        w.pending_binds.resize(pending_start);
         if (::mount("none", real.c_str(), nullptr, MS_PRIVATE | MS_REC, nullptr) != 0)
             return false;
         ++w.tmpfs_dirs;
@@ -506,13 +552,19 @@ bool do_mount(Node& node, const std::string& real, const std::string& work, bool
                 return false;
             }
         }
+        const auto observation_index = w.observations.size();
+        w.observations.push_back({real, {node.owner}, false, false, {}});
         if (!fsutil::bind_mount(node.module_path, target)) {
             mlog("magic: bind " + node.module_path + " -> " + target + ": " + std::strerror(errno),
                  logging::Level::Error);
             return false;
         }
-        if (!has_tmpfs)
+        if (!has_tmpfs) {
             w.committed.push_back(target);
+            w.observations[observation_index].committed = true;
+        } else {
+            w.pending_binds.push_back(observation_index);
+        }
         if (::mount(nullptr, target.c_str(), nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY, nullptr) !=
             0) {
             mlog("magic: readonly remount failed: " + target, logging::Level::Error);
@@ -658,6 +710,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
 
     auto root = collect_module_files(modules, config.partitions);
     if (!root) {
+        (void)module_runtime::record_mounts("magic", {}, true);
         mlog("magic: no module files to mount");
         return true;
     }
@@ -678,16 +731,20 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
 
     Walk w;
     bool ok = do_mount(*root, "/", work, false, w);
+    module_runtime::capture_mounts(w.observations);
     w.committed.push_back(work);
 
     if (!save_mounts(w.committed)) {
-        (void)rollback(w.committed);
+        const bool cleaned = rollback(w.committed);
+        (void)module_runtime::record_mounts("magic", w.observations, cleaned);
         return false;
     }
     for (const auto& m : w.committed)
         ok = ksu_umount_add(m) && ok;
+    bool cleaned = false;
     if (!ok)
-        (void)unmount_all(config);
+        cleaned = unmount_all(config);
+    (void)module_runtime::record_mounts("magic", w.observations, ok || cleaned);
     mlog("magic: files=" + std::to_string(w.files) + " skeletons=" + std::to_string(w.tmpfs_dirs) +
          " symlinks=" + std::to_string(w.symlinks));
     return ok;

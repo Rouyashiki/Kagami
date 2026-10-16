@@ -61,8 +61,9 @@ bool save_module_rules(const ModuleRuleMap& rules);
 
 // Resolve a module's effective backend ("overlay"|"magic"|"kasumi"|"none") from
 // its configured mode (modes[id], the global override config.mount_backend, or
-// the auto fallback). Used by the orchestrator and to report a module's actual
-// mount method. `modes` is the parsed module_mode.json (id -> mode).
+// the auto fallback). Used by the orchestrator and legacy strategy reporting;
+// this resolves configuration and does not inspect a module's live mounts.
+// `modes` is the parsed module_mode.json (id -> mode).
 std::string resolve_module_backend(const ModuleEntry& module, const Config& config,
                                    const ModuleModeMap& modes);
 

@@ -14,6 +14,7 @@
 #include "mount/backend.hpp"
 #include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
+#include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/overlayfs.hpp"
 #include "mount/storage.hpp"
@@ -24,6 +25,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -928,8 +930,13 @@ int print_kasumi_version_json() {
 }
 
 int print_kasumi_rules_json() {
-    const std::string rules = kasumi::active_rules();
-    std::istringstream lines(rules);
+    const auto rules = kasumi::read_active_rules();
+    if (!rules.ok) {
+        errno = rules.last_errno != 0 ? rules.last_errno : EIO;
+        std::cerr << "failed to read complete Kasumi rules: " << std::strerror(errno) << '\n';
+        return 1;
+    }
+    std::istringstream lines(rules.text);
     std::string line;
     bool first = true;
 
@@ -978,9 +985,11 @@ int print_kasumi_rules_json() {
 int handle_config(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "show") {
-        std::string config = read_file(config_file());
-        if (config.empty()) {
-            config = default_config_json();
+        std::string config;
+        std::string error;
+        if (!read_config_json(config_file().string(), config, error, true)) {
+            std::cerr << error << '\n';
+            return 1;
         }
         // Inject runtime-probed fields the WebUI reads from the merged config.
         std::string runtime = ",\"tmpfs_xattr_supported\":";
@@ -1160,6 +1169,8 @@ int handle_api(const std::vector<std::string>& args) {
 int handle_module(const std::vector<std::string>& args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "list") {
+        const bool include_inactive =
+            std::find(args.begin() + 2, args.end(), "--include-inactive") != args.end();
         const auto modes = mount::load_module_modes();
         const auto rule_map = mount::load_module_rules();
         const auto replayable = mount::kasumi::replayable_module_ids();
@@ -1167,85 +1178,119 @@ int handle_module(const std::vector<std::string>& args) {
         const Config cfg = current_config();
         const fs::path module_root =
             cfg.module_dir.empty() ? modules_dir() : fs::path(cfg.module_dir);
+        const auto snapshot = mount::module_runtime::read_snapshot([]() {
+            mount::module_runtime::KasumiObservation observation;
+            const auto rules = kasumi::read_active_rules();
+            observation.ok = rules.ok;
+            observation.enabled = rules.enabled;
+            observation.text = rules.text;
+            if (!rules.ok) {
+                observation.error_code = rules.last_errno == EOVERFLOW ? "kasumi_rules_truncated"
+                                                                       : "kasumi_rules_unreadable";
+                observation.error = std::strerror(rules.last_errno != 0 ? rules.last_errno : EIO);
+            }
+            return observation;
+        });
+        std::map<std::string, fs::path> candidates;
+        std::error_code ec;
+        if (fs::is_directory(module_root, ec)) {
+            for (fs::directory_iterator entry(module_root, ec), end; entry != end && !ec;
+                 entry.increment(ec)) {
+                const bool directory = entry->is_directory(ec);
+                if (ec == std::errc::no_such_file_or_directory) {
+                    // A removed entry or dangling link is not a module. Do not
+                    // truncate the rest of the inventory on this race.
+                    ec.clear();
+                    continue;
+                }
+                if (ec) {
+                    break;
+                }
+                if (directory) {
+                    candidates.emplace(entry->path().filename().string(), entry->path());
+                }
+            }
+        }
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            std::cerr << "failed to read module directory: " << ec.message() << '\n';
+            return 1;
+        }
+        if (include_inactive) {
+            for (const auto& [id, runtime] : snapshot.modules) {
+                (void)runtime;
+                if (valid_module_id(id)) {
+                    candidates.emplace(id, module_root / id);
+                }
+            }
+        }
         std::cout << "{\"modules\":[";
         bool first = true;
-        if (fs::is_directory(module_root)) {
-            for (const auto& entry : fs::directory_iterator(module_root)) {
-                if (!entry.is_directory()) {
-                    continue;
-                }
-                // Skip modules that opt out of metamodule mounting.
-                std::error_code mec;
-                if (fs::exists(entry.path() / "disable", mec) ||
-                    fs::exists(entry.path() / "remove", mec) ||
-                    fs::exists(entry.path() / "skip_mount", mec) ||
-                    fs::exists(data_dir() / "run" / "hot_unmounted" / entry.path().filename(),
-                               mec) ||
-                    !fs::exists(entry.path() / "module.prop", mec)) {
-                    continue;
-                }
-                // Only list modules that contribute mounts (have a managed
-                // partition tree); skip plain modules (zygisk, etc.).
-                bool has_mount_content = false;
-                const std::vector<std::string>& parts =
-                    cfg.partitions.empty() ? mount::fsutil::managed_partitions() : cfg.partitions;
-                for (const auto& part : parts) {
-                    std::error_code ec;
-                    if (fs::is_directory(entry.path() / part, ec)) {
-                        has_mount_content = true;
-                        break;
-                    }
-                }
-                if (!has_mount_content) {
-                    continue;
-                }
-                const std::string id = entry.path().filename().string();
-                const auto props = read_prop_file(entry.path() / "module.prop");
-                if (!first) {
-                    std::cout << ",";
-                }
-                first = false;
-                const auto mode_it = modes.find(id);
-                const std::string mode = mode_it == modes.end() ? "auto" : mode_it->second;
-                const auto rules_it = rule_map.find(id);
-                // The same-boot plan is authoritative for Kasumi ownership.
-                // Without it, an explicit Kasumi choice may already be running
-                // through the boot-time Overlay/Magic fallback.
-                std::string strategy;
-                if (kasumi_boot_plan.count(id) != 0) {
-                    strategy = "kasumi";
-                } else {
-                    Config fallback_config = cfg;
-                    fallback_config.kasumi_enabled = false;
-                    strategy = mount::resolve_module_backend(mount::ModuleEntry{id, entry.path()},
-                                                             fallback_config, modes);
-                }
-                std::cout << "{"
-                          << "\"id\":" << json_quote(id) << ","
-                          << "\"name\":" << json_quote(props.count("name") ? props.at("name") : id)
-                          << ","
-                          << "\"version\":"
-                          << json_quote(props.count("version") ? props.at("version") : "") << ","
-                          << "\"author\":"
-                          << json_quote(props.count("author") ? props.at("author") : "") << ","
-                          << "\"description\":"
-                          << json_quote(props.count("description") ? props.at("description") : "")
-                          << ","
-                          << "\"mode\":" << json_quote(mode) << ","
-                          << "\"strategy\":" << json_quote(strategy) << ","
-                          << "\"path\":" << json_quote(entry.path().string()) << ","
-                          << "\"rules\":[";
-                if (rules_it != rule_map.end()) {
-                    for (std::size_t i = 0; i < rules_it->second.size(); ++i) {
-                        if (i > 0) {
-                            std::cout << ",";
-                        }
-                        std::cout << "{\"path\":" << json_quote(rules_it->second[i].path)
-                                  << ",\"mode\":" << json_quote(rules_it->second[i].mode) << "}";
-                    }
-                }
-                std::cout << "]}";
+        for (const auto& [id, module_path] : candidates) {
+            const auto recorded = snapshot.modules.find(id);
+            const bool has_runtime = recorded != snapshot.modules.end();
+            std::error_code mec;
+            const bool has_prop = fs::exists(module_path / "module.prop", mec);
+            const bool inactive = fs::exists(module_path / "disable", mec) ||
+                                  fs::exists(module_path / "remove", mec) ||
+                                  fs::exists(module_path / "skip_mount", mec) ||
+                                  fs::exists(data_dir() / "run" / "hot_unmounted" / id, mec);
+            if ((!include_inactive && inactive) ||
+                (!has_prop && !(include_inactive && has_runtime))) {
+                continue;
             }
+            bool has_mount_content = false;
+            const auto& parts =
+                cfg.partitions.empty() ? mount::fsutil::managed_partitions() : cfg.partitions;
+            for (const auto& part : parts) {
+                if (fs::is_directory(module_path / part, mec)) {
+                    has_mount_content = true;
+                    break;
+                }
+            }
+            if (!has_mount_content && !(include_inactive && has_runtime)) {
+                continue;
+            }
+            const auto props = read_prop_file(module_path / "module.prop");
+            const auto mode_it = modes.find(id);
+            const std::string mode = mode_it == modes.end() ? "auto" : mode_it->second;
+            const auto rules_it = rule_map.find(id);
+            // Compatibility field only. Actual runtime is reported separately.
+            std::string strategy;
+            if (kasumi_boot_plan.count(id) != 0) {
+                strategy = "kasumi";
+            } else {
+                Config fallback_config = cfg;
+                fallback_config.kasumi_enabled = false;
+                strategy = mount::resolve_module_backend(mount::ModuleEntry{id, module_path},
+                                                         fallback_config, modes);
+            }
+            if (!first) {
+                std::cout << ',';
+            }
+            first = false;
+            std::cout << "{\"id\":" << json_quote(id)
+                      << ",\"name\":" << json_quote(props.count("name") ? props.at("name") : id)
+                      << ",\"version\":"
+                      << json_quote(props.count("version") ? props.at("version") : "")
+                      << ",\"author\":"
+                      << json_quote(props.count("author") ? props.at("author") : "")
+                      << ",\"description\":"
+                      << json_quote(props.count("description") ? props.at("description") : "")
+                      << ",\"mode\":" << json_quote(mode)
+                      << ",\"strategy\":" << json_quote(strategy) << ",\"runtime\":"
+                      << mount::module_runtime::summary_json(has_runtime ? recorded->second
+                                                                         : snapshot.missing)
+                      << ",\"path\":" << json_quote(module_path.string()) << ",\"rules\":[";
+            if (rules_it != rule_map.end()) {
+                for (std::size_t i = 0; i < rules_it->second.size(); ++i) {
+                    if (i > 0) {
+                        std::cout << ',';
+                    }
+                    std::cout << "{\"path\":" << json_quote(rules_it->second[i].path)
+                              << ",\"mode\":" << json_quote(rules_it->second[i].mode) << '}';
+                }
+            }
+            std::cout << "]}";
         }
         std::cout << "]}\n";
         return 0;
@@ -1840,7 +1885,8 @@ int handle_recovery(const std::vector<std::string>& args) {
 }
 }  // namespace
 
-int run_command(const std::vector<std::string>& args) {
+namespace {
+int run_command_impl(const std::vector<std::string>& args) {
     if (!args.empty() && args[0] == "prepare") {
         std::string error;
         const bool ok = prepare_runtime(error) &&
@@ -1896,6 +1942,34 @@ int run_command(const std::vector<std::string>& args) {
 
     print_usage();
     return 1;
+}
+
+}  // namespace
+
+int run_command(const std::vector<std::string>& args) {
+    const auto sub = arg_or_default(args, 1, "");
+    const auto group = args.empty() ? std::string{} : args.front();
+    const auto policy_action = arg_or_default(args, 2, "show");
+    const bool module_mutation = group == "module" && sub != "list" && sub != "check-conflicts" &&
+                                 sub != "set-mode" && sub != "add-rule" && sub != "remove-rule";
+    const bool kasumi_mutation =
+        group == "kasumi" && sub != "version" && sub != "list" && sub != "features" &&
+        sub != "hooks" &&
+        !(sub == "policy" && (policy_action == "show" || policy_action == "state"));
+    const bool lkm_mutation = group == "lkm" && (sub == "load" || sub == "unload" ||
+                                                 sub == "force-unload" || sub == "autoload");
+    const bool changes_runtime = module_mutation || kasumi_mutation || lkm_mutation ||
+                                 (group == "config" && sub == "apply") ||
+                                 (group == "hide" && (sub == "add" || sub == "remove"));
+    if (!changes_runtime) {
+        return run_command_impl(args);
+    }
+    mount::module_runtime::Operation operation;
+    const int result = run_command_impl(args);
+    const int saved_errno = errno;
+    operation.finish(result == 0);
+    errno = saved_errno;
+    return result;
 }
 
 namespace {

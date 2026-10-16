@@ -6,6 +6,7 @@
 #include "core/runtime.hpp"
 #include "kagami/config.hpp"
 #include "kagami/kasumi_client.hpp"
+#include "mount/module_runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -536,7 +537,8 @@ std::string find_asset(const std::string& requested_kmi) {
     return "";
 }
 
-bool load() {
+namespace {
+bool load_impl() {
     g_last_error.clear();
     if (kasumi::is_available()) {
         logging::write(logging::Level::Info, "lkm",
@@ -590,6 +592,7 @@ bool load() {
     g_ready_unload_instance.clear();
     logging::write(logging::Level::Info, "lkm",
                    "loaded successfully; protocol and ownership verified");
+    (void)mount::module_runtime::assign_modules({}, "kasumi");
     return true;
 #else
     set_error("Kasumi LKM loading requires Android/Linux");
@@ -597,11 +600,23 @@ bool load() {
 #endif
 }
 
+}  // namespace
+
+bool load() {
+    mount::module_runtime::Operation operation;
+    const bool ok = load_impl();
+    const int saved_errno = errno;
+    operation.finish(ok);
+    errno = saved_errno;
+    return ok;
+}
+
 bool autoload() {
     return !get_autoload() || is_loaded() || kasumi::is_available() || load();
 }
 
-bool unload(bool require_ownership) {
+namespace {
+bool unload_impl(bool require_ownership) {
     logging::write(logging::Level::Info, "lkm",
                    "unload requested; require_ownership=" + std::to_string(require_ownership));
     g_last_error.clear();
@@ -733,6 +748,9 @@ bool unload(bool require_ownership) {
             std::error_code ec;
             fs::remove(ownership_file(), ec);
             g_last_error.clear();
+            // Successful deletion proves these assignments have no live rules.
+            // Retain module IDs/backends for the inactive module list.
+            (void)mount::module_runtime::assign_modules({}, "kasumi");
             return true;
         }
         if (delete_errno != EAGAIN && delete_errno != EBUSY) {
@@ -750,6 +768,17 @@ bool unload(bool require_ownership) {
     set_error("Kasumi LKM unloading requires Android/Linux");
     return false;
 #endif
+}
+
+}  // namespace
+
+bool unload(bool require_ownership) {
+    mount::module_runtime::Operation operation;
+    const bool ok = unload_impl(require_ownership);
+    const int saved_errno = errno;
+    operation.finish(ok);
+    errno = saved_errno;
+    return ok;
 }
 
 }  // namespace kagami::lkm

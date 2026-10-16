@@ -3,6 +3,7 @@
 
 #include "kagami/kasumi_client.hpp"
 #include "mount/backend.hpp"
+#include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/storage.hpp"
 
@@ -89,9 +90,28 @@ struct AttachedMount {
 };
 
 namespace {
+struct Observation {
+    std::string content_dir;
+    std::vector<module_runtime::MountContribution> mounts;
+};
+
+std::vector<std::string> layer_owners(const std::string& content_dir,
+                                      const std::vector<std::string>& layers) {
+    std::set<std::string> result;
+    for (const auto& layer : layers) {
+        const auto relative = fs::path(layer).lexically_relative(content_dir);
+        if (!relative.empty() && *relative.begin() != "..")
+            result.insert(relative.begin()->string());
+    }
+    return {result.begin(), result.end()};
+}
+
 bool record_mount(const std::string& target, std::vector<AttachedMount>& attached,
-                  bool register_path = true) {
+                  bool register_path = true,
+                  module_runtime::MountContribution* observation = nullptr) {
     attached.push_back({target, false});
+    if (observation)
+        *observation = module_runtime::capture_mount(target, observation->owners);
     if (!register_path)
         return true;
     attached.back().registered = fsutil::register_umount(target);
@@ -156,10 +176,14 @@ bool select_layers(const std::vector<std::string>& roots, const std::string& rel
 bool mount_overlayfs(const std::vector<std::string>& lower_dirs, const std::string& lowest,
                      const std::string& upperdir, const std::string& workdir,
                      const std::string& dest, const std::string& source,
-                     std::vector<AttachedMount>& attached, bool include_stock = true) {
+                     std::vector<AttachedMount>& attached, Observation& observation,
+                     bool include_stock = true) {
     LayerSelection selected;
     if (!select_layers(lower_dirs, "", selected) || selected.dirs.empty())
         return false;
+    observation.mounts.push_back(
+        {dest, layer_owners(observation.content_dir, selected.dirs), false, false, {}});
+    auto& contribution = observation.mounts.back();
     include_stock = include_stock && selected.include_stock;
     if (include_stock) {
         selected.dirs.push_back(lowest);
@@ -200,7 +224,7 @@ bool mount_overlayfs(const std::vector<std::string>& lower_dirs, const std::stri
             close(mfd);
             close(fsfd);
             if (moved) {
-                return record_mount(dest, attached);
+                return record_mount(dest, attached, true, &contribution);
             }
         } else {
             close(fsfd);
@@ -212,7 +236,7 @@ bool mount_overlayfs(const std::vector<std::string>& lower_dirs, const std::stri
         data += ",upperdir=" + upperdir + ",workdir=" + workdir;
     }
     if (::mount(source.c_str(), dest.c_str(), "overlay", 0, data.c_str()) == 0) {
-        return record_mount(dest, attached);
+        return record_mount(dest, attached, true, &contribution);
     }
     mlog("overlay: mount " + dest + " failed: " + std::strerror(errno), logging::Level::Error);
     return false;
@@ -265,13 +289,14 @@ std::vector<std::string> child_mounts(const std::string& root) {
 // modules that touch it on top of the stock content, or bind the stock back.
 bool mount_overlay_child(const std::string& mount_point, const std::string& relative,
                          const std::vector<std::string>& module_roots, const std::string& stock,
-                         const std::string& source, std::vector<AttachedMount>& attached) {
+                         const std::string& source, std::vector<AttachedMount>& attached,
+                         Observation& observation) {
     LayerSelection selected;
     if (!select_layers(module_roots, relative, selected))
         return false;
     if (selected.dirs.empty())
         return !selected.include_stock || rbind_mount(stock, mount_point, attached);
-    return mount_overlayfs(selected.dirs, stock, "", "", mount_point, source, attached,
+    return mount_overlayfs(selected.dirs, stock, "", "", mount_point, source, attached, observation,
                            selected.include_stock);
 }
 
@@ -280,7 +305,8 @@ bool mount_overlay_child(const std::string& mount_point, const std::string& rela
 // reached as "." after chdir (the cwd stays pinned to it once root is covered).
 bool mount_overlay(const std::string& root, const std::vector<std::string>& module_roots,
                    const std::string& upperdir, const std::string& workdir,
-                   const std::string& source, std::vector<AttachedMount>& attached) {
+                   const std::string& source, std::vector<AttachedMount>& attached,
+                   Observation& observation) {
     mlog("overlay: " + root);
     if (chdir(root.c_str()) != 0) {
         mlog("overlay: chdir " + root + " failed: " + std::strerror(errno), logging::Level::Error);
@@ -292,7 +318,8 @@ bool mount_overlay(const std::string& root, const std::vector<std::string>& modu
     if (!select_layers(module_roots, "", selected))
         return false;
 
-    if (!mount_overlayfs(module_roots, stock, upperdir, workdir, root, source, attached)) {
+    if (!mount_overlayfs(module_roots, stock, upperdir, workdir, root, source, attached,
+                         observation)) {
         return false;
     }
     if (!selected.include_stock)
@@ -316,7 +343,8 @@ bool mount_overlay(const std::string& root, const std::vector<std::string>& modu
             (!S_ISDIR(visible.st_mode) && !S_ISREG(visible.st_mode))) {
             continue;
         }
-        if (!mount_overlay_child(mp, relative, module_roots, stock_child, source, attached)) {
+        if (!mount_overlay_child(mp, relative, module_roots, stock_child, source, attached,
+                                 observation)) {
             mlog(std::string("overlay: child ")
                      .append(mp)
                      .append(" failed; reverting ")
@@ -622,11 +650,12 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     // before any nested leaf under it.
     const auto ops = plan_overlays(base.content_dir, enabled, partitions);
     std::vector<AttachedMount> attached;
+    Observation observation{base.content_dir, {}};
     bool ok = !ops.empty();
     for (const auto& [target, layers] : ops) {
         if (layers.empty())
             continue;
-        if (!mount_overlay(target, layers, "", "", config.mount_source, attached)) {
+        if (!mount_overlay(target, layers, "", "", config.mount_source, attached, observation)) {
             ok = false;
             break;
         }
@@ -645,16 +674,20 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         ok = fsutil::write_mount_journal(overlay_journal(), paths);
     }
     if (!ok) {
+        bool cleaned = true;
         for (auto it = attached.rbegin(); it != attached.rend(); ++it) {
-            if (umount2(it->path.c_str(), MNT_DETACH) != 0)
+            if (umount2(it->path.c_str(), MNT_DETACH) != 0) {
+                cleaned = false;
                 mlog("overlay: rollback failed for " + it->path + ": " + std::strerror(errno),
                      logging::Level::Error);
-            else if (it->registered && !fsutil::unregister_umount(it->path))
+            } else if (it->registered && !fsutil::unregister_umount(it->path))
                 mlog("overlay: unregister failed for " + it->path, logging::Level::Error);
         }
+        (void)module_runtime::record_mounts("overlay", observation.mounts, cleaned);
         mlog("overlay: mount plan failed", logging::Level::Error);
         return false;
     }
+    (void)module_runtime::record_mounts("overlay", observation.mounts, true);
     mlog("overlay: mounted " + std::to_string(ops.size()) + " leaf overlay(s)");
     return true;
 }

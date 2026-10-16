@@ -216,15 +216,59 @@ void release_connection() {
 #endif
 }
 
-std::string active_rules() {
+ActiveRulesSnapshot decode_active_rules(const std::string& text) {
+    ActiveRulesSnapshot result;
+    // The kernel caps LIST_RULES at 64 KiB and reports bytes written without
+    // the terminating NUL. A saturated scnprintf buffer may end mid-rule.
+    if (text.size() >= 64UL * 1024 - 1) {
+        result.last_errno = EOVERFLOW;
+        return result;
+    }
+    const std::string header = "Kasumi Protocol: " + std::to_string(KSM_PROTOCOL_VERSION) + "\n";
+    if (text.empty() || text.back() != '\n' || text.find('\0') != std::string::npos ||
+        text.compare(0, header.size(), header) != 0) {
+        result.last_errno = EPROTO;
+        return result;
+    }
+    const std::string enabled = "Kasumi Enabled: ";
+    const auto offset = header.size();
+    if (text.compare(offset, enabled.size(), enabled) != 0 ||
+        text.size() < offset + enabled.size() + 2) {
+        result.last_errno = EPROTO;
+        return result;
+    }
+    const auto value = offset + enabled.size();
+    if ((text[value] != '0' && text[value] != '1') || text[value + 1] != '\n') {
+        result.last_errno = EPROTO;
+        return result;
+    }
+    result.ok = true;
+    result.enabled = text[value] == '1';
+    result.text = text;
+    return result;
+}
+
+ActiveRulesSnapshot read_active_rules() {
     std::vector<char> buffer(64UL * 1024, '\0');
     kasumi_syscall_list_arg arg = {};
     arg.buf = buffer.data();
     arg.size = buffer.size();
     if (execute(KSM_IOC_LIST_RULES, &arg) != 0) {
-        return "";
+        ActiveRulesSnapshot result;
+        result.last_errno = errno != 0 ? errno : EIO;
+        return result;
     }
-    return {buffer.data()};
+    if (arg.size >= buffer.size() - 1) {
+        ActiveRulesSnapshot result;
+        result.last_errno = EOVERFLOW;
+        return result;
+    }
+    return decode_active_rules(std::string(buffer.data(), arg.size));
+}
+
+std::string active_rules() {
+    const auto result = read_active_rules();
+    return result.ok ? result.text : std::string{};
 }
 
 std::string hooks() {

@@ -71,6 +71,10 @@ struct Config {
 std::string default_config_json();
 bool write_default_config(const std::string& path, std::string& error);
 bool parse_config_json(const std::string& json, Config& config, std::string& error);
+// Preserve unknown fields and reject unreadable or malformed saved documents.
+// Defaults are allowed only when the file does not exist.
+bool read_config_json(const std::string& path, std::string& json, std::string& error,
+                      bool allow_missing = false);
 bool read_config_file(const std::string& path, Config& config, std::string& error);
 bool merge_config_json(const std::string& path, const std::string& updates, std::string& error);
 bool update_lkm_autoload_config(const std::string& path, bool enabled, std::string& error);
