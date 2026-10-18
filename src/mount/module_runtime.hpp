@@ -120,6 +120,9 @@ struct Summary {
     std::string reason = "no_record";
     std::string error_code;
     std::string error;
+    // Empty boot bookkeeping for script-only modules is not mount evidence.
+    // Internal inventory metadata; not part of the runtime JSON contract.
+    bool has_contributions = false;
 };
 
 struct Snapshot {
@@ -154,6 +157,9 @@ struct SnapshotContext {
 bool prepare_snapshot(SnapshotContext& context, Snapshot& result);
 void finish_snapshot(SnapshotContext& context, const KasumiObservation& observation,
                      Snapshot& result);
+// Read in the target's mount namespace without changing the caller's. Proc
+// filtering can depend on the reader's namespace, even for /proc/1/mountinfo.
+bool read_namespace_mountinfo(const std::string& proc, std::string& text, std::string& error);
 }  // namespace detail
 
 // The concrete callback runs under the shared snapshot lock. Its returned

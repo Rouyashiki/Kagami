@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -1153,8 +1154,8 @@ int handle_module(output::Context& destination, Arguments args) {
         }
         if (include_inactive) {
             for (const auto& [id, runtime] : snapshot.modules) {
-                (void)runtime;
-                if (valid_module_id(id) && !candidates.append_runtime(id)) {
+                if (runtime.has_contributions && valid_module_id(id) &&
+                    !candidates.append_runtime(id)) {
                     errno = ENOBUFS;
                     output::err(destination, "module inventory exceeds prepared capacity\n");
                     return 1;
@@ -1192,6 +1193,8 @@ int handle_module(output::Context& destination, Arguments args) {
                                   : mount::prepare_backend_plan(cfg, mode, availability, false);
             const auto recorded = snapshot.modules.find(id);
             const bool has_runtime = recorded != snapshot.modules.end();
+            const bool retain_runtime =
+                include_inactive && has_runtime && recorded->second.has_contributions;
             mount::ModuleFacts facts;
             mount::ModuleProperties props;
             int scan_error = 0;
@@ -1209,9 +1212,8 @@ int handle_module(output::Context& destination, Arguments args) {
                 facts.inactive ||
                 (hot_markers.get() >= 0 &&
                  fstatat(hot_markers.get(), candidate.id.c_str(), &marker, 0) == 0);
-            if ((!include_inactive && inactive) ||
-                (!facts.has_prop && !(include_inactive && has_runtime)) ||
-                (!facts.visible_content && !(include_inactive && has_runtime)))
+            if ((!include_inactive && inactive) || (!facts.has_prop && !retain_runtime) ||
+                (!facts.visible_content && !retain_runtime))
                 continue;
             if (!scanner.observed_properties(props, scan_error)) {
                 errno = scan_error;

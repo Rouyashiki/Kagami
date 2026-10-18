@@ -94,9 +94,10 @@ async function selectPreference(page, key, value) {
 
 async function runCase(project, name, fn, options = {}) {
   if (process.env.KAGAMI_BROWSER_TEST_FILTER && !new RegExp(process.env.KAGAMI_BROWSER_TEST_FILTER).test(name)) return;
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, colorScheme: "light", locale: "en-US", reducedMotion: "reduce" });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, colorScheme: "light", locale: "en-US", reducedMotion: "reduce", ...(options.touch ? { hasTouch: true, isMobile: true } : {}) });
   context.setDefaultTimeout(8000);
   const page = await context.newPage();
+  if (options.clock) await page.clock.install();
   const errors = [];
   const external = [];
   const failedAssets = [];
@@ -191,6 +192,44 @@ try {
       await openView(page, "about");
       await assertNoOverflow(page);
     }, { fixture: false, query: "?mock=1&tab=status" });
+
+    await runCase(project, "slow-poll-keeps-touch-controls-responsive", async (page) => {
+      await page.locator(selector("module-detail")).first().waitFor();
+      await page.evaluate(() => { window.__kagamiFixture.held = ["module list"]; });
+      await page.clock.fastForward(16000);
+      await page.waitForFunction(() => window.__kagamiFixture.pending.length > 0);
+      await page.locator(selector("module-filter")).tap();
+      await page.locator('#editor input[value="all"]').check();
+      await page.locator(selector("dialog-save")).tap();
+      await page.locator("#editor").waitFor({ state: "hidden" });
+      await page.locator(selector("module-detail")).first().tap();
+      await page.locator(selector("rule-add")).tap();
+      await page.locator(selector("dialog-cancel")).tap();
+      await page.locator("#editor").waitFor({ state: "hidden" });
+      await back(page);
+      await assertStableInput(page, "module-search", "Alpha");
+      await navigate(page, "settings");
+      await selectPreference(page, "theme", "dark");
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.execCalls), 0);
+      await page.evaluate(() => window.__kagamiFixture.release());
+      await navigate(page, "modules");
+      await page.waitForFunction(() => !document.querySelector('[data-action="refresh"]').disabled);
+      assert.equal(await page.locator('[data-field="module-search"]').inputValue(), "Alpha");
+      await page.locator(selector("module-detail")).first().tap();
+      await back(page);
+    }, { query: "?tab=modules", clock: true, touch: true });
+
+    await runCase(project, "legacy-host-does-not-poll-synchronous-exec", async (page) => {
+      await page.waitForFunction(() => !document.querySelector('[data-action="refresh"]').disabled);
+      const count = await page.evaluate(() => window.__kagamiFixture.commands.length);
+      await page.clock.fastForward(31000);
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.commands.length), count);
+      await page.locator(selector("refresh")).click();
+      await page.waitForFunction(count => window.__kagamiFixture.commands.length > count, count);
+      await page.waitForFunction(() => !document.querySelector('[data-action="refresh"]').disabled);
+      await page.locator(selector("module-detail")).first().click();
+      await back(page);
+    }, { query: "?tab=modules", fixture: { legacyExec: true }, clock: true });
 
     await runCase(project, "navigation-search-detail", async (page) => {
       for (const tab of ["status", "modules", "kasumi", "settings"]) assert.equal(await page.locator(`[data-tab="${tab}"]:visible`).count(), 1);

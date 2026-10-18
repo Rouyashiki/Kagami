@@ -26,6 +26,7 @@ export function installHostFixture(options = {}) {
   if (Array.isArray(options.modules)) modules.splice(0, modules.length, ...options.modules);
   const fixture = {
     commands: [], unhandled: [], failures: { ...(options.failures || {}) }, config, modules,
+    held: [], pending: [], execCalls: 0, spawnCalls: 0,
     hides: ["/data/local/tmp/fixture-hidden"], toasts: [],
     logs: "[INFO] Kagami fixture ready\n[WARN] Fixture warning\n[ERROR] Fixture failure detail\n",
     lkm: { loaded: true, builtin: false, autoload: false, kmi_override: "", detected_kmi: "android14-6.1", asset: "kasumi-android14-6.1.ko", last_error: "", unload: { allowed: true, can_unload: true, reason: "" } },
@@ -108,6 +109,8 @@ export function installHostFixture(options = {}) {
   }
   globalThis.ksu = {
     exec(command, _options, callbackName) {
+      fixture.execCalls++;
+      if (!options.legacyExec) throw new Error("KernelSU exec blocks the WebView; use spawn");
       fixture.commands.push(command);
       setTimeout(() => {
         let result;
@@ -119,4 +122,25 @@ export function installHostFixture(options = {}) {
     toast(message) { fixture.toasts.push(String(message)); },
     enableEdgeToEdge() {}, enableInsets() {}, fullScreen() {},
   };
+  if (!options.legacyExec) globalThis.ksu.spawn = (command, args, _options, reference) => {
+    fixture.spawnCalls++;
+    if (JSON.stringify(JSON.parse(args)) !== "[]") throw new Error("The bridge must preserve the complete quoted shell command");
+    fixture.commands.push(command);
+    // The host evaluates this app-generated callback reference for every event.
+    // execute() above interprets fixture commands without executing shell input.
+    const callback = () => Function(`return ${reference}`)();
+    const respond = () => {
+      let result;
+      try { result = execute(command); }
+      catch (error) { result = { errno: 1, stdout: "", stderr: `Fixture command error: ${error.message}` }; }
+      for (const stream of ["stdout", "stderr"]) {
+        if (result[stream]) for (const line of result[stream].split("\n")) callback()[stream].emit("data", line);
+      }
+      callback().emit("exit", result.errno);
+      if (result.errno) callback().emit("error", { exitCode: result.errno, message: result.stderr });
+    };
+    if (fixture.held.some(needle => command.includes(needle))) fixture.pending.push(respond);
+    else setTimeout(respond, options.delayMs || 8);
+  };
+  fixture.release = () => { fixture.held.length = 0; fixture.pending.splice(0).forEach(respond => respond()); };
 }

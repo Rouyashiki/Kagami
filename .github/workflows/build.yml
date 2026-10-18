@@ -32,7 +32,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Debug \
             -DKAGAMI_BUILD_NATIVE_TESTS=ON -DKAGAMI_ENABLE_CLANG_TIDY=OFF -DKAGAMI_PACKAGE_WEBUI=OFF
-          cmake --build build/android-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test -j2
+          cmake --build build/android-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test module_list_test -j2
 
   webui:
     name: WebUI source and bundle

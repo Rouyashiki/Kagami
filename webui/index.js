@@ -3,7 +3,7 @@
 // Authors: KOWX712 and Anatdx.
 import './assets/material.js';
 import { api, BUILTIN_PARTITIONS, getRuntimeMode } from './api.js';
-import { enableEdgeToEdge } from './assets/kernelsu.js';
+import { enableEdgeToEdge, hasAsyncExec } from './assets/kernelsu.js';
 import { LANGUAGE_OPTIONS, getNavigatorLanguage } from './i18n.js';
 import { createStore } from './state.js';
 import { createNavigation } from './navigation.js';
@@ -87,7 +87,7 @@ state.route = navigation.route;
 
 function schedulePoll() {
   clearTimeout(pollTimer);
-  if (document.hidden || state.route.view || !['status', 'modules'].includes(state.route.tab)) return;
+  if ((!state.preview && !hasAsyncExec()) || document.hidden || state.route.view || !['status', 'modules'].includes(state.route.tab)) return;
   pollTimer = setTimeout(async () => {
     if (!dialog.open && !document.activeElement?.matches('input,textarea,select')) await refreshCurrent();
     schedulePoll();

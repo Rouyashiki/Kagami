@@ -1,14 +1,17 @@
 #include "mount/module_runtime.hpp"
 
 #include "core/json_value.hpp"
+#include "core/output.hpp"
 #include "core/runtime.hpp"
 #include "kagami/fixed_array.hpp"
 
 #include <fcntl.h>
 #include <linux/stat.h>
+#include <sched.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -505,7 +508,8 @@ bool resolve_mount_identity(const std::string& path, std::string& resolved,
 bool read_mounts(std::vector<MountIdentity>& mounts, std::string& error, bool self) {
     const std::string proc = self ? "/proc/self" : "/proc/1";
     std::string text;
-    if (!read_text(proc + "/mountinfo", text, error) || !parse_mountinfo(text, mounts, error))
+    if (!detail::read_namespace_mountinfo(proc, text, error) ||
+        !parse_mountinfo(text, mounts, error))
         return false;
     const auto ns = ns_identity(proc + "/ns/mnt");
     if (ns.empty()) {
@@ -594,15 +598,30 @@ Summary summarize(const Record& record, const std::vector<MountIdentity>& live, 
         if (!live.empty() && live.front().namespace_id != stored.namespace_id)
             return unknown(record.backend, "namespace_changed");
         const auto* current = mount_index.find(stored.mount_id);
-        if (!current)
-            continue;
-        if (!same_mount(stored, *current))
-            return unknown(record.backend, "mount_identity_changed");
         MountIdentity visible;
         const auto path = runtime_mount_here() ? stored.path : "/proc/1/root" + stored.path;
+        const bool inspected = stat_identity(path, visible);
+        const int inspect_error = inspected ? 0 : errno;
+        if (!current) {
+            // A filtered mountinfo table is not absence evidence when the path
+            // still has the captured mount ID, device and inode. Conversely, a
+            // failed probe or a visible mount absent from that table is unknown.
+            if (inspected && same_inode(stored, visible)) {
+                ++present;
+                continue;
+            }
+            if (!inspected && inspect_error != ENOENT && inspect_error != ENOTDIR)
+                return unknown(record.backend, "read_failed", "cannot inspect " + stored.path,
+                               "mount_identity_unreadable");
+            if (inspected && !mount_index.find(visible.mount_id))
+                return unknown(record.backend, "mount_table_incomplete");
+            continue;
+        }
+        if (!same_mount(stored, *current))
+            return unknown(record.backend, "mount_identity_changed");
         // An upper overlay may cover this mount. mountinfo still identifies the
         // lower attachment; only compare inode when this exact mount is visible.
-        if (!stat_identity(path, visible)) {
+        if (!inspected) {
             if (hidden_by_ancestor(*current, mount_index)) {
                 ++present;
                 continue;
@@ -630,6 +649,67 @@ Summary summarize(const Record& record, const std::vector<MountIdentity>& live, 
             {}};
 }
 }  // namespace
+
+bool detail::read_namespace_mountinfo(const std::string& proc, std::string& text,
+                                      std::string& error) {
+    const auto target = ns_identity(proc + "/ns/mnt");
+    if (target.empty()) {
+        error = "cannot inspect mount namespace";
+        return false;
+    }
+    if (target == ns_identity("/proc/self/ns/mnt"))
+        return read_text(proc + "/mountinfo", text, error);
+
+    int descriptors[2];
+    if (pipe2(descriptors, O_CLOEXEC) != 0) {
+        error = "cannot open mount observation pipe: " + std::string(std::strerror(errno));
+        return false;
+    }
+    posix::Fd reader(descriptors[0]);
+    posix::Fd writer_fd(descriptors[1]);
+    const auto child = fork();
+    if (child == 0) {
+        reader = posix::Fd{};
+        const posix::Fd ns(open((proc + "/ns/mnt").c_str(), O_RDONLY | O_CLOEXEC));
+        if (ns.get() < 0 || setns(ns.get(), CLONE_NEWNS) != 0) {
+            error = "cannot enter mount namespace: " + std::string(std::strerror(errno));
+        } else if (ns_identity("/proc/self/ns/mnt") != target) {
+            error = "mount namespace changed while querying";
+        } else if (read_text(proc + "/mountinfo", text, error)) {
+            const bool sent =
+                output::write_fd(writer_fd.get(), "1") && output::write_fd(writer_fd.get(), text);
+            _exit(sent ? 0 : 1);
+        }
+        const bool sent =
+            output::write_fd(writer_fd.get(), "0") && output::write_fd(writer_fd.get(), error);
+        _exit(sent ? 0 : 1);
+    }
+    writer_fd = posix::Fd{};
+    if (child < 0) {
+        error = "cannot fork mount observer: " + std::string(std::strerror(errno));
+        return false;
+    }
+    std::string response;
+    const bool read_ok = read_complete(reader.get(), response);
+    reader = posix::Fd{};
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (!read_ok || waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        response.empty()) {
+        error = "incomplete mount namespace observation";
+        return false;
+    }
+    const bool ok = response.front() == '1';
+    response.erase(0, 1);
+    if (ok)
+        text = std::move(response);
+    else
+        error = std::move(response);
+    return ok;
+}
 
 Operation::Operation() : outer_(writer.depth++ == 0) {
     if (!outer_)
@@ -915,6 +995,7 @@ bool detail::prepare_snapshot(SnapshotContext& context, Snapshot& result) {
         for (const auto& [id, record] : database.modules) {
             auto value = result.missing;
             value.backend = record.backend;
+            value.has_contributions = !record.mounts.empty() || !record.rules.empty();
             result.modules.emplace(id, std::move(value));
         }
         return false;
@@ -928,6 +1009,7 @@ bool detail::prepare_snapshot(SnapshotContext& context, Snapshot& result) {
         for (const auto& [id, record] : database.modules) {
             auto value = result.missing;
             value.backend = record.backend;
+            value.has_contributions = !record.mounts.empty() || !record.rules.empty();
             result.modules.emplace(id, std::move(value));
         }
         return false;
@@ -967,13 +1049,17 @@ void detail::finish_snapshot(SnapshotContext& context, const KasumiObservation& 
         for (const auto& [id, record] : database.modules) {
             auto value = result.missing;
             value.backend = record.backend;
+            value.has_contributions = !record.mounts.empty() || !record.rules.empty();
             result.modules.emplace(id, std::move(value));
         }
         return;
     }
-    for (const auto& [id, record] : database.modules)
-        result.modules.emplace(id, summarize(record, mounts, context.mounts_ok, context.mount_error,
-                                             kasumi, mount_index, rule_index));
+    for (const auto& [id, record] : database.modules) {
+        auto value = summarize(record, mounts, context.mounts_ok, context.mount_error, kasumi,
+                               mount_index, rule_index);
+        value.has_contributions = !record.mounts.empty() || !record.rules.empty();
+        result.modules.emplace(id, std::move(value));
+    }
 }
 
 Snapshot read_snapshot(const KasumiObservation& observation) {

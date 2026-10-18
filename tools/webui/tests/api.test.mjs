@@ -359,6 +359,42 @@ test("bridge failure, invalid status and timeouts reject and clean up callbacks"
   assert.equal(globalThis[callbackName], undefined);
 });
 
+// KernelSU's three-argument exec still runs Shell.Job.exec synchronously.
+// Only spawn enqueues the job before returning to the WebView's JS thread.
+test("bridge uses asynchronous spawn and preserves command, lines and exit status", async () => {
+  const { exec } = await import(bridgeUrl.href);
+  let callback;
+  globalThis.ksu = {
+    exec() { throw new Error("synchronous exec must not run"); },
+    spawn(command, args, options, reference) {
+      assert.equal(command, "printf '%s' 'a; b' && false");
+      assert.deepEqual(JSON.parse(args), []);
+      assert.deepEqual(JSON.parse(options), { cwd: "/data/local/tmp" });
+      callback = () => Function(`return ${reference}`)();
+    },
+  };
+  const pending = exec("printf '%s' 'a; b' && false", { cwd: "/data/local/tmp" });
+  assert.equal(typeof callback, "function");
+  callback().stdout.emit("data", "line one");
+  callback().stdout.emit("data", "");
+  callback().stdout.emit("data", "line three");
+  callback().stderr.emit("data", "failure");
+  callback().emit("exit", 7);
+  assert.deepEqual(await pending, { errno: 7, stdout: "line one\n\nline three", stderr: "failure" });
+  // Official hosts emit error after a nonzero exit, in a later JS dispatch.
+  assert.doesNotThrow(() => callback().emit("error", { exitCode: 7, message: "failure" }));
+});
+
+test("spawn timeout releases the UI and safely ignores late host events", async () => {
+  const { exec } = await import(bridgeUrl.href);
+  let callback;
+  const before = Object.keys(globalThis).filter(key => key.startsWith("exec_callback_"));
+  globalThis.ksu = { spawn(_command, _args, _options, reference) { callback = () => Function(`return ${reference}`)(); } };
+  await assert.rejects(exec("slow query", {}, 5), error => error.code === "BRIDGE_TIMEOUT" && error.outcomeUnknown);
+  assert.doesNotThrow(() => { callback().stdout.emit("data", "late"); callback().emit("exit", 0); });
+  assert.deepEqual(Object.keys(globalThis).filter(key => key.startsWith("exec_callback_")), before);
+});
+
 test("mock implements incremental editing, metadata and persisted versus active hide state", async () => {
   const { api, getRuntimeMode } = await loadApi(undefined, "?mock=1");
   assert.equal(getRuntimeMode(), "mock");

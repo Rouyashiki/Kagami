@@ -347,6 +347,45 @@ void test_failure() {
     }
     require_state("failed", "unknown");
 }
+void test_namespace_observation(const fs::path& target, std::uint64_t mount_id) {
+    const auto parent_proc = "/proc/" + std::to_string(getpid());
+    const auto child = fork();
+    require(child >= 0, "fork namespace reader fixture");
+    if (child == 0) {
+        try {
+            require(unshare(CLONE_NEWNS) == 0, "separate reader mount namespace");
+            require(mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) == 0,
+                    "separate reader propagation");
+            require(umount2(target.c_str(), MNT_DETACH) == 0,
+                    "reader does not see the parent's module mount");
+            const auto before = fs::read_symlink("/proc/self/ns/mnt");
+            std::string text;
+            std::string error;
+            require(runtime::detail::read_namespace_mountinfo(parent_proc, text, error), error);
+            require(fs::read_symlink("/proc/self/ns/mnt") == before,
+                    "query must not move the caller into the mount namespace");
+            std::vector<runtime::MountIdentity> mounts;
+            require(runtime::parse_mountinfo(text, mounts, error), error);
+            require(std::any_of(mounts.begin(), mounts.end(),
+                                [&](const auto& entry) {
+                                    return entry.mount_id == mount_id &&
+                                           entry.path == target.string();
+                                }),
+                    "read the mounted target from the original namespace");
+            require(
+                !runtime::detail::read_namespace_mountinfo("/proc/kagami-missing", text, error) &&
+                    !error.empty(),
+                "namespace read failure is explicit");
+            _exit(0);
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            _exit(1);
+        }
+    }
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "isolated namespace reader checks");
+}
 int test_mounts() {
     if (unshare(CLONE_NEWNS) != 0) {
         std::cerr << "mount fixture requires an isolated mount namespace\n";
@@ -384,6 +423,7 @@ int test_mounts() {
     require(!batch[2].captured && batch[2].identity.mount_id == 0,
             "batch does not infer an uncommitted attachment from a matching path");
     require(!batch[3].captured, "batch retains failed capture independently");
+    test_namespace_observation(target, lower.identity.mount_id);
     {
         runtime::Operation operation;
         require(runtime::assign_modules({{"one", "magic"}, {"two", "magic"}, {"upper", "overlay"}}),
@@ -394,6 +434,23 @@ int test_mounts() {
     }
     require_state("one", "mounted");
     require_state("two", "mounted");
+    {
+        runtime::detail::SnapshotContext context;
+        runtime::Snapshot filtered;
+        require(runtime::detail::prepare_snapshot(context, filtered), "prepare filtered view");
+        // Mount hiding can omit a live attachment from an otherwise valid proc
+        // table. The real statx identity must not be discarded in that case.
+        context.mounts.erase(std::remove_if(context.mounts.begin(), context.mounts.end(),
+                                            [&](const auto& entry) {
+                                                return entry.mount_id == direct.identity.mount_id ||
+                                                       entry.mount_id == lower.identity.mount_id;
+                                            }),
+                             context.mounts.end());
+        runtime::detail::finish_snapshot(context, {}, filtered);
+        require(filtered.modules.at("one").state == "mounted" &&
+                    filtered.modules.at("two").state == "mounted",
+                "omitted live mountinfo entries must not turn actual attachments into unmounted");
+    }
     const std::string overlay_options = "lowerdir=" + source.string() + ":" + target.string();
     require(mount("kagami-fixture-overlay", target.c_str(), "overlay", MS_RDONLY,
                   overlay_options.c_str()) == 0,
