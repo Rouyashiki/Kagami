@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kagami/fixed_array.hpp"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -141,9 +143,8 @@ bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned 
                    unsigned long spoofed_dev, const std::string& spoofed_path);
 bool clear_maps_rules();
 PolicySnapshot policy_snapshot();
-bool replace_policy(PolicyOwner owner, std::uint32_t flags,
-                    const std::vector<std::uint32_t>& allow_uids,
-                    const std::vector<std::uint32_t>& deny_uids);
+bool replace_policy(PolicyOwner owner, std::uint32_t flags, bounded::Span<std::uint32_t> allow_uids,
+                    bounded::Span<std::uint32_t> deny_uids);
 bool reset_policy();
 int last_getfd_errno();
 int process_uid();

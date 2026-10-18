@@ -25,7 +25,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
+
 #include <string>
 #include <vector>
 
@@ -96,35 +96,41 @@ std::string join(const std::string& base, const std::string& name) {
     return path;
 }
 
-[[noreturn]] void scan_error(const std::string& message) {
+[[nodiscard]] bool scan_error(const std::string& message) {
     mlog("magic: " + message, logging::Level::Error);
-    throw std::runtime_error(message);
+    return false;
 }
 
-NType type_from_lstat(const std::string& path, const struct stat& st) {
-    if (S_ISCHR(st.st_mode) && st.st_rdev == 0)
-        return NType::Whiteout;
-    if (S_ISDIR(st.st_mode))
-        return NType::Directory;
-    if (S_ISLNK(st.st_mode))
-        return NType::Symlink;
+bool type_from_lstat(const std::string& path, const struct stat& st, NType& type) {
+    if (S_ISCHR(st.st_mode) && st.st_rdev == 0) {
+        type = NType::Whiteout;
+        return true;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        type = NType::Directory;
+        return true;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        type = NType::Symlink;
+        return true;
+    }
     if (S_ISREG(st.st_mode)) {
+        type = NType::Regular;
         if (st.st_size == 0) {
             if (lgetxattr(path.c_str(), "trusted.overlay.whiteout", nullptr, 0) >= 0)
-                return NType::Whiteout;
-            if (errno != ENODATA && errno != EOPNOTSUPP)
-                scan_error("cannot read whiteout metadata: " + path);
+                type = NType::Whiteout;
+            else if (errno != ENODATA && errno != EOPNOTSUPP)
+                return scan_error("cannot read whiteout metadata: " + path);
         }
-        return NType::Regular;
+        return true;
     }
-    scan_error("unsupported module entry: " + path);
+    return scan_error("unsupported module entry: " + path);
 }
 
-bool dir_is_replace(const std::string& path) {
-    bool opaque = false;
+bool dir_is_replace(const std::string& path, bool& opaque) {
     if (!fsutil::directory_is_opaque(path, opaque))
-        scan_error("cannot read replacement metadata: " + path);
-    return opaque;
+        return scan_error("cannot read replacement metadata: " + path);
+    return true;
 }
 
 bool clone_symlink(const std::string& src, const std::string& dst) {
@@ -145,17 +151,16 @@ bool clone_symlink(const std::string& src, const std::string& dst) {
 }
 
 // Higher-priority entries win; opaque directories stop lower-layer merging.
-bool collect_into(Node& parent, const std::string& dir, const std::string& owner) {
+bool collect_into(Node& parent, const std::string& dir, const std::string& owner, bool& has) {
     const std::unique_ptr<DIR, decltype(&closedir)> directory(opendir(dir.c_str()), closedir);
     if (!directory)
-        scan_error("cannot scan " + dir + ": " + std::strerror(errno));
-    bool has = false;
+        return scan_error("cannot scan " + dir + ": " + std::strerror(errno));
     for (;;) {
         errno = 0;
         const auto* entry = readdir(directory.get());
         if (!entry) {
             if (errno)
-                scan_error("cannot read " + dir + ": " + std::strerror(errno));
+                return scan_error("cannot read " + dir + ": " + std::strerror(errno));
             break;
         }
         const std::string name = entry->d_name;
@@ -164,8 +169,10 @@ bool collect_into(Node& parent, const std::string& dir, const std::string& owner
         const std::string path = join(dir, name);
         struct stat st{};
         if (lstat(path.c_str(), &st) != 0)
-            scan_error("cannot stat " + path + ": " + std::strerror(errno));
-        const NType type = type_from_lstat(path, st);
+            return scan_error("cannot stat " + path + ": " + std::strerror(errno));
+        NType type;
+        if (!type_from_lstat(path, st, type))
+            return false;
         auto existing = parent.children.find(name);
         if (existing != parent.children.end()) {
             auto& node = existing->second;
@@ -179,10 +186,13 @@ bool collect_into(Node& parent, const std::string& dir, const std::string& owner
                 has = true;
                 continue;
             }
-            node.replace = dir_is_replace(path);
+            if (!dir_is_replace(path, node.replace))
+                return false;
             if (node.replace)
                 node.replace_owner = owner;
-            has = collect_into(node, path, owner) || node.replace || has;
+            if (!collect_into(node, path, owner, has))
+                return false;
+            has = node.replace || has;
         } else {
             Node node;
             node.name = name;
@@ -190,22 +200,24 @@ bool collect_into(Node& parent, const std::string& dir, const std::string& owner
             node.module_path = path;
             node.owner = owner;
             if (type == NType::Directory) {
-                node.replace = dir_is_replace(path);
+                if (!dir_is_replace(path, node.replace))
+                    return false;
                 if (node.replace)
                     node.replace_owner = owner;
-                collect_into(node, path, owner);
+                if (!collect_into(node, path, owner, has))
+                    return false;
             }
             has = true;
             parent.children.emplace(name, std::move(node));
         }
     }
-    return has;
+    return true;
 }
 
 // Build the merged root tree: module system/ trees, with vendor/product/... moved
 // out to root level when the device exposes them as /system/<p> symlinks.
-std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules,
-                                         const std::vector<std::string>& extra) {
+bool collect_module_files(const std::vector<ModuleEntry>& modules, Arguments extra,
+                          std::optional<Node>& result) {
     Node root;
     root.type = NType::Directory;
     Node system;
@@ -219,29 +231,33 @@ std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules
         if (lstat(ms.c_str(), &st) != 0) {
             if (errno == ENOENT)
                 continue;
-            scan_error("cannot stat " + ms + ": " + std::strerror(errno));
+            return scan_error("cannot stat " + ms + ": " + std::strerror(errno));
         }
         if (!S_ISDIR(st.st_mode))
-            scan_error("module system entry is not a directory: " + ms);
-        if (dir_is_replace(ms))
-            scan_error("partition-root replacement is unsupported: " + ms);
-        has |= collect_into(system, ms, m.id);
+            return scan_error("module system entry is not a directory: " + ms);
+        bool replace = false;
+        if (!dir_is_replace(ms, replace))
+            return false;
+        if (replace)
+            return scan_error("partition-root replacement is unsupported: " + ms);
+        if (!collect_into(system, ms, m.id, has))
+            return false;
     }
     if (!has) {
-        return std::nullopt;
+        result.reset();
+        return true;
     }
 
     const auto move_partition = [&](const std::string& part, bool require_symlink) {
         std::error_code ec;
         const bool ok = fs::is_directory("/" + part, ec) &&
                         (!require_symlink || fs::is_symlink("/system/" + part, ec));
-        if (!ok) {
-            return;
-        }
+        if (!ok)
+            return true;
         auto it = system.children.find(part);
         if (it != system.children.end()) {
             if (it->second.replace)
-                scan_error("partition-root replacement is unsupported: /" + part);
+                return scan_error("partition-root replacement is unsupported: /" + part);
             Node moved = std::move(it->second);
             system.children.erase(it);
             // Partition roots are not replaced wholesale; existing files can be bound individually.
@@ -250,12 +266,14 @@ std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules
             moved.replace = false;
             root.children.emplace(part, std::move(moved));
         }
+        return true;
     };
 
     const std::pair<const char*, bool> builtin[] = {
         {"vendor", true}, {"system_ext", true}, {"product", true}, {"odm", false}};
     for (const auto& [part, req] : builtin) {
-        move_partition(part, req);
+        if (!move_partition(part, req))
+            return false;
     }
     for (const auto& part : extra) {
         if (part == "system") {
@@ -268,12 +286,14 @@ std::optional<Node> collect_module_files(const std::vector<ModuleEntry>& modules
             }
         }
         if (!is_builtin) {
-            move_partition(part, false);
+            if (!move_partition(std::string(std::string_view(part)), false))
+                return false;
         }
     }
 
     root.children.emplace("system", std::move(system));
-    return root;
+    result = std::move(root);
+    return true;
 }
 
 // Create the tmpfs skeleton dir at `work`, cloning mode/owner/SELinux context
@@ -448,8 +468,9 @@ bool do_directory(Node& node, const std::string& real, const std::string& work, 
         return false;
     }
 
-    // Module-overridden entries recurse; the rest are mirrored into the skeleton.
-    if (real_directory && !node.replace) {
+    // Only a skeleton needs the untouched stock entries. Direct binds can walk
+    // the sparse module tree without enumerating every sibling in the real dir.
+    if (now_tmpfs && real_directory && !node.replace) {
         DIR* d = opendir(real.c_str());
         if (!d) {
             mlog("magic: cannot read directory " + real + ": " + std::strerror(errno),
@@ -490,7 +511,8 @@ bool do_directory(Node& node, const std::string& real, const std::string& work, 
         }
     }
 
-    // Remaining children are new entries that do not exist in the real dir.
+    // Without a skeleton these are all covered entries; with one they are the
+    // new children left after mirroring stock.
     for (auto& [name, child] : node.children) {
         if (!do_mount(child, join(real, name), join(work, name), now_tmpfs, w)) {
             return false;
@@ -588,7 +610,7 @@ bool do_mount(Node& node, const std::string& real, const std::string& work, bool
 // Mount points whose mount source equals `source`. Our skeletons and work tmpfs
 // use config.mount_source; real partitions are block-backed, so teardown can match
 // ours without ever touching a real partition.
-std::set<std::string> mounts_with_source(const std::string& source) {
+std::set<std::string> mounts_with_source(std::string_view source) {
     std::set<std::string> out;
     std::ifstream in("/proc/self/mountinfo");
     std::string line;
@@ -708,14 +730,16 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         return false;
     }
 
-    auto root = collect_module_files(modules, config.partitions);
+    std::optional<Node> root;
+    if (!collect_module_files(modules, config.partitions, root))
+        return false;
     if (!root) {
         (void)module_runtime::record_mounts("magic", {}, true);
         mlog("magic: no module files to mount");
         return true;
     }
 
-    const std::string work = config.work_dir;
+    const std::string work(std::string_view(config.work_dir));
     if (!fsutil::prepare_empty_mountpoint(work))
         return false;
     if (::mount(config.mount_source.c_str(), work.c_str(), "tmpfs", 0, nullptr) != 0) {

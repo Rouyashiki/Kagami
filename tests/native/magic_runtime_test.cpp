@@ -118,7 +118,7 @@ int isolated_test(const fs::path& root) {
 }  // namespace
 
 int main() {
-    char pattern[] = "/tmp/kagami-magic-test-XXXXXX";
+    char pattern[] = "/data/local/tmp/kagami-magic-test-XXXXXX";
     const auto* created = mkdtemp(pattern);
     if (!created)
         return 1;

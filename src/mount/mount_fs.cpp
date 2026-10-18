@@ -20,11 +20,14 @@
 #include <zlib.h>
 #include <climits>
 
+#include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 
 // Older bionic headers may not expose every propagation flag.
 #ifndef MS_SLAVE
@@ -38,8 +41,8 @@ namespace kagami::mount::fsutil {
 
 constexpr const char* kSelinuxXattr = "security.selinux";
 
-const std::vector<std::string>& managed_partitions() {
-    static const std::vector<std::string> partitions = {
+Arguments managed_partitions() noexcept {
+    static constexpr Argument partitions[] = {
         "system", "vendor", "product", "system_ext", "odm", "oem",
     };
     return partitions;
@@ -64,11 +67,8 @@ bool set_context(const std::string& path, const std::string& ctx) {
     return lsetxattr(path.c_str(), kSelinuxXattr, ctx.c_str(), ctx.size() + 1, 0) == 0;
 }
 
-void clone_attr(const std::string& src, const std::string& dst) {
-    struct stat st{};
-    if (lstat(src.c_str(), &st) != 0) {
-        return;
-    }
+namespace {
+void clone_known_attr(const std::string& src, const std::string& dst, const struct stat& st) {
     if (!S_ISLNK(st.st_mode)) {
         chmod(dst.c_str(), st.st_mode & 07777);
     }
@@ -77,6 +77,13 @@ void clone_attr(const std::string& src, const std::string& dst) {
     if (get_context(src, ctx)) {
         set_context(dst, ctx);
     }
+}
+}  // namespace
+
+void clone_attr(const std::string& src, const std::string& dst) {
+    struct stat st{};
+    if (lstat(src.c_str(), &st) == 0)
+        clone_known_attr(src, dst, st);
 }
 
 bool bind_mount(const std::string& src, const std::string& dst) {
@@ -130,7 +137,7 @@ bool mirror_entry(const std::string& src, const std::string& dst) {
             mlog("mkdir " + dst + " failed: " + std::strerror(errno), logging::Level::Error);
             return false;
         }
-        clone_attr(src, dst);
+        clone_known_attr(src, dst, st);
         DIR* d = opendir(src.c_str());
         if (!d) {
             mlog("opendir " + src + " failed: " + std::strerror(errno), logging::Level::Error);
@@ -175,7 +182,19 @@ bool directory_is_opaque(const std::string& path, bool& opaque) {
     return true;
 }
 
-bool copy_tree(const std::string& src, const std::string& dst) {
+namespace {
+std::size_t record_copy(CopiedTree* tree, const std::string& name, std::size_t parent) {
+    if (!tree)
+        return 0;
+    const std::size_t index = tree->entries.size();
+    tree->entries.push_back({tree->names.size(), parent});
+    tree->names.append(name);
+    tree->names.push_back('\0');
+    return index;
+}
+
+bool copy_tree_impl(const std::string& src, const std::string& dst, CopiedTree* tree,
+                    const std::string& name, std::size_t parent) {
     struct stat st{};
     if (lstat(src.c_str(), &st) != 0) {
         mlog("copy_tree lstat " + src + " failed: " + std::strerror(errno), logging::Level::Error);
@@ -198,7 +217,8 @@ bool copy_tree(const std::string& src, const std::string& dst) {
             mlog("create whiteout " + dst + ": " + std::strerror(errno), logging::Level::Error);
             return false;
         }
-        clone_attr(src, dst);
+        clone_known_attr(src, dst, st);
+        record_copy(tree, name, parent);
         return true;
     }
 
@@ -208,7 +228,7 @@ bool copy_tree(const std::string& src, const std::string& dst) {
                  logging::Level::Error);
             return false;
         }
-        clone_attr(src, dst);
+        clone_known_attr(src, dst, st);
         bool opaque = false;
         if (!directory_is_opaque(src, opaque))
             return false;
@@ -217,15 +237,16 @@ bool copy_tree(const std::string& src, const std::string& dst) {
                  logging::Level::Error);
             return false;
         }
-        DIR* d = opendir(src.c_str());
+        std::unique_ptr<DIR, decltype(&closedir)> d(opendir(src.c_str()), closedir);
         if (!d) {
             return false;
         }
+        const std::size_t index = record_copy(tree, name, parent);
         bool ok = true;
         struct dirent* e;
         for (;;) {
             errno = 0;
-            e = readdir(d);
+            e = readdir(d.get());
             if (!e) {
                 ok = ok && errno == 0;
                 break;
@@ -235,11 +256,12 @@ bool copy_tree(const std::string& src, const std::string& dst) {
             }
             if (std::strcmp(e->d_name, ".replace") == 0)
                 continue;
-            if (!copy_tree(src + "/" + e->d_name, dst + "/" + e->d_name)) {
+            if (!copy_tree_impl(src + "/" + e->d_name, dst + "/" + e->d_name, tree, e->d_name,
+                                index)) {
                 ok = false;
             }
         }
-        if (closedir(d) != 0)
+        if (closedir(d.release()) != 0)
             ok = false;
         return ok;
     }
@@ -259,6 +281,7 @@ bool copy_tree(const std::string& src, const std::string& dst) {
         if (get_context(src, ctx)) {
             set_context(dst, ctx);
         }
+        record_copy(tree, name, parent);
         return true;
     }
 
@@ -299,14 +322,37 @@ bool copy_tree(const std::string& src, const std::string& dst) {
         }
         close(in);
         close(out);
-        clone_attr(src, dst);
+        clone_known_attr(src, dst, st);
+        if (ok)
+            record_copy(tree, name, parent);
         return ok;
     }
 
     return true;  // skip device/socket/fifo nodes
 }
+}  // namespace
+
+bool copy_tree(const std::string& src, const std::string& dst) {
+    return copy_tree_impl(src, dst, nullptr, {}, 0);
+}
+
+bool copy_tree(const std::string& src, const std::string& dst, CopiedTree& tree) {
+    tree.entries.clear();
+    tree.names.clear();
+    if (copy_tree_impl(src, dst, &tree, {}, 0))
+        return true;
+    tree.entries.clear();
+    tree.names.clear();
+    return false;
+}
 
 bool tmpfs_xattr_supported() {
+    // A complete kernel config is immutable for this process. Failed probes are
+    // deliberately not cached, since /proc/config.gz may become readable later.
+    static std::atomic<int> cached{-1};
+    const int previous = cached.load(std::memory_order_relaxed);
+    if (previous >= 0)
+        return previous != 0;
     gzFile file = gzopen("/proc/config.gz", "rbe");
     if (!file) {
         mlog("storage: cannot read /proc/config.gz: " + std::string(std::strerror(errno)) +
@@ -314,13 +360,35 @@ bool tmpfs_xattr_supported() {
              logging::Level::Warning);
         return false;
     }
-    std::string config;
+    constexpr char enabled_line[] = "CONFIG_TMPFS_XATTR=y";
+    std::array<char, sizeof(enabled_line)> line{};
+    std::size_t line_size = 0;
+    bool line_overflow = false;
+    bool enabled = false;
+    const auto finish_line = [&]() {
+        if (!line_overflow && line_size != 0 && line[line_size - 1] == '\r')
+            --line_size;
+        if (!line_overflow && line_size == sizeof(enabled_line) - 1 &&
+            std::memcmp(line.data(), enabled_line, line_size) == 0)
+            enabled = true;
+        line_size = 0;
+        line_overflow = false;
+    };
+    std::size_t total = 0;
     char buffer[8192];
     int count;
     while ((count = gzread(file, buffer, sizeof(buffer))) > 0) {
-        config.append(buffer, static_cast<size_t>(count));
-        if (config.size() > 4UL * 1024 * 1024)
+        total += static_cast<std::size_t>(count);
+        if (total > 4UL * 1024 * 1024)
             break;
+        for (int i = 0; i < count; ++i) {
+            if (buffer[i] == '\n')
+                finish_line();
+            else if (line_size < line.size())
+                line[line_size++] = buffer[i];
+            else
+                line_overflow = true;
+        }
     }
     int error;
     (void)gzerror(file, &error);
@@ -331,15 +399,8 @@ bool tmpfs_xattr_supported() {
              logging::Level::Warning);
         return false;
     }
-    bool enabled = false;
-    std::istringstream lines(config);
-    std::string line;
-    while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        if (line == "CONFIG_TMPFS_XATTR=y")
-            enabled = true;
-    }
+    finish_line();
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     mlog(std::string("storage: CONFIG_TMPFS_XATTR=") +
          (enabled ? "y; defaulting to tmpfs" : "disabled; defaulting to ext4"));
     return enabled;
@@ -504,56 +565,11 @@ bool prepare_empty_mountpoint(const std::string& path) {
     return true;
 }
 
-bool run_in_init_mount_ns(const std::function<bool()>& fn) {
-    // Test hook: run in the *current* namespace (caller isolates via `unshare -m`)
-    // so the engine can be exercised without touching the init/global namespace.
-    // Detach all propagation first so test mounts can never escape this ns.
-    if (runtime_mount_here()) {
-        ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr);
-        try {
-            return fn();
-        } catch (...) {
-            return false;
-        }
-    }
-    const pid_t pid = fork();
-    if (pid < 0) {
-        mlog("fork failed: " + std::string(std::strerror(errno)), logging::Level::Error);
-        return false;
-    }
-    if (pid == 0) {
-        const int fd = open("/proc/1/ns/mnt", O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            mlog("open /proc/1/ns/mnt failed: " + std::string(std::strerror(errno)),
-                 logging::Level::Error);
-            _exit(2);
-        }
-        if (setns(fd, CLONE_NEWNS) != 0) {
-            mlog("setns init mount ns failed: " + std::string(std::strerror(errno)),
-                 logging::Level::Error);
-            close(fd);
-            _exit(3);
-        }
-        close(fd);
-        bool ok = false;
-        try {
-            ok = fn();
-        } catch (...) {
-            ok = false;
-        }
-        _exit(ok ? 0 : 1);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-    }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-std::string partition_mount_point(const std::string& partition) {
+std::string partition_mount_point(std::string_view partition) {
     if (partition == "system") {
         return "/system";
     }
-    return "/" + partition;
+    return std::string("/").append(partition);
 }
 
 std::string resolve_real_mount_target(const std::string& mount_point) {

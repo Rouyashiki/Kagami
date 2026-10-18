@@ -7,6 +7,7 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build"
 OUT_DIR="${BUILD_DIR}/out"
+REQUIRED_NDK="30.0.16248370"
 
 # Colors
 RED='\033[0;31m'
@@ -49,7 +50,7 @@ find_ndk() {
 
     for base_path in "${POSSIBLE_PATHS[@]}"; do
         if [ -d "$base_path" ]; then
-            ANDROID_NDK=$(find "$base_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
+            ANDROID_NDK="${base_path}/${REQUIRED_NDK}"
             if [ -n "$ANDROID_NDK" ] && [ -d "$ANDROID_NDK" ]; then
                 break
             fi
@@ -139,6 +140,7 @@ build_arch() {
         -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="${ARCH}" \
         -DANDROID_PLATFORM=android-26 \
+        -DCMAKE_BUILD_TYPE=Release \
         -DKAGAMI_PACKAGE_WEBUI="${PACKAGE_WEBUI}" \
         ${VERBOSE} \
         "${PROJECT_ROOT}"

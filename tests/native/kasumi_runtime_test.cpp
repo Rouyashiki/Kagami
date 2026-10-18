@@ -1,3 +1,4 @@
+#include "core/json.hpp"
 #include "kagami/kasumi_client.hpp"
 #include "mount/kasumi.hpp"
 #include "mount/module_runtime.hpp"
@@ -76,13 +77,17 @@ void state(const std::string& id, const std::string& expected) {
     require(actual.state == expected, id + ": " + runtime::summary_json(actual));
     require(actual.backend == "kasumi", "keep actual Kasumi backend");
 }
+struct TestRule {
+    std::string path, mode;
+};
 struct Fixture {
     fs::path root;
     fs::path stock;
     std::string partition;
+    kagami::Argument partition_views[1];
     kagami::Config config;
     Fixture() {
-        char pattern[] = "/tmp/kagami-kasumi-runtime-XXXXXX";
+        char pattern[] = "/data/local/tmp/kagami-kasumi-runtime-XXXXXX";
         const auto* created = mkdtemp(pattern);
         require(created != nullptr, "create fixture");
         root = created;
@@ -90,7 +95,8 @@ struct Fixture {
         // Keep virtual paths within the fixture without requiring chroot or
         // mounts: /<partition> is the temporary stock tree.
         partition = stock.relative_path().string();
-        config.partitions = {partition};
+        partition_views[0] = kagami::Argument(partition);
+        config.partitions = partition_views;
         fs::create_directory(stock);
         require(setenv("KAGAMI_DATA_DIR", root.c_str(), 1) == 0, "set runtime directory");
         require(setenv("KAGAMI_MOUNT_HERE", "1", 1) == 0, "use current namespace");
@@ -107,7 +113,7 @@ struct Fixture {
         return module(id).path / partition / path;
     }
     bool mount(const std::vector<std::string>& ids,
-               const kagami::mount::ModuleRuleMap& rules = {}) {
+               const std::map<std::string, std::vector<TestRule>>& rules = {}) {
         std::vector<kagami::mount::ModuleEntry> modules;
         std::vector<runtime::Assignment> assignments;
         for (const auto& id : ids) {
@@ -116,7 +122,31 @@ struct Fixture {
         }
         runtime::Operation operation;
         require(runtime::assign_modules(assignments), "assign Kasumi modules");
-        const bool ok = backend::mount_modules(modules, config, rules);
+        std::ofstream saved(root / "module_rules.json");
+        saved << '{';
+        bool first = true;
+        for (const auto& [id, entries] : rules) {
+            if (!first)
+                saved << ',';
+            first = false;
+            saved << kagami::json_quote(id) << ":[";
+            bool first_rule = true;
+            for (const auto& rule : entries) {
+                if (!first_rule)
+                    saved << ',';
+                first_rule = false;
+                saved << "{\"path\":" << kagami::json_quote(rule.path)
+                      << ",\"mode\":" << kagami::json_quote(rule.mode) << '}';
+            }
+            saved << ']';
+        }
+        saved << '}';
+        saved.close();
+        kagami::mount::ModuleRules prepared;
+        int error = 0;
+        require(prepared.prepare_rules((root / "module_rules.json").c_str(), error),
+                "prepare module rules");
+        const bool ok = backend::mount_modules(modules, config, prepared);
         operation.finish(ok);
         return ok;
     }
@@ -238,8 +268,8 @@ bool set_statfs_spoof(bool) {
 bool set_selinux_guard(bool) {
     return true;
 }
-bool replace_policy(PolicyOwner, std::uint32_t, const std::vector<std::uint32_t>&,
-                    const std::vector<std::uint32_t>&) {
+bool replace_policy(PolicyOwner, std::uint32_t, bounded::Span<std::uint32_t>,
+                    bounded::Span<std::uint32_t>) {
     return true;
 }
 bool clear_rules() {

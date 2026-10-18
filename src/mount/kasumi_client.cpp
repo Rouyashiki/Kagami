@@ -567,9 +567,12 @@ PolicySnapshot policy_snapshot() {
     return snapshot;
 }
 
-bool replace_policy(PolicyOwner owner, std::uint32_t flags,
-                    const std::vector<std::uint32_t>& allow_uids,
-                    const std::vector<std::uint32_t>& deny_uids) {
+bool replace_policy(PolicyOwner owner, std::uint32_t flags, bounded::Span<std::uint32_t> allow_uids,
+                    bounded::Span<std::uint32_t> deny_uids) {
+    if (allow_uids.size() > UINT32_MAX || deny_uids.size() > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return false;
+    }
     kasumi_policy_replace_arg arg = {};
     arg.version = KSM_POLICY_API_VERSION;
     arg.size = sizeof(arg);

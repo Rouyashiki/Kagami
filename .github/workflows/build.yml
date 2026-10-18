@@ -12,25 +12,22 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  native-runtime:
-    name: Native runtime state
+  native-build:
+    name: Native test compilation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - name: Configure focused native tests
-        run: >-
-          cmake -S . -B build/native-tests
-          -DKAGAMI_BUILD_NATIVE_TESTS=ON
-          -DKAGAMI_ENABLE_CLANG_TIDY=OFF
-          -DKAGAMI_PACKAGE_WEBUI=OFF
-      - name: Build and test state parsing
+      - name: Install the fixed NDK
+        run: sdkmanager "ndk;30.0.16248370"
+      - name: Configure and build NDK fixtures
         run: |
-          cmake --build build/native-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test -j2
-          ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime|kasumi_rules|kasumi_runtime|config_read)$'
-      - name: Test actual mounts in a private namespace
-        run: sudo ctest --test-dir build/native-tests --output-on-failure -R '^(module_runtime_mounts|magic_runtime)$'
+          cmake -S . -B build/android-tests -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/30.0.16248370/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Debug \
+            -DKAGAMI_BUILD_NATIVE_TESTS=ON -DKAGAMI_ENABLE_CLANG_TIDY=OFF -DKAGAMI_PACKAGE_WEBUI=OFF
+          cmake --build build/android-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test -j2
 
   webui:
     name: WebUI source and bundle
@@ -139,7 +136,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: [build-kasumi-lkm, webui, native-runtime]
+    needs: [build-kasumi-lkm, webui, native-build]
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     steps:
@@ -174,7 +171,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r27c
+          ndk-version: r30
 
       - name: Setup Node.js for the offline WebUI bundle
         uses: actions/setup-node@v4

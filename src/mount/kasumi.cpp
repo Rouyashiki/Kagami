@@ -1,5 +1,6 @@
 #include "mount/kasumi.hpp"
 #include <iterator>
+#include "mount/kasumi_rule_index.hpp"
 
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
@@ -90,45 +91,23 @@ bool write_boot_marker(const fs::path& path, const std::string& detail = {}) {
     return true;
 }
 
-bool path_matches_rule(const std::string& path, const std::string& prefix) {
-    if (path == prefix) {
-        return true;
-    }
-    if (path.size() <= prefix.size() || path.compare(0, prefix.size(), prefix) != 0) {
-        return false;
-    }
-    return prefix.back() == '/' || path[prefix.size()] == '/';
-}
-
-std::string effective_mode(const std::string& path, const std::vector<ModuleRule>& rules) {
-    std::string mode = "kasumi";
-    std::size_t longest = 0;
-    for (const auto& rule : rules) {
-        if (rule.path.empty() || rule.path.front() != '/') {
-            continue;
-        }
-        if (path_matches_rule(path, rule.path) && rule.path.size() >= longest) {
-            longest = rule.path.size();
-            mode = rule.mode;
-        }
-    }
-    return mode;
-}
-
-bool has_nested_rule(const std::string& path, const std::vector<ModuleRule>& rules) {
-    return std::any_of(rules.begin(), rules.end(), [&](const ModuleRule& rule) {
-        return rule.path.size() > path.size() && path_matches_rule(rule.path, path);
-    });
-}
-
 // Resolve symlinked partition paths (e.g. /system/vendor -> /vendor) without
 // discarding a non-existent leaf that a module adds.
-std::string resolve_virtual_path(const std::string& value) {
+struct ResolvedParent {
+    fs::path path;
+    fs::path resolved;
+    bool valid = false;
+};
+
+std::string resolve_virtual_path(const std::string& value, ResolvedParent* cached = nullptr) {
     const fs::path path(value);
     if (!path.has_parent_path()) {
         return value;
     }
     fs::path current = path.parent_path();
+    if (cached && cached->valid && cached->path == current) {
+        return (cached->resolved / path.filename()).string();
+    }
     std::vector<fs::path> suffix;
     std::error_code ec;
     while (!current.empty() && current != "/" && !fs::exists(current, ec)) {
@@ -146,6 +125,11 @@ std::string resolve_virtual_path(const std::string& value) {
     }
     for (auto it = suffix.rbegin(); it != suffix.rend(); ++it) {
         current /= *it;
+    }
+    if (cached && !ec) {
+        cached->path = path.parent_path();
+        cached->resolved = current;
+        cached->valid = true;
     }
     current /= path.filename();
     return current.string();
@@ -210,8 +194,7 @@ bool merge_tree_supported(const fs::path& root) {
 }
 
 bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
-                  const std::vector<ModuleRule>& rules, RuleBatch& batch,
-                  const std::string& owner) {
+                  const detail::RuleIndex& rules, RuleBatch& batch, const std::string& owner) {
     std::error_code ec;
     if (!fs::is_directory(source_root, ec)) {
         return !ec || ec == std::errc::no_such_file_or_directory;
@@ -224,15 +207,22 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
     }
     auto it = fs::recursive_directory_iterator(source_root, ec);
     const auto end = fs::recursive_directory_iterator();
+    // Compilation performs no mount mutations. Reuse a parent's observation
+    // for its siblings, bounded by traversal depth and this one source tree.
+    // ADD still resolves the whole final target immediately before installation.
+    std::vector<ResolvedParent> parents;
     for (; it != end && !ec; it.increment(ec)) {
         const fs::path source = it->path();
         const fs::path relative = source.lexically_relative(source_root);
         if (ec) {
             break;
         }
+        const auto depth = static_cast<std::size_t>(it.depth());
+        if (parents.size() <= depth)
+            parents.resize(depth + 1);
         const std::string virtual_path =
-            resolve_virtual_path((fs::path(virtual_root) / relative).string());
-        std::string mode = effective_mode(virtual_path, rules);
+            resolve_virtual_path((fs::path(virtual_root) / relative).string(), &parents[depth]);
+        auto mode = rules.effective_mode(virtual_path);
         if (mode == "hide") {
             batch.hide.insert(virtual_path);
             batch.hide_owners[virtual_path].insert(owner);
@@ -242,7 +232,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
             continue;
         }
         if (mode == "none") {
-            if (it->is_directory(ec) && !has_nested_rule(virtual_path, rules)) {
+            if (it->is_directory(ec) && !rules.has_nested_rule(virtual_path)) {
                 it.disable_recursion_pending();
             }
             continue;
@@ -272,7 +262,7 @@ bool compile_tree(const fs::path& source_root, const std::string& virtual_root,
         if (S_ISDIR(st.st_mode)) {
             std::error_code target_ec;
             if (fs::is_directory(virtual_path, target_ec) && !target_ec &&
-                !has_nested_rule(virtual_path, rules)) {
+                !rules.has_nested_rule(virtual_path)) {
                 if (!merge_tree_supported(source))
                     return false;
                 batch.mappings.push_back({virtual_path, source.string(), true, owner});
@@ -355,8 +345,9 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
     } else if (policy.owner == "disabled" || policy.owner == "off") {
         owner = ::kagami::kasumi::PolicyOwner::Disabled;
     } else {
-        error = policy.owner == "magisk" ? "Magisk has no Kasumi API 17 policy provider; use manual"
-                                         : "invalid policy owner: " + policy.owner;
+        error = policy.owner == "magisk"
+                    ? "Magisk has no Kasumi API 17 policy provider; use manual"
+                    : "invalid policy owner: " + std::string(std::string_view(policy.owner));
         return false;
     }
 
@@ -386,7 +377,8 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
 
 bool apply_feature_config(const Config& config, std::string& error) {
     mlog("apply features: mount_hide=" + std::to_string(config.enable_mount_hide) +
-         " mode=" + config.mount_hide_mode + " maps=" + std::to_string(config.enable_maps_spoof) +
+         " mode=" + std::string(std::string_view(config.mount_hide_mode)) +
+         " maps=" + std::to_string(config.enable_maps_spoof) +
          " statfs=" + std::to_string(config.enable_statfs_spoof) +
          " overlay_xattrs=" + std::to_string(config.enable_overlay_xattr_hide) +
          " selinux_guard=" + std::to_string(config.enable_selinux_fix));
@@ -454,7 +446,7 @@ bool deactivate(std::string& error) {
 }
 
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
-                   const ModuleRuleMap& rules) {
+                   const ModuleRules& rules) {
     // All kernel mutation remains in the existing order. These records only
     // attribute the rules; readback, including the enabled gate, decides status.
     (void)module_runtime::record_rules({}, false);
@@ -485,17 +477,15 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     // /data/adb/modules; the vnode clones the source inode's SELinux SID, so no
     // relabeled mirror is needed (unlike OverlayFS, which exposes the lowerdir's
     // context). Kasumi therefore mounts no workdir.
-    const std::vector<std::string>& partitions =
+    const Arguments partitions =
         config.partitions.empty() ? fsutil::managed_partitions() : config.partitions;
 
     RuleBatch batch;
     for (const auto& module : modules) {
-        const auto rule_it = rules.find(module.id);
-        const std::vector<ModuleRule> empty_rules;
-        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        const auto module_rules = rules.find(module.id);
         for (const auto& rule : module_rules) {
             if (rule.mode == "hide" && !rule.path.empty() && rule.path.front() == '/') {
-                const auto path = resolve_virtual_path(rule.path);
+                const auto path = resolve_virtual_path(std::string(std::string_view(rule.path)));
                 batch.hide.insert(path);
                 batch.hide_owners[path].insert(module.id);
             }
@@ -506,12 +496,17 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     // by id, so emit them backwards to retain the same deterministic priority as
     // YukiSU's hymo planner.
     for (auto it = modules.rbegin(); it != modules.rend(); ++it) {
-        const auto rule_it = rules.find(it->id);
-        const std::vector<ModuleRule> empty_rules;
-        const auto& module_rules = rule_it == rules.end() ? empty_rules : rule_it->second;
+        const auto module_rules = rules.find(it->id);
+        detail::RuleIndex rule_index;
+        if (!rule_index.prepare_index(module_rules)) {
+            errno = ENOMEM;
+            return false;
+        }
         const fs::path source = it->path;
         for (const auto& partition : partitions) {
-            if (!compile_tree(source / partition, "/" + partition, module_rules, batch, it->id))
+            if (!compile_tree(source / std::string_view(partition),
+                              "/" + std::string(std::string_view(partition)), rule_index, batch,
+                              it->id))
                 return false;
         }
     }
@@ -545,9 +540,12 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
             installed_add[runtime_path] = rule;
         }
         rule.merge ? ++merge_count : ++add_count;
-        mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path + " source=" +
-                 rule.source + (added ? " ok" : " failed errno=" + std::to_string(errno)),
-             added ? logging::Level::Debug : logging::Level::Error);
+        if (!added || logging::enabled(logging::Level::Debug)) {
+            mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path +
+                     " source=" + rule.source +
+                     (added ? " ok" : " failed errno=" + std::to_string(errno)),
+                 added ? logging::Level::Debug : logging::Level::Error);
+        }
         ok = added && ok;
     }
     for (const auto& [path, rule] : expected_add) {
@@ -563,8 +561,10 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     }
     for (const auto& path : batch.hide) {
         const bool hidden = ::kagami::kasumi::hide_path(path);
-        mlog("hide path=" + path + (hidden ? " ok" : " failed errno=" + std::to_string(errno)),
-             hidden ? logging::Level::Debug : logging::Level::Error);
+        if (!hidden || logging::enabled(logging::Level::Debug)) {
+            mlog("hide path=" + path + (hidden ? " ok" : " failed errno=" + std::to_string(errno)),
+                 hidden ? logging::Level::Debug : logging::Level::Error);
+        }
         ok = hidden && ok;
     }
     for (const auto& [path, owners] : batch.hide_owners) {

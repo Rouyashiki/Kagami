@@ -1,4 +1,5 @@
 #include "core/json_value.hpp"
+#include "core/prepared_input.hpp"
 #include "kagami/config.hpp"
 
 #include <grp.h>
@@ -22,7 +23,7 @@ void require(bool condition, const std::string& message) {
 struct Fixture {
     fs::path path;
     Fixture() {
-        char pattern[] = "/tmp/kagami-config-test-XXXXXX";
+        char pattern[] = "/data/local/tmp/kagami-config-test-XXXXXX";
         const auto* created = mkdtemp(pattern);
         require(created != nullptr, "create config fixture");
         path = created;
@@ -42,10 +43,19 @@ std::string read_text(const fs::path& path) {
     require(input.good(), "read " + path.string());
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
+bool read_config_text(const std::string& path, std::string& output, std::string& error,
+                      bool allow_missing = false) {
+    output.clear();
+    kagami::PreparedInput input;
+    if (!kagami::read_config_json(path, input, error, allow_missing))
+        return false;
+    output.assign(input.view());
+    return true;
+}
 kagami::JsonValue document(const fs::path& path) {
     std::string input;
     std::string error;
-    require(kagami::read_config_json(path.string(), input, error), "read valid config: " + error);
+    require(read_config_text(path.string(), input, error), "read valid config: " + error);
     kagami::JsonValue result;
     require(kagami::parse_json(input, result, error) && result.is_object(), "parse config object");
     return result;
@@ -60,11 +70,11 @@ void test_missing() {
     const auto path = fixture.path / "config.json";
     std::string json = "stale";
     std::string error;
-    require(!kagami::read_config_json(path.string(), json, error) && json.empty() && !error.empty(),
+    require(!read_config_text(path.string(), json, error) && json.empty() && !error.empty(),
             "normal missing read must fail");
-    require(kagami::read_config_json(path.string(), json, error, true), "allow missing defaults");
+    require(read_config_text(path.string(), json, error, true), "allow missing defaults");
     require(!fs::exists(path), "default read must not create a file");
-    kagami::Config config;
+    kagami::PreparedConfig config;
     require(kagami::parse_config_json(json, config, error) && !config.lkm_autoload,
             "missing read returns actual defaults");
     require(kagami::merge_config_json(path.string(), "{\"debug\":true}", error),
@@ -80,7 +90,8 @@ void test_missing() {
     kagami::PolicyConfig policy;
     policy.owner = "kagami";
     policy.use_allow_uids = true;
-    policy.allow_uids = {10001};
+    const std::uint32_t allow[] = {10001};
+    policy.allow_uids = allow;
     const auto policy_path = fixture.path / "policy.json";
     require(kagami::update_policy_config(policy_path.string(), policy, error),
             "policy initializes absent config");
@@ -92,12 +103,11 @@ void test_missing() {
 void expect_all_updates_rejected(const fs::path& path) {
     std::string json = "stale";
     std::string error;
-    require(!kagami::read_config_json(path.string(), json, error) && json.empty() && !error.empty(),
+    require(!read_config_text(path.string(), json, error) && json.empty() && !error.empty(),
             "strict read rejects unreadable/invalid config");
-    require(!kagami::read_config_json(path.string(), json, error, true) && json.empty() &&
-                !error.empty(),
+    require(!read_config_text(path.string(), json, error, true) && json.empty() && !error.empty(),
             "allow_missing cannot mask an existing bad config");
-    kagami::Config config;
+    kagami::PreparedConfig config;
     config.mount_source = "sentinel";
     require(!kagami::read_config_file(path.string(), config, error) &&
                 config.mount_source == "sentinel",
@@ -146,7 +156,7 @@ void test_permission_denied() {
             write_text(fixture.path / "child-can-write", "yes");
             std::string json;
             std::string error;
-            require(!kagami::read_config_json(path.string(), json, error, true),
+            require(!read_config_text(path.string(), json, error, true),
                     "permission denial is not missing config");
             require(error.rfind("open " + path.string() + ":", 0) == 0,
                     "failure belongs to config read, not the directory/lock");
@@ -187,7 +197,7 @@ void test_preservation_and_migration() {
     require(saved.find("enable_hidexattr") == nullptr &&
                 field(saved, "kasumi_feature_config_version").number_value == 3,
             "split migration replaces legacy feature switch");
-    kagami::Config config;
+    kagami::PreparedConfig config;
     require(kagami::read_config_file(path.string(), config, error), "read migrated config");
     require(config.debug && !config.enable_mount_hide && config.mount_hide_mode == "aggressive" &&
                 config.enable_overlay_xattr_hide && config.enable_maps_spoof &&
@@ -209,7 +219,8 @@ void test_preservation_and_migration() {
     kagami::PolicyConfig policy;
     policy.owner = "kagami";
     policy.use_deny_uids = true;
-    policy.deny_uids = {10020, 10021};
+    const std::uint32_t deny[] = {10020, 10021};
+    policy.deny_uids = deny;
     require(kagami::update_policy_config(path.string(), policy, error), "dedicated policy update");
     saved = document(path);
     require(kagami::stringify_json(field(saved, "future")) == original_future,

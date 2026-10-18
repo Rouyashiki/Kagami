@@ -33,7 +33,7 @@ bool deactivate(std::string& error);
 // clones the source SELinux SID). Must run in PID 1's mount namespace so the
 // rules resolve against the init-namespace view.
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
-                   const ModuleRuleMap& rules);
+                   const ModuleRules& rules);
 
 // Removes Kagami-owned Kasumi rules. Kasumi holds no mirror storage of its own.
 // Must run in the init mount namespace.

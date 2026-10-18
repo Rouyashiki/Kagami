@@ -1,11 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <iosfwd>
 #include <map>
 #include <string>
 #include <vector>
+#include "core/directory.hpp"
 
 namespace kagami::mount::module_runtime {
 
@@ -56,6 +56,35 @@ struct MountContribution {
     MountIdentity identity;
 };
 
+// Keeps the attachment alive until its mountinfo tuple can be read at a safe
+// backend boundary. The descriptor pins its mount ID even after a detach.
+class PendingMountCapture {
+public:
+    ~PendingMountCapture();
+    PendingMountCapture(const PendingMountCapture&) = delete;
+    PendingMountCapture& operator=(const PendingMountCapture&) = delete;
+    PendingMountCapture(PendingMountCapture&& other) noexcept;
+    PendingMountCapture& operator=(PendingMountCapture&& other) noexcept;
+
+private:
+    PendingMountCapture() = default;
+    int fd_ = -1;
+    MountContribution contribution_;
+    MountIdentity observed_;
+    std::string resolved_;
+    friend PendingMountCapture capture_mount_id(const std::string&,
+                                                const std::vector<std::string>&);
+    friend std::vector<MountContribution> complete_mount_captures(std::vector<PendingMountCapture>);
+};
+
+// Call immediately after attachment. Final symlinks and failed observations
+// remain uncaptured. Complete in the same namespace, before backend rollback.
+PendingMountCapture capture_mount_id(const std::string& path,
+                                     const std::vector<std::string>& owners);
+// Consumes all pending descriptors and returns one contribution per input in
+// input order. Failed captures retain the original path and captured == false.
+std::vector<MountContribution> complete_mount_captures(std::vector<PendingMountCapture> captures);
+
 // Call immediately after the actual attachment in the mount child, before
 // another backend can obscure it. A failed capture is retained as unknown.
 MountContribution capture_mount(const std::string& path, const std::vector<std::string>& owners);
@@ -94,14 +123,53 @@ struct Summary {
 };
 
 struct Snapshot {
-    std::map<std::string, Summary> modules;
+    std::map<std::string, Summary, std::less<>> modules;
     // Also applies to installed modules absent from modules.
     Summary missing;
 };
 
 Snapshot read_snapshot(const KasumiObservation& observation = {});
-// The callback runs under the same shared lock as sidecar/mountinfo reads.
-Snapshot read_snapshot(const std::function<KasumiObservation()>& observe);
+namespace detail {
+struct Record {
+    std::string backend;
+    bool complete = false;
+    std::vector<MountContribution> mounts;
+    std::vector<RuleEvidence> rules;
+};
+struct Database {
+    std::string boot;
+    std::uint64_t generation = 0;
+    std::string namespace_id;
+    std::map<std::string, Record> modules;
+};
+
+struct SnapshotContext {
+    Database database;
+    posix::Fd lock;
+    std::vector<MountIdentity> mounts;
+    std::string mount_error;
+    bool mounts_ok = false;
+    bool needs_kasumi = false;
+};
+bool prepare_snapshot(SnapshotContext& context, Snapshot& result);
+void finish_snapshot(SnapshotContext& context, const KasumiObservation& observation,
+                     Snapshot& result);
+}  // namespace detail
+
+// The concrete callback runs under the shared snapshot lock. Its returned
+// observation can be borrowed; an injected observation is no longer deep-copied.
+template <typename Observer>
+Snapshot read_snapshot_observed(Observer&& observe) {
+    Snapshot result;
+    detail::SnapshotContext context;
+    if (!detail::prepare_snapshot(context, result))
+        return result;
+    if (context.needs_kasumi)
+        detail::finish_snapshot(context, observe(), result);
+    else
+        detail::finish_snapshot(context, KasumiObservation{}, result);
+    return result;
+}
 std::string summary_json(const Summary& summary);
 
 // Pure parsing/comparison seams also used by native fixture tests. Full tuple
@@ -109,6 +177,6 @@ std::string summary_json(const Summary& summary);
 bool parse_mountinfo(const std::string& text, std::vector<MountIdentity>& mounts,
                      std::string& error);
 bool same_mount(const MountIdentity& recorded, const MountIdentity& live);
-bool read_complete(std::istream& input, std::string& output);
+bool read_complete(int fd, std::string& output);
 
 }  // namespace kagami::mount::module_runtime

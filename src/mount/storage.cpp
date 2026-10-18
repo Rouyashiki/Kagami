@@ -170,13 +170,14 @@ bool mounted_mode(const std::string& path, Mode& mode) {
 // The per-boot mirror path is recorded here so status/teardown in later kagamid
 // invocations agree with the mount-all that created it.
 std::string mirror_run_file(const Config& config) {
-    const std::string base = config.data_dir.empty() ? "/data/adb/kagami" : config.data_dir;
+    const std::string base(config.data_dir.empty() ? std::string_view("/data/adb/kagami")
+                                                   : std::string_view(config.data_dir));
     return base + "/run/mirror_mounts.list";
 }
 
 // "" and the retired fixed default both mean "randomize"; any other explicit
 // mirror_dir is an operator override that wins.
-bool mirror_is_auto(const std::string& dir) {
+bool mirror_is_auto(std::string_view dir) {
     return dir.empty() || dir == "/dev/kagami_mirror";
 }
 
@@ -227,14 +228,15 @@ std::string current_mirror_dir(const Config& config) {
     auto owned = owned_mirror(config, true);
     if (!owned.empty())
         return owned;
-    return mirror_is_auto(config.mirror_dir) ? std::string{} : config.mirror_dir;
+    return mirror_is_auto(config.mirror_dir) ? std::string{}
+                                             : std::string(std::string_view(config.mirror_dir));
 }
 
 // Reuse this boot's committed mirror path, or choose a fresh mountpoint.
 namespace {
 std::string acquire_mirror_dir(const Config& config) {
     if (!mirror_is_auto(config.mirror_dir)) {
-        return config.mirror_dir;
+        return std::string(std::string_view(config.mirror_dir));
     }
     std::string existing = current_mirror_dir(config);
     if (!existing.empty()) {
@@ -249,8 +251,8 @@ Handle setup(const Config& config) {
     PendingMounts pending;
     const std::string base = acquire_mirror_dir(config);  // per-boot random /mnt mountpoint
     h.content_dir = base;
-    const std::string img = config.mirror_img;  // backing image persists on /data
-    std::string erofs_img = config.mirror_img;
+    const std::string img(std::string_view(config.mirror_img));  // backing image persists on /data
+    std::string erofs_img(std::string_view(config.mirror_img));
     const auto dot = erofs_img.rfind(".img");
     if (dot != std::string::npos) {
         erofs_img.replace(dot, 4, ".erofs");
@@ -261,7 +263,7 @@ Handle setup(const Config& config) {
     std::error_code ec;
     fs::create_directories(h.content_dir, ec);
 
-    const std::string& mode = config.fs_type;
+    const std::string_view mode = config.fs_type;
     const bool want_auto = mode == "auto" || mode.empty();
     const bool writable = config.overlay_writable;  // upper/work layer is opt-in
 
@@ -311,7 +313,8 @@ Handle setup(const Config& config) {
 
     // erofs: read-only content image, plus a separate tmpfs writable layer if opted in.
     if (mode == "erofs") {
-        if (!fs::exists(erofs_img)) {
+        std::error_code image_error;
+        if (!fs::exists(erofs_img, image_error)) {
             mlog("storage: erofs image missing (" + erofs_img + "); build it at install time");
             return h;
         }
@@ -379,7 +382,9 @@ Handle setup(const Config& config) {
     }
 
     // ext4 loop image (forced, or the auto fallback). Writable layer lives inside.
-    if (!fs::exists(img) && !make_ext4_image(img, config.mirror_img_size_mb)) {
+    std::error_code image_error;
+    const bool image_exists = fs::exists(img, image_error);
+    if (image_error || (!image_exists && !make_ext4_image(img, config.mirror_img_size_mb))) {
         return h;
     }
     const auto relative_image =

@@ -227,7 +227,7 @@ void write(Level level, const std::string& component, const std::string& message
     const ErrnoGuard saved;
     if (!enabled(level))
         return;
-    try {
+    {
         const auto path = runtime_log_file();
         std::string error;
         if (!prepare_private_directory(path.parent_path(), error)) {
@@ -248,8 +248,6 @@ void write(Level level, const std::string& component, const std::string& message
         if (file.get() < 0 || !regular(file.get()) || !write_all(file.get(), line))
             (void)std::fprintf(stderr, "[ERROR] [logging] append %s: %s\n", path.c_str(),
                                std::strerror(errno));
-    } catch (...) {
-        (void)std::fputs("[ERROR] [logging] log write failed\n", stderr);
     }
 }
 

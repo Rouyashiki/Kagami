@@ -7,6 +7,8 @@ option(KAGAMI_PACKAGE_WEBUI "Include the bundled WebUI in module packages" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+include(cmake/Production.cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 file(READ "${CMAKE_SOURCE_DIR}/module/module.prop" KAGAMI_MODULE_PROP)
@@ -26,10 +28,13 @@ set(KAGAMI_SOURCES
     src/core/daemon.cpp
     src/core/log.cpp
     src/core/config.cpp
+    src/core/flat_json.cpp
     src/core/runtime.cpp
     src/core/json_value.cpp
     src/core/lkm.cpp
     src/mount/backend.cpp
+    src/mount/module_scan.cpp
+    src/mount/module_settings.cpp
     src/mount/mount_fs.cpp
     src/mount/module_runtime.cpp
     src/mount/kasumi.cpp
@@ -40,6 +45,7 @@ set(KAGAMI_SOURCES
 )
 
 add_executable(kagamid ${KAGAMI_SOURCES})
+kagami_production(kagamid)
 include(cmake/ClangTidy.cmake)
 kagami_enable_clang_tidy(kagamid)
 if(ANDROID)
@@ -70,6 +76,7 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
         src/core/runtime.cpp
         src/core/json_value.cpp
         src/core/config.cpp
+        src/core/flat_json.cpp
         src/core/log.cpp
     )
     target_include_directories(module_runtime_test PRIVATE include src)
@@ -85,6 +92,7 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
         src/core/runtime.cpp
         src/core/json_value.cpp
         src/core/config.cpp
+        src/core/flat_json.cpp
         src/core/log.cpp
     )
     target_include_directories(magic_runtime_test PRIVATE include src)
@@ -106,11 +114,13 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     add_executable(kasumi_runtime_test
         tests/native/kasumi_runtime_test.cpp
         src/mount/kasumi.cpp
+        src/mount/module_settings.cpp
         src/mount/mount_fs.cpp
         src/mount/module_runtime.cpp
         src/core/runtime.cpp
         src/core/json_value.cpp
         src/core/config.cpp
+        src/core/flat_json.cpp
         src/core/log.cpp
     )
     target_include_directories(kasumi_runtime_test PRIVATE include src)
@@ -124,6 +134,7 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     add_executable(config_read_test
         tests/native/config_read_test.cpp
         src/core/config.cpp
+        src/core/flat_json.cpp
         src/core/json_value.cpp
         src/core/runtime.cpp
         src/core/log.cpp
@@ -136,20 +147,18 @@ endif()
 set(LKMLOADER_STRIP_ANDROID_BINARY ${KAGAMI_STRIP_ANDROID_BINARY}
     CACHE BOOL "Strip the bundled lkmloader Android binary" FORCE)
 add_subdirectory(third_party/lkmloader)
+get_target_property(kagami_loader_options lkmloader COMPILE_OPTIONS)
+list(REMOVE_ITEM kagami_loader_options -Oz)
+set_property(TARGET lkmloader PROPERTY COMPILE_OPTIONS "${kagami_loader_options}")
+kagami_production(lkmloader)
 
 if(ANDROID)
     set_target_properties(kagamid PROPERTIES OUTPUT_NAME "kagamid-${ANDROID_ABI}")
     target_compile_options(kagamid PRIVATE
-        -Oz
         -fPIE
-        -ffunction-sections
-        -fdata-sections
-        -fvisibility=hidden
-        -fvisibility-inlines-hidden
     )
     target_link_options(kagamid PRIVATE
         -pie
-        -Wl,--gc-sections
     )
     if(KAGAMI_STRIP_ANDROID_BINARY)
         target_link_options(kagamid PRIVATE -Wl,--strip-all)

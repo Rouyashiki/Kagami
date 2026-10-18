@@ -1,6 +1,7 @@
 #include "mount/module_runtime.hpp"
 #include "core/runtime.hpp"
 
+#include <fcntl.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
@@ -24,15 +25,23 @@ void require(bool value, const std::string& message) {
 }
 struct Fixture {
     fs::path path;
-    Fixture() {
-        char pattern[] = "/tmp/kagami-runtime-test-XXXXXX";
+    bool mounted_backing = false;
+    explicit Fixture(bool mount_backing = false) {
+        char pattern[] = "/data/local/tmp/kagami-runtime-test-XXXXXX";
         const auto* created = mkdtemp(pattern);
         require(created != nullptr, "create fixture");
         path = created;
+        if (mount_backing) {
+            require(mount("kagami-runtime-fixture", path.c_str(), "tmpfs", 0, "mode=0700") == 0,
+                    "prepare private overlay-compatible fixture filesystem");
+            mounted_backing = true;
+        }
         require(setenv("KAGAMI_DATA_DIR", path.c_str(), 1) == 0, "set fixture directory");
         require(setenv("KAGAMI_MOUNT_HERE", "1", 1) == 0, "select private namespace");
     }
     ~Fixture() {
+        if (mounted_backing)
+            (void)umount2(path.c_str(), MNT_DETACH);
         std::error_code error;
         fs::remove_all(path, error);
     }
@@ -55,24 +64,18 @@ void write_text(const fs::path& path, const std::string& text) {
     require(out.good(), "write fixture " + path.string());
 }
 void test_parser() {
-    class FailingBuffer : public std::streambuf {
-        std::streamsize xsgetn(char* output, std::streamsize count) override {
-            if (read_once_)
-                throw std::ios_base::failure("injected read failure after complete lines");
-            read_once_ = true;
-            std::fill_n(output, count, 'x');
-            output[count - 1] = '\n';
-            return count;
-        }
-        bool read_once_ = false;
-    } failing_buffer;
-    std::istream failing_input(&failing_buffer);
+    int pipe_fds[2];
+    require(pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) == 0, "create read failure pipe");
+    require(write(pipe_fds[1], "complete\n", 9) == 9, "write complete line before error");
     std::string partial;
-    require(!runtime::read_complete(failing_input, partial) && !partial.empty(),
-            "complete lines before an I/O error cannot become a complete snapshot");
-    std::istringstream good_input("complete\n");
-    require(runtime::read_complete(good_input, partial) && partial == "complete\n",
+    require(
+        !runtime::read_complete(pipe_fds[0], partial) && partial == "complete\n" && errno == EAGAIN,
+        "complete lines before an I/O error cannot become a complete snapshot");
+    require(write(pipe_fds[1], "complete\n", 9) == 9, "write EOF fixture");
+    close(pipe_fds[1]);
+    require(runtime::read_complete(pipe_fds[0], partial) && partial == "complete\n",
             "read to clean EOF");
+    close(pipe_fds[0]);
     std::vector<runtime::MountIdentity> mounts;
     std::string error;
     const std::string fixture =
@@ -290,10 +293,11 @@ void test_rules() {
     live.text += "add /ambiguous path /source 0\n";
     require_state("one", "unknown", live);
     int calls = 0;
-    const auto callback = runtime::read_snapshot(std::function<runtime::KasumiObservation()>([&]() {
-        ++calls;
-        return live;
-    }));
+    const auto callback =
+        runtime::read_snapshot_observed([&]() -> const runtime::KasumiObservation& {
+            ++calls;
+            return live;
+        });
     require(calls == 1 && callback.modules.at("one").state == "unknown", "query callback");
     {
         runtime::Operation operation;
@@ -305,10 +309,10 @@ void test_rules() {
     require_state("two", "unmounted");
     require_state("other", "unmounted");
     calls = 0;
-    (void)runtime::read_snapshot(std::function<runtime::KasumiObservation()>([&]() {
+    (void)runtime::read_snapshot_observed([&]() -> const runtime::KasumiObservation& {
         ++calls;
         return live;
-    }));
+    });
     require(calls == 0, "no unnecessary Kasumi query without rules");
 }
 void test_failure() {
@@ -350,7 +354,8 @@ int test_mounts() {
     }
     require(mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) == 0,
             "make namespace private");
-    Fixture fixture;
+    // Android /data can use casefold; keep OverlayFS fixtures on private tmpfs.
+    Fixture fixture(true);
     const auto target = fixture.path / "target";
     const auto source = fixture.path / "source";
     const auto alias = fixture.path / "alias";

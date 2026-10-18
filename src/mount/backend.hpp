@@ -2,10 +2,14 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "kagami/config.hpp"
+#include "kagami/kasumi_client.hpp"
+#include "mount/module_scan.hpp"
+#include "mount/module_settings.hpp"
 
 namespace kagami::mount {
 
@@ -24,6 +28,8 @@ struct BackendStatus {
 };
 
 std::vector<BackendStatus> backend_statuses();
+std::vector<BackendStatus> backend_statuses(const ::kagami::kasumi::VersionInfo& version,
+                                            int magic_mounts);
 std::string backend_kind_name(BackendKind kind);
 
 // A regular module eligible for mounting: /data/adb/modules/<id>.
@@ -32,15 +38,24 @@ struct ModuleEntry {
     std::filesystem::path path;
 };
 
-// A path-specific backend override persisted in module_rules.json. The longest
-// matching absolute path wins, matching the YukiSU hymo control-plane contract.
-struct ModuleRule {
-    std::string path;
-    std::string mode;
+// Reuse only while selecting one operation's modules, before mount/LKM changes.
+struct BackendAvailability {
+    std::optional<bool> overlay;
+    std::optional<bool> kasumi;
 };
 
-using ModuleModeMap = std::map<std::string, std::string>;
-using ModuleRuleMap = std::map<std::string, std::vector<ModuleRule>>;
+struct BackendPlan {
+    std::string_view selected;
+    std::string_view fallback;
+    bool inspect_root_files = false;
+    std::string_view select(const ModuleFacts& facts) const noexcept {
+        if (!facts.backend_content)
+            return "none";
+        return inspect_root_files && facts.needs_magic ? fallback : selected;
+    }
+};
+BackendPlan prepare_backend_plan(const Config& config, std::string_view mode,
+                                 BackendAvailability& observed, bool allow_kasumi);
 
 struct MountReport {
     bool ok = false;
@@ -52,20 +67,13 @@ struct MountReport {
 
 // Enabled, mountable modules under runtime_modules_dir(): skips entries with
 // no module.prop or with a disable/remove/skip_mount marker.
-std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config);
+std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config, int& error);
 
-ModuleModeMap load_module_modes();
-bool save_module_modes(const ModuleModeMap& modes);
-ModuleRuleMap load_module_rules();
-bool save_module_rules(const ModuleRuleMap& rules);
-
-// Resolve a module's effective backend ("overlay"|"magic"|"kasumi"|"none") from
-// its configured mode (modes[id], the global override config.mount_backend, or
-// the auto fallback). Used by the orchestrator and legacy strategy reporting;
-// this resolves configuration and does not inspect a module's live mounts.
-// `modes` is the parsed module_mode.json (id -> mode).
-std::string resolve_module_backend(const ModuleEntry& module, const Config& config,
-                                   const ModuleModeMap& modes);
+ModuleModes load_module_modes(int& error);
+ModuleRules load_module_rules(int& error);
+bool update_module_mode(std::string_view id, std::string_view mode, int& error);
+bool update_module_rule(std::string_view id, std::string_view path, std::string_view mode,
+                        bool remove, int& error);
 
 // Rebuild only Kasumi mappings in the init namespace. This is safe to expose
 // post-boot for the Kasumi hot-mount controls; Overlay/Magic remain boot-only.

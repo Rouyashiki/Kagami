@@ -2,6 +2,7 @@
 
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
+#include "kagami/fixed_array.hpp"
 
 #include <fcntl.h>
 #include <linux/stat.h>
@@ -13,29 +14,155 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <locale>
 #include <set>
 #include <sstream>
+#include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace kagami::mount::module_runtime {
 namespace {
 namespace fs = std::filesystem;
-struct Record {
-    std::string backend;
-    bool complete = false;
-    std::vector<MountContribution> mounts;
-    std::vector<RuleEvidence> rules;
+using detail::Database;
+using detail::Record;
+
+// These indexes borrow immutable snapshot storage and never outlive it. Keep
+// duplicate IDs in input order so lookup has the same first-match semantics as
+// find_if (the strict mountinfo parser normally rejects duplicate IDs).
+class MountIndex {
+public:
+    [[nodiscard]] bool prepare_index(const std::vector<MountIdentity>& mounts) noexcept {
+        constexpr std::size_t maximum = 1024UL * 1024;
+        if (mounts.size() > maximum || !entries_.prepare_array(mounts.size(), maximum)) {
+            errno = mounts.size() > maximum ? EOVERFLOW : ENOMEM;
+            return false;
+        }
+        for (const auto& mount : mounts)
+            if (!entries_.append({mount.mount_id, &mount})) {
+                errno = ENOBUFS;
+                return false;
+            }
+        if (!mounts.empty())
+            std::sort(entries_.data(), entries_.data() + entries_.size(),
+                      [](const auto& lhs, const auto& rhs) noexcept {
+                          return lhs.id < rhs.id || (lhs.id == rhs.id && lhs.mount < rhs.mount);
+                      });
+        return true;
+    }
+
+    [[nodiscard]] const MountIdentity* find(std::uint64_t id) const noexcept {
+        const auto entries = entries_.view();
+        if (entries.empty())
+            return nullptr;
+        const auto* found = std::lower_bound(
+            entries.begin(), entries.end(), id,
+            [](const auto& entry, auto value) noexcept { return entry.id < value; });
+        return found != entries.end() && found->id == id ? found->mount : nullptr;
+    }
+
+    [[nodiscard]] bool has_ancestor(const MountIdentity& current, std::uint64_t id) const noexcept {
+        const auto* node = &current;
+        // Every parent comes from this index. A longer chain must contain a
+        // cycle, and by then every reachable mount ID has been inspected.
+        for (auto remaining = entries_.size(); node && remaining != 0; --remaining) {
+            if (node->mount_id == id)
+                return true;
+            const auto* parent = find(node->parent_id);
+            if (parent == node)
+                break;
+            node = parent;
+        }
+        return false;
+    }
+
+private:
+    struct Entry {
+        std::uint64_t id;
+        const MountIdentity* mount;
+    };
+    bounded::Array<Entry> entries_;
 };
-struct Database {
-    std::string boot;
-    std::uint64_t generation = 0;
-    std::string namespace_id;
-    std::map<std::string, Record> modules;
+
+// An immutable ordinal table is prepared before inspecting any record. This
+// removes the former eighth-scan lazy hash allocation from contains().
+class RuleIndex {
+public:
+    [[nodiscard]] bool prepare_index(const KasumiObservation& observation) noexcept {
+        if (!observation.ok || !observation.enabled)
+            return true;
+        constexpr std::size_t maximum = 1024UL * 1024;
+        const auto& rules = observation.rules;
+        if (rules.size() > maximum || !entries_.prepare_array(rules.size(), maximum)) {
+            errno = rules.size() > maximum ? EOVERFLOW : ENOMEM;
+            return false;
+        }
+        for (const auto& rule : rules)
+            if (!entries_.append({&rule})) {
+                errno = ENOBUFS;
+                return false;
+            }
+        if (!rules.empty())
+            std::sort(entries_.data(), entries_.data() + entries_.size(), Less{});
+        return true;
+    }
+    [[nodiscard]] bool contains(const RuleEvidence& rule) const noexcept {
+        const auto entries = entries_.view();
+        return !entries.empty() &&
+               std::binary_search(entries.begin(), entries.end(), Entry{&rule}, Less{});
+    }
+
+private:
+    struct Entry {
+        const RuleEvidence* rule;
+    };
+    struct Less {
+        bool operator()(Entry lhs, Entry rhs) const noexcept {
+            return std::tie(lhs.rule->kind, lhs.rule->path, lhs.rule->source) <
+                   std::tie(rhs.rule->kind, rhs.rule->path, rhs.rule->source);
+        }
+    };
+    bounded::Array<Entry> entries_;
 };
+
+template <typename Contribution>
+void distribute(Database& database, const std::string& backend,
+                const std::vector<Contribution>& contributions, bool complete,
+                std::vector<Contribution> Record::* destination) {
+    struct Target {
+        const std::string* id = nullptr;
+        Record* record = nullptr;
+        const Contribution* previous = nullptr;
+    };
+    std::vector<Target> targets;
+    targets.reserve(database.modules.size());
+    for (auto& [id, record] : database.modules) {
+        if (record.backend != backend)
+            continue;
+        record.complete = complete;
+        (record.*destination).clear();
+        targets.push_back({&id, &record});
+    }
+    // Database keys already put targets in lookup order. Iterate contributions
+    // in their original order, including distinct equal-valued contributions.
+    for (const auto& contribution : contributions) {
+        for (const auto& owner : contribution.owners) {
+            const auto target =
+                std::lower_bound(targets.begin(), targets.end(), owner,
+                                 [](const auto& entry, const auto& id) { return *entry.id < id; });
+            if (target == targets.end() || *target->id != owner ||
+                target->previous == &contribution)
+                continue;
+            (target->record->*destination).push_back(contribution);
+            target->previous = &contribution;
+        }
+    }
+}
 struct Writer {
     unsigned depth = 0;
     int fd = -1;
@@ -54,6 +181,7 @@ public:
     FileDescriptor(FileDescriptor&&) = delete;
     FileDescriptor& operator=(FileDescriptor&&) = delete;
     [[nodiscard]] int get() const { return fd_; }
+    [[nodiscard]] int release() noexcept { return std::exchange(fd_, -1); }
 
 private:
     int fd_;
@@ -94,12 +222,12 @@ std::string ns_identity(const std::string& path) {
     return std::to_string(st.st_dev) + ":" + std::to_string(st.st_ino);
 }
 bool read_text(const fs::path& path, std::string& text, std::string& error) {
-    std::ifstream in(path);
-    if (!in) {
+    const FileDescriptor in(open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (in.get() < 0) {
         error = "cannot read " + path.string() + ": " + std::strerror(errno);
         return false;
     }
-    if (!read_complete(in, text)) {
+    if (!read_complete(in.get(), text)) {
         error = "incomplete read: " + path.string();
         return false;
     }
@@ -247,8 +375,11 @@ bool update(Function fn) {
     fn(database);
     return store(database);
 }
-std::string decode(const std::string& value) {
+std::string decode(std::string_view value) {
+    if (value.find('\\') == std::string_view::npos)
+        return std::string(value);
     std::string result;
+    result.reserve(value.size());
     for (std::size_t i = 0; i < value.size(); ++i) {
         if (value[i] == '\\' && i + 3 < value.size() && value[i + 1] >= '0' &&
             value[i + 1] <= '3' && value[i + 2] >= '0' && value[i + 2] <= '7' &&
@@ -262,23 +393,98 @@ std::string decode(const std::string& value) {
     }
     return result;
 }
-bool stat_identity(const std::string& path, MountIdentity& identity) {
+
+std::string_view mount_field(std::string_view& remaining) {
+    const auto space = remaining.find(' ');
+    const auto field = remaining.substr(0, space);
+    remaining.remove_prefix(space == std::string_view::npos ? remaining.size() : space + 1);
+    return field;
+}
+
+bool mount_number(std::string_view field, std::uint64_t& value) {
+    if (field.empty())
+        return false;
+    const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value);
+    return parsed.ec == std::errc{} && parsed.ptr == field.data() + field.size();
+}
+
+// Accept only the ordinary proc spelling here. Everything else is retried by
+// the original stream parser, including its numeric and whitespace semantics.
+// Views stay within text; every published identity owns its strings.
+bool parse_proc_mountinfo(std::string_view text, std::vector<MountIdentity>& mounts) {
+    if (text.empty() || text.back() != '\n')
+        return false;
+    std::vector<std::uint64_t> ids;
+    while (!text.empty()) {
+        const auto newline = text.find('\n');
+        const auto line = text.substr(0, newline);
+        text.remove_prefix(newline + 1);
+        const auto separator = line.find(" - ");
+        if (separator == std::string_view::npos || line.front() == ' ' || line.back() == ' ' ||
+            std::any_of(line.begin(), line.end(), [](char c) { return c >= '\t' && c <= '\r'; }) ||
+            line.find("  ") != std::string_view::npos)
+            return false;
+        auto before = line.substr(0, separator);
+        auto after = line.substr(separator + 3);
+        std::array<std::string_view, 6> fields;
+        for (auto& field : fields) {
+            field = mount_field(before);
+            if (field.empty())
+                return false;
+        }
+        MountIdentity mount;
+        std::uint64_t major = 0;
+        std::uint64_t minor = 0;
+        const auto colon = fields[2].find(':');
+        if (!mount_number(fields[0], mount.mount_id) || mount.mount_id == 0 ||
+            !mount_number(fields[1], mount.parent_id) || colon == std::string_view::npos ||
+            !mount_number(fields[2].substr(0, colon), major) ||
+            !mount_number(fields[2].substr(colon + 1), minor) || major > UINT32_MAX ||
+            minor > UINT32_MAX)
+            return false;
+        const auto filesystem = mount_field(after);
+        const auto source = mount_field(after);
+        const auto options = mount_field(after);
+        if (filesystem.empty() || source.empty() || options.empty() || !after.empty())
+            return false;
+        mount.device = (major << 32) | minor;
+        mount.root = decode(fields[3]);
+        mount.path = decode(fields[4]);
+        mount.filesystem = filesystem;
+        mount.source = decode(source);
+        if (mount.path.empty() || mount.path.front() != '/' || mount.root.empty() ||
+            mount.root.front() != '/')
+            return false;
+        ids.push_back(mount.mount_id);
+        mounts.push_back(std::move(mount));
+    }
+    std::sort(ids.begin(), ids.end());
+    return std::adjacent_find(ids.begin(), ids.end()) == ids.end();
+}
+bool stat_identity_at(int fd, const char* path, int flags, MountIdentity& identity) {
 #if defined(__linux__) && defined(__NR_statx)
     struct statx st{};
     constexpr unsigned mask = STATX_INO | STATX_MNT_ID;
-    if (syscall(__NR_statx, AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, mask,
-                &st) != 0 ||
-        (st.stx_mask & mask) != mask)
+    if (syscall(__NR_statx, fd, path, flags, mask, &st) != 0 || (st.stx_mask & mask) != mask)
         return false;
     identity.mount_id = st.stx_mnt_id;
     identity.device = (static_cast<std::uint64_t>(st.stx_dev_major) << 32) | st.stx_dev_minor;
     identity.inode = st.stx_ino;
     return true;
 #else
+    (void)fd;
     (void)path;
+    (void)flags;
     (void)identity;
     return false;
 #endif
+}
+bool stat_identity(const std::string& path, MountIdentity& identity) {
+    return stat_identity_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+                            identity);
+}
+bool same_inode(const MountIdentity& lhs, const MountIdentity& rhs) {
+    return lhs.mount_id == rhs.mount_id && lhs.device == rhs.device && lhs.inode == rhs.inode;
 }
 bool resolve_mount_identity(const std::string& path, std::string& resolved,
                             MountIdentity& identity) {
@@ -310,17 +516,7 @@ bool read_mounts(std::vector<MountIdentity>& mounts, std::string& error, bool se
         mount.namespace_id = ns;
     return true;
 }
-bool hidden_by_ancestor(const MountIdentity& current, const std::vector<MountIdentity>& mounts) {
-    std::set<std::uint64_t> ancestors;
-    const MountIdentity* node = &current;
-    while (ancestors.insert(node->mount_id).second) {
-        const auto parent = std::find_if(mounts.begin(), mounts.end(), [&](const auto& entry) {
-            return entry.mount_id == node->parent_id;
-        });
-        if (parent == mounts.end())
-            break;
-        node = &*parent;
-    }
+bool hidden_by_ancestor(const MountIdentity& current, const MountIndex& mounts) {
     auto path = fs::path(current.path).parent_path();
     while (!path.empty()) {
         MountIdentity visible;
@@ -328,10 +524,7 @@ bool hidden_by_ancestor(const MountIdentity& current, const std::vector<MountIde
         if (stat_identity(probe, visible)) {
             // A reachable ancestor belongs to another attachment branch: an
             // upper mount is hiding this still-attached lower subtree.
-            return ancestors.count(visible.mount_id) == 0 &&
-                   std::any_of(mounts.begin(), mounts.end(), [&](const auto& entry) {
-                       return entry.mount_id == visible.mount_id;
-                   });
+            return mounts.find(visible.mount_id) && !mounts.has_ancestor(current, visible.mount_id);
         }
         if (path == path.root_path())
             break;
@@ -373,7 +566,8 @@ Summary unknown(const std::string& backend, const std::string& reason,
     return {"unknown", backend, reason, code, error};
 }
 Summary summarize(const Record& record, const std::vector<MountIdentity>& live, bool mounts_ok,
-                  const std::string& mount_error, const KasumiObservation& kasumi) {
+                  const std::string& mount_error, const KasumiObservation& kasumi,
+                  const MountIndex& mount_index, RuleIndex& rule_index) {
     std::size_t expected = 0;
     std::size_t present = 0;
     if (record.backend == "kasumi" && !record.rules.empty()) {
@@ -384,11 +578,7 @@ Summary summarize(const Record& record, const std::vector<MountIdentity>& live, 
                 rule.source.find_first_of(" \t\r\n") != std::string::npos)
                 return unknown(record.backend, "ambiguous_rule_encoding");
             ++expected;
-            if (kasumi.enabled &&
-                std::any_of(kasumi.rules.begin(), kasumi.rules.end(), [&](const auto& current) {
-                    return current.kind == rule.kind && current.path == rule.path &&
-                           current.source == rule.source;
-                }))
+            if (kasumi.enabled && rule_index.contains(rule))
                 ++present;
         }
     }
@@ -403,10 +593,8 @@ Summary summarize(const Record& record, const std::vector<MountIdentity>& live, 
         const auto& stored = contribution.identity;
         if (!live.empty() && live.front().namespace_id != stored.namespace_id)
             return unknown(record.backend, "namespace_changed");
-        const auto current = std::find_if(live.begin(), live.end(), [&](const auto& mount) {
-            return mount.mount_id == stored.mount_id;
-        });
-        if (current == live.end())
+        const auto* current = mount_index.find(stored.mount_id);
+        if (!current)
             continue;
         if (!same_mount(stored, *current))
             return unknown(record.backend, "mount_identity_changed");
@@ -415,7 +603,7 @@ Summary summarize(const Record& record, const std::vector<MountIdentity>& live, 
         // An upper overlay may cover this mount. mountinfo still identifies the
         // lower attachment; only compare inode when this exact mount is visible.
         if (!stat_identity(path, visible)) {
-            if (hidden_by_ancestor(*current, live)) {
+            if (hidden_by_ancestor(*current, mount_index)) {
                 ++present;
                 continue;
             }
@@ -572,6 +760,80 @@ MountContribution capture_mount(const std::string& path, const std::vector<std::
     result.captured = true;
     return result;
 }
+
+PendingMountCapture::~PendingMountCapture() {
+    if (fd_ >= 0)
+        close(fd_);
+}
+PendingMountCapture::PendingMountCapture(PendingMountCapture&& other) noexcept
+    : fd_(std::exchange(other.fd_, -1)),
+      contribution_(std::move(other.contribution_)),
+      observed_(std::move(other.observed_)),
+      resolved_(std::move(other.resolved_)) {}
+PendingMountCapture& PendingMountCapture::operator=(PendingMountCapture&& other) noexcept {
+    if (this == &other)
+        return *this;
+    if (fd_ >= 0)
+        close(fd_);
+    fd_ = std::exchange(other.fd_, -1);
+    contribution_ = std::move(other.contribution_);
+    observed_ = std::move(other.observed_);
+    resolved_ = std::move(other.resolved_);
+    return *this;
+}
+
+PendingMountCapture capture_mount_id(const std::string& path,
+                                     const std::vector<std::string>& owners) {
+    PendingMountCapture result;
+    result.contribution_ = {path, owners, true, false, {}};
+    const auto ns = ns_identity("/proc/self/ns/mnt");
+    if (ns.empty() || !resolve_mount_identity(path, result.resolved_, result.observed_))
+        return result;
+    FileDescriptor fd(open(path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW));
+    MountIdentity opened;
+    if (fd.get() < 0 ||
+        !stat_identity_at(fd.get(), "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+                          opened) ||
+        !same_inode(opened, result.observed_) || ns_identity("/proc/self/ns/mnt") != ns)
+        return result;
+    result.observed_.namespace_id = ns;
+    result.fd_ = fd.release();
+    return result;
+}
+
+std::vector<MountContribution> complete_mount_captures(std::vector<PendingMountCapture> captures) {
+    std::vector<MountContribution> results;
+    results.reserve(captures.size());
+    const bool pending = std::any_of(captures.begin(), captures.end(),
+                                     [](const auto& capture) { return capture.fd_ >= 0; });
+    std::vector<MountIdentity> mounts;
+    std::string error;
+    const auto ns = pending ? ns_identity("/proc/self/ns/mnt") : std::string{};
+    const bool observed = pending && !ns.empty() && read_mounts(mounts, error, true) &&
+                          ns_identity("/proc/self/ns/mnt") == ns;
+    MountIndex by_id;
+    const bool indexed = by_id.prepare_index(mounts);
+    for (auto& capture : captures) {
+        auto& result = capture.contribution_;
+        if (observed && indexed && capture.fd_ >= 0 && capture.observed_.namespace_id == ns) {
+            MountIdentity pinned;
+            const auto* match = by_id.find(capture.observed_.mount_id);
+            if (match && match->namespace_id == ns && match->path == capture.resolved_ &&
+                match->device == capture.observed_.device &&
+                stat_identity_at(capture.fd_, "",
+                                 AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT, pinned) &&
+                same_inode(pinned, capture.observed_)) {
+                result.identity = *match;
+                result.identity.inode = capture.observed_.inode;
+                result.path = capture.resolved_;
+                result.captured = true;
+            }
+        }
+        results.push_back(std::move(result));
+    }
+    return results;
+}
+
 void capture_mounts(std::vector<MountContribution>& contributions) {
     bool has_committed = false;
     for (auto& contribution : contributions) {
@@ -587,9 +849,9 @@ void capture_mounts(std::vector<MountContribution>& contributions) {
     std::string error;
     if (!read_mounts(mounts, error, true))
         return;
-    std::map<std::uint64_t, const MountIdentity*> by_id;
-    for (const auto& mount : mounts)
-        by_id.emplace(mount.mount_id, &mount);
+    MountIndex by_id;
+    if (!by_id.prepare_index(mounts))
+        return;
     for (auto& contribution : contributions) {
         if (!contribution.committed)
             continue;
@@ -597,11 +859,10 @@ void capture_mounts(std::vector<MountContribution>& contributions) {
         MountIdentity visible;
         if (!resolve_mount_identity(contribution.path, resolved, visible))
             continue;
-        const auto match = by_id.find(visible.mount_id);
-        if (match == by_id.end() || match->second->path != resolved ||
-            match->second->device != visible.device)
+        const auto* match = by_id.find(visible.mount_id);
+        if (!match || match->path != resolved || match->device != visible.device)
             continue;
-        contribution.identity = *match->second;
+        contribution.identity = *match;
         contribution.identity.inode = visible.inode;
         contribution.path = resolved;
         contribution.captured = true;
@@ -610,43 +871,26 @@ void capture_mounts(std::vector<MountContribution>& contributions) {
 bool record_mounts(const std::string& backend, const std::vector<MountContribution>& contributions,
                    bool complete) {
     return update([&](Database& database) {
-        for (auto& [id, record] : database.modules) {
-            if (record.backend != backend)
-                continue;
-            record.complete = complete;
-            record.mounts.clear();
-            for (const auto& contribution : contributions) {
-                if (std::find(contribution.owners.begin(), contribution.owners.end(), id) !=
-                    contribution.owners.end())
-                    record.mounts.push_back(contribution);
-            }
-        }
+        distribute(database, backend, contributions, complete, &Record::mounts);
     });
 }
 bool record_rules(const std::vector<RuleEvidence>& rules, bool complete) {
     return update([&](Database& database) {
-        for (auto& [id, record] : database.modules) {
-            if (record.backend != "kasumi")
-                continue;
-            record.complete = complete;
-            record.rules.clear();
-            for (const auto& rule : rules) {
-                if (std::find(rule.owners.begin(), rule.owners.end(), id) != rule.owners.end())
-                    record.rules.push_back(rule);
-            }
-        }
+        distribute(database, "kasumi", rules, complete, &Record::rules);
     });
 }
 
-Snapshot read_snapshot(const std::function<KasumiObservation()>& observe) {
-    Snapshot result;
-    Database database;
+bool detail::prepare_snapshot(SnapshotContext& context, Snapshot& result) {
+    auto& database = context.database;
     std::string reason;
     std::string error;
-    const bool loaded = load(database, reason, error);
-    const FileDescriptor fd(open(lock_file().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    context.lock = posix::Fd(open(lock_file().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    const auto& fd = context.lock;
     const bool locked = fd.get() >= 0 && flock(fd.get(), LOCK_SH | LOCK_NB) == 0;
     const int lock_error = locked ? 0 : errno;
+    // Acquire before reading. A successful shared lock makes this one read
+    // stable; failed acquisition still loads IDs for the unknown/updating view.
+    const bool loaded = load(database, reason, error);
     std::error_code pending_error;
     std::error_code invalid_error;
     const bool pending = fs::exists(pending_file(), pending_error);
@@ -673,14 +917,7 @@ Snapshot read_snapshot(const std::function<KasumiObservation()>& observe) {
             value.backend = record.backend;
             result.modules.emplace(id, std::move(value));
         }
-        return result;
-    }
-    // Re-read after acquiring the lock: a writer may have published between
-    // the first read (needed for pending IDs) and this shared-lock acquisition.
-    database = {};
-    if (!load(database, reason, error)) {
-        result.missing = unknown({}, reason, error, reason);
-        return result;
+        return false;
     }
     const auto live_namespace =
         ns_identity(runtime_mount_here() ? "/proc/self/ns/mnt" : "/proc/1/ns/mnt");
@@ -693,28 +930,54 @@ Snapshot read_snapshot(const std::function<KasumiObservation()>& observe) {
             value.backend = record.backend;
             result.modules.emplace(id, std::move(value));
         }
-        return result;
+        return false;
     }
-    std::vector<MountIdentity> mounts;
-    const bool mounts_ok = read_mounts(mounts, error, runtime_mount_here());
-    KasumiObservation kasumi;
-    const bool needs_kasumi =
+    const bool needs_mounts =
+        std::any_of(database.modules.begin(), database.modules.end(),
+                    [](const auto& entry) { return !entry.second.mounts.empty(); });
+    context.mounts_ok =
+        !needs_mounts || read_mounts(context.mounts, context.mount_error, runtime_mount_here());
+    context.needs_kasumi =
         std::any_of(database.modules.begin(), database.modules.end(),
                     [](const auto& entry) { return !entry.second.rules.empty(); });
-    if (needs_kasumi)
-        kasumi = observe();
-    if (kasumi.ok && !kasumi.text.empty() && !rules_from_text(kasumi.text, kasumi.rules)) {
-        kasumi.ok = false;
-        kasumi.error_code = "ambiguous_rule_encoding";
-        kasumi.error = "cannot parse complete Kasumi rule snapshot";
+    return true;
+}
+
+void detail::finish_snapshot(SnapshotContext& context, const KasumiObservation& observation,
+                             Snapshot& result) {
+    const auto& database = context.database;
+    const auto& mounts = context.mounts;
+    KasumiObservation decoded;
+    const KasumiObservation* observed = &observation;
+    if (observation.ok && !observation.text.empty()) {
+        decoded.ok = rules_from_text(observation.text, decoded.rules);
+        decoded.enabled = observation.enabled;
+        if (!decoded.ok) {
+            decoded.error_code = "ambiguous_rule_encoding";
+            decoded.error = "cannot parse complete Kasumi rule snapshot";
+        }
+        observed = &decoded;
+    }
+    const auto& kasumi = *observed;
+    MountIndex mount_index;
+    RuleIndex rule_index;
+    if (!mount_index.prepare_index(mounts) || !rule_index.prepare_index(kasumi)) {
+        result.missing = unknown({}, "read_failed", "cannot prepare runtime snapshot index",
+                                 "snapshot_index_unavailable");
+        for (const auto& [id, record] : database.modules) {
+            auto value = result.missing;
+            value.backend = record.backend;
+            result.modules.emplace(id, std::move(value));
+        }
+        return;
     }
     for (const auto& [id, record] : database.modules)
-        result.modules.emplace(id, summarize(record, mounts, mounts_ok, error, kasumi));
-    return result;
+        result.modules.emplace(id, summarize(record, mounts, context.mounts_ok, context.mount_error,
+                                             kasumi, mount_index, rule_index));
 }
 
 Snapshot read_snapshot(const KasumiObservation& observation) {
-    return read_snapshot(std::function<KasumiObservation()>([&]() { return observation; }));
+    return read_snapshot_observed([&]() -> const KasumiObservation& { return observation; });
 }
 
 std::string summary_json(const Summary& summary) {
@@ -741,6 +1004,11 @@ std::string summary_json(const Summary& summary) {
 
 bool parse_mountinfo(const std::string& text, std::vector<MountIdentity>& mounts,
                      std::string& error) {
+    mounts.clear();
+    // Custom locales may redefine numeric or whitespace extraction. Keep the
+    // stream path for them and for every input outside the proc fast path.
+    if (std::locale() == std::locale::classic() && parse_proc_mountinfo(text, mounts))
+        return true;
     mounts.clear();
     std::istringstream input(text);
     std::string line;
@@ -790,16 +1058,21 @@ bool same_mount(const MountIdentity& recorded, const MountIdentity& live) {
            recorded.namespace_id == live.namespace_id;
 }
 
-bool read_complete(std::istream& input, std::string& output) {
+bool read_complete(int fd, std::string& output) {
     output.clear();
-    std::array<char, 4096> buffer{};
-    try {
-        while (input.read(buffer.data(), buffer.size()))
-            output.append(buffer.data(), buffer.size());
-        output.append(buffer.data(), static_cast<std::size_t>(input.gcount()));
-    } catch (const std::ios_base::failure&) {
-        return false;
+    // Only the byte count returned by read() is consumed.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+    std::array<char, 4096> buffer;
+    for (;;) {
+        const auto count = read(fd, buffer.data(), buffer.size());
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (!count)
+            return true;
+        output.append(buffer.data(), static_cast<std::size_t>(count));
     }
-    return input.eof() && !input.bad();
 }
 }  // namespace kagami::mount::module_runtime

@@ -1,11 +1,14 @@
 #include "core/json_value.hpp"
 
 #include <cerrno>
+#include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace kagami {
 
@@ -147,7 +150,7 @@ private:
             if (!parse_value(child, error)) {
                 return false;
             }
-            value.object_value[key] = child;
+            value.object_value[key] = std::move(child);
             if (consume('}')) {
                 return true;
             }
@@ -174,7 +177,7 @@ private:
             if (!parse_value(child, error)) {
                 return false;
             }
-            value.array_value.push_back(child);
+            value.array_value.push_back(std::move(child));
             if (consume(']')) {
                 return true;
             }
@@ -191,14 +194,15 @@ private:
             return false;
         }
         value.clear();
+        std::size_t first = pos_;
         while (pos_ < input_.size()) {
             const char c = input_[pos_++];
+            if (c != '"' && c != '\\') {
+                continue;
+            }
+            value.append(input_.data() + first, pos_ - first - 1);
             if (c == '"') {
                 return true;
-            }
-            if (c != '\\') {
-                value.push_back(c);
-                continue;
             }
             if (pos_ >= input_.size()) {
                 error = "unterminated string escape";
@@ -235,7 +239,9 @@ private:
                 error = "invalid string escape";
                 return false;
             }
+            first = pos_;
         }
+        value.append(input_.data() + first, pos_ - first);
         error = "unterminated string";
         return false;
     }
@@ -296,11 +302,12 @@ private:
                 ++pos_;
             }
         }
-        const std::string token(input_.substr(start, pos_ - start));
-        char* end = nullptr;
-        errno = 0;
-        const double parsed = std::strtod(token.c_str(), &end);
-        if (errno != 0 || end == token.c_str() || *end != '\0') {
+        double parsed;
+        const auto converted = std::from_chars(input_.data() + start, input_.data() + pos_, parsed);
+        const bool underflow =
+            converted.ec == std::errc{} && std::fpclassify(parsed) == FP_SUBNORMAL;
+        errno = converted.ec == std::errc::result_out_of_range || underflow ? ERANGE : 0;
+        if (converted.ec != std::errc{} || converted.ptr != input_.data() + pos_ || underflow) {
             error = "invalid number at byte " + std::to_string(start);
             return false;
         }
