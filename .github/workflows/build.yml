@@ -19,12 +19,17 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - name: Install the fixed NDK
-        run: sdkmanager "ndk;30.0.16248370"
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r30
       - name: Configure and build NDK fixtures
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           cmake -S . -B build/android-tests -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/30.0.16248370/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Debug \
             -DKAGAMI_BUILD_NATIVE_TESTS=ON -DKAGAMI_ENABLE_CLANG_TIDY=OFF -DKAGAMI_PACKAGE_WEBUI=OFF
           cmake --build build/android-tests --target module_runtime_test magic_runtime_test kasumi_rules_test kasumi_runtime_test config_read_test -j2
