@@ -379,6 +379,10 @@ const mockApi = {
     return ["product", "system_ext", "vendor_dlkm"];
   },
 
+  async getPartitionScan() {
+    return { partitions: await this.scanPartitionsFromModules(), invalid: [] };
+  },
+
   async readLogs(logPath = "system", lines = 1000) {
     if (!Number.isInteger(lines) || lines < 1 || lines > 10000) throw new Error("Invalid log line count");
     return (logPath === "kernel" ? mockState.logs.kernel : mockState.logs.system).split("\n").slice(-lines).join("\n");
@@ -572,6 +576,16 @@ const realApi = {
       if (match) partitions.add(match[1]);
     }
     return [...partitions];
+  },
+
+  async getPartitionScan() {
+    const data = objectResponse(await execJson(`${PATHS.BINARY} config sync-partitions --json`));
+    const partitions = arrayResponse(data.partitions), invalid = arrayResponse(data.invalid);
+    if (partitions.some(name => typeof name !== "string" || !/^[A-Za-z0-9_.-]+$/.test(name) || name === "." || name === "..")
+        || invalid.some(name => typeof name !== "string")) {
+      throw new Error("Invalid partition scan response");
+    }
+    return { partitions: [...new Set(partitions)], invalid: [...new Set(invalid)] };
   },
 
   async readLogs(logPath = "system", lines = 1000) {

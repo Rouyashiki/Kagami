@@ -1,6 +1,7 @@
 #include "core/command.hpp"
 #include "core/json_value.hpp"
 #include "mount/module_runtime.hpp"
+#include "mount/partition_scan.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -96,10 +97,115 @@ void test_inventory() {
                 std::set<std::string>{"payload", "disabled", "removed", "skipped", "hot_unmounted"},
             "payload inventory remains usable with a missing runtime record");
 }
+
+void test_partition_scan() {
+    Fixture fixture;
+    const auto modules = fixture.path / "custom-modules";
+    const auto system = fixture.path / "system-root";
+    runtime::Snapshot snapshot;
+    snapshot.modules["active"] = {"mounted", "magic", {}, {}, {}};
+    snapshot.modules["partial"] = {"partial", "overlay", "incomplete", {}, {}};
+    snapshot.modules["inactive"] = {"unmounted", "magic", {}, {}, {}};
+    snapshot.modules["unknown"] = {};
+    snapshot.modules["removed"] = {"mounted", "magic", {}, {}, {}};
+    fixture.module("active", "vendor_dlkm");
+    fixture.module("partial", "my_product");
+    fixture.module("inactive", "inactive_partition", "disable");
+    fixture.module("unknown", "unknown_partition");
+    fixture.module("script", "zygisk");
+    file(modules / "removed/removed_partition/payload", "no module metadata");
+    file(modules / "active/system/system_dlkm/lib/payload", "nested partition");
+    file(modules / "active/odm_dlkm/lib/payload", "partition alias");
+
+    std::vector<runtime::MountIdentity> mounts;
+    std::string table;
+    unsigned mount_id = 100;
+    const auto partition = [&](const std::string& name) {
+        fs::create_directories(system / name);
+        table +=
+            std::to_string(mount_id++) + " 1 253:0 / /" + name + " ro - erofs /dev/block/dm-0 ro\n";
+    };
+    for (const auto* name :
+         {"vendor_dlkm", "system_dlkm", "vendor/odm_dlkm", "my_product", "inactive_partition",
+          "unknown_partition", "removed_partition", "empty_partition", "manual_partition"})
+        partition(name);
+    fs::create_directory_symlink(system / "vendor/odm_dlkm", system / "odm_dlkm");
+    fs::create_directories(modules / "active/empty_partition");
+    table += "200 1 253:1 / /absent_partition ro - ext4 /dev/block/dm-1 ro\n"
+             "201 1 0:40 / /tmpfs_dir rw - tmpfs tmpfs rw\n"
+             "202 1 253:2 /directory /bind_dir ro - ext4 /dev/block/dm-2 ro\n"
+             "203 1 0:41 / /overlay_only ro - overlay KSU ro\n"
+             "204 1 0:42 / /vendor_dlkm ro - overlay KSU ro\n";
+    for (const auto* name : {"zygisk", "lkm", "webroot", "META-INF", "ordinary_dir", "tmpfs_dir",
+                             "bind_dir", "overlay_only"}) {
+        file(modules / "active" / name / "payload", "not a partition");
+        fs::create_directories(system / name);
+    }
+    file(modules / "active/absent_partition/payload", "no system target");
+    std::string error;
+    require(runtime::parse_mountinfo(table, mounts, error), error);
+    const kagami::Argument configured[] = {
+        "vendor_dlkm", "manual_partition", "zygisk",          "lkm",
+        "webroot",     "ordinary_dir",     "absent_partition"};
+    kagami::mount::PartitionScan found;
+    require(kagami::mount::discover_module_partitions(modules, system, snapshot, mounts, configured,
+                                                      found, error),
+            error);
+    require(found.discovered ==
+                std::set<std::string>{"vendor_dlkm", "odm_dlkm", "system_dlkm", "my_product"},
+            "only mounted/partial payloads with real system partitions are discovered");
+    require(found.invalid == std::set<std::string>{"zygisk", "lkm", "webroot", "ordinary_dir",
+                                                   "absent_partition"},
+            "invalid old entries are removable while valid manual partitions survive");
+
+    // A failed directory read must not publish the successfully scanned subset.
+    file(modules / "active/bad_alias/payload", "unreadable system target");
+    fs::create_directory_symlink("bad_alias", system / "bad_alias");
+    const auto previous = found;
+    require(!kagami::mount::discover_module_partitions(modules, system, snapshot, mounts,
+                                                       configured, found, error) &&
+                !error.empty() && found.discovered == previous.discovered &&
+                found.invalid == previous.invalid,
+            "failed partition reads preserve the caller's previous result");
+}
+
+void test_partition_command() {
+    Fixture fixture;
+    const auto decoy = fixture.path / "default-modules";
+    file(decoy / "unrelated/lkm/payload", "default path must not be scanned");
+    require(setenv("KAGAMI_MODULES_DIR", decoy.c_str(), 1) == 0, "default module directory");
+    fixture.module("script", "zygisk");
+    const kagami::Argument args[] = {"config", "sync-partitions"};
+    std::vector<char> out(4096), err(4096);
+    kagami::output::Context destination{{out.data(), out.size()}, {err.data(), err.size()}};
+    auto result = kagami::run_command_capture(args, destination);
+    require(result.exit_code == 0 && result.stdout_text == "No new partitions\n",
+            "auto scan does not enumerate unrelated directories or unmounted modules");
+    file(fixture.path / "config.json", "{\"moduledir\":\"" +
+                                           (fixture.path / "custom-modules").string() +
+                                           "\",\"partitions\":[\"system\",\"zygisk\",\"lkm\"]}");
+    const kagami::Argument json_args[] = {"config", "sync-partitions", "--json"};
+    result = kagami::run_command_capture(json_args, destination);
+    kagami::JsonValue scanned;
+    std::string error;
+    require(result.exit_code == 0 &&
+                kagami::parse_json(std::string(result.stdout_text), scanned, error),
+            "read structured partition scan");
+    require(scanned.object_value.at("partitions").array_value.empty() &&
+                scanned.object_value.at("invalid").array_value.size() == 2,
+            "retain built-in targets and report obsolete resource entries");
+    file(fixture.path / "config.json", "{");
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty(),
+            "invalid config must not silently scan the default module directory");
+    require(unsetenv("KAGAMI_MODULES_DIR") == 0, "restore default module directory");
+}
 }  // namespace
 int main() {
     try {
         test_inventory();
+        test_partition_scan();
+        test_partition_command();
         std::cout << "module list fixtures passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -21,6 +21,7 @@
 #include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 #include "mount/overlayfs.hpp"
+#include "mount/partition_scan.hpp"
 #include "mount/storage.hpp"
 
 #include <sys/statvfs.h>
@@ -157,11 +158,6 @@ bool write_file(const fs::path& path, const std::string& content) {
     return out.good();
 }
 
-bool is_builtin_partition(const std::string& name) {
-    return std::find(builtin_partitions().begin(), builtin_partitions().end(), name) !=
-           builtin_partitions().end();
-}
-
 bool valid_module_id(const std::string& id) {
     return !id.empty() && std::all_of(id.begin(), id.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '_' || c == '-' || c == '.';
@@ -175,15 +171,6 @@ bool valid_module_mode(const std::string& mode) {
 
 bool parse_unsigned_long(const std::string& value, unsigned long& out) {
     return parse_unsigned(value, out);
-}
-
-bool module_has_partition_content(const fs::path& module_path, const std::string& partition) {
-    const fs::path root = module_path / partition;
-    std::error_code ec;
-    if (!fs::is_directory(root, ec))
-        return false;
-    const fs::directory_iterator first(root, ec);
-    return !ec && first != fs::directory_iterator{};
 }
 
 std::vector<std::string> parse_json_string_array(const std::string& json) {
@@ -279,6 +266,22 @@ PreparedConfig current_config() {
     std::string error;
     read_config_file(config_file().string(), config, error);  // struct defaults on miss
     return config;
+}
+
+mount::module_runtime::Snapshot module_runtime_snapshot() {
+    return mount::module_runtime::read_snapshot_observed([]() {
+        mount::module_runtime::KasumiObservation observation;
+        const auto rules = kasumi::read_active_rules();
+        observation.ok = rules.ok;
+        observation.enabled = rules.enabled;
+        observation.text = rules.text;
+        if (!rules.ok) {
+            observation.error_code = rules.last_errno == EOVERFLOW ? "kasumi_rules_truncated"
+                                                                   : "kasumi_rules_unreadable";
+            observation.error = std::strerror(rules.last_errno != 0 ? rules.last_errno : EIO);
+        }
+        return observation;
+    });
 }
 
 int print_storage_json(output::Context& destination) {
@@ -1005,37 +1008,61 @@ int handle_config(output::Context& destination, Arguments args) {
         return 0;
     }
     if (sub == "sync-partitions") {
-        std::set<std::string> partitions;
-        const fs::path module_root = modules_dir();
-        std::error_code scan_error;
-        if (fs::is_directory(module_root, scan_error)) {
-            fs::directory_iterator module(module_root, scan_error);
-            const fs::directory_iterator end;
-            for (; !scan_error && module != end; module.increment(scan_error)) {
-                if (!module->is_directory(scan_error))
-                    continue;
-                fs::directory_iterator child(module->path(), scan_error);
-                for (; !scan_error && child != end; child.increment(scan_error)) {
-                    if (child->is_directory(scan_error)) {
-                        const std::string name = child->path().filename().string();
-                        if (!is_builtin_partition(name) &&
-                            module_has_partition_content(module->path(), name)) {
-                            partitions.insert(name);
-                        }
-                    }
-                }
-                if (scan_error)
-                    break;
-            }
-        }
-        if (scan_error && scan_error != std::errc::no_such_file_or_directory) {
-            output::err(destination, "partition scan failed: ", scan_error.message(), "\n");
+        PreparedConfig config;
+        std::string error;
+        if (!read_config_file(config_file().string(), config, error)) {
+            output::err(destination, error, '\n');
             return 1;
         }
-        if (partitions.empty()) {
+        const auto snapshot = module_runtime_snapshot();
+        if (snapshot.missing.reason != "no_record" || !snapshot.missing.error.empty()) {
+            output::err(destination, "module runtime unavailable: ", snapshot.missing.reason, " ",
+                        snapshot.missing.error, '\n');
+            return 1;
+        }
+        for (const auto& [id, runtime] : snapshot.modules) {
+            if (!runtime.error.empty() || !runtime.error_code.empty()) {
+                output::err(destination, "cannot verify module ", id, ": ", runtime.error_code, " ",
+                            runtime.error, '\n');
+                return 1;
+            }
+        }
+        std::string table;
+        std::vector<mount::module_runtime::MountIdentity> mounts;
+        const bool here = runtime_mount_here();
+        if (!mount::module_runtime::detail::read_namespace_mountinfo(
+                here ? "/proc/self" : "/proc/1", table, error) ||
+            !mount::module_runtime::parse_mountinfo(table, mounts, error)) {
+            output::err(destination, error, '\n');
+            return 1;
+        }
+        mount::PartitionScan scan;
+        const fs::path module_root = config.module_dir.empty()
+                                         ? modules_dir()
+                                         : fs::path(std::string_view(config.module_dir));
+        if (!mount::discover_module_partitions(module_root, here ? "/" : "/proc/1/root", snapshot,
+                                               mounts, config.partitions, scan, error)) {
+            output::err(destination, error, '\n');
+            return 1;
+        }
+        for (const auto& partition : builtin_partitions()) {
+            scan.discovered.erase(std::string(partition));
+            // An empty configuration uses these built-in mount targets, some
+            // of which are directories within system rather than block mounts.
+            scan.invalid.erase(std::string(partition));
+        }
+        if (std::find(args.begin() + 2, args.end(), "--json") != args.end()) {
+            output::out(destination, "{\"partitions\":");
+            print_string_array(destination, std::vector<std::string>(scan.discovered.begin(),
+                                                                     scan.discovered.end()));
+            output::out(destination, ",\"invalid\":");
+            print_string_array(destination,
+                               std::vector<std::string>(scan.invalid.begin(), scan.invalid.end()));
+            output::out(destination, "}\n");
+        } else if (scan.discovered.empty()) {
             output::out(destination, "No new partitions\n");
         } else {
-            for (const auto& partition : partitions) {
+            for (const auto& partition : scan.discovered) {
                 output::out(destination, "Added partition: ", partition, "\n");
             }
         }
@@ -1128,19 +1155,7 @@ int handle_module(output::Context& destination, Arguments args) {
         const auto cfg = current_config();
         const fs::path module_root =
             cfg.module_dir.empty() ? modules_dir() : fs::path(std::string_view(cfg.module_dir));
-        const auto snapshot = mount::module_runtime::read_snapshot_observed([]() {
-            mount::module_runtime::KasumiObservation observation;
-            const auto rules = kasumi::read_active_rules();
-            observation.ok = rules.ok;
-            observation.enabled = rules.enabled;
-            observation.text = rules.text;
-            if (!rules.ok) {
-                observation.error_code = rules.last_errno == EOVERFLOW ? "kasumi_rules_truncated"
-                                                                       : "kasumi_rules_unreadable";
-                observation.error = std::strerror(rules.last_errno != 0 ? rules.last_errno : EIO);
-            }
-            return observation;
-        });
+        const auto snapshot = module_runtime_snapshot();
         mount::ModuleInventory candidates;
         int inventory_error = 0;
         if (!candidates.prepare_inventory(module_root.c_str(),

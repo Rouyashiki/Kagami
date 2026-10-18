@@ -90,7 +90,9 @@ function fixture() {
       case "hide add": data.saved.push(args[3]); return { stdout: "" };
       case "hide remove": data.saved = data.saved.filter((path) => path !== args[3]); return { stdout: "" };
       case "kasumi list": value = data.active; break;
-      case "config sync-partitions": return { stdout: "Added partition: vendor_dlkm\n" };
+      case "config sync-partitions": return { stdout: args.includes("--json")
+        ? JSON.stringify({ partitions: ["vendor_dlkm"], invalid: ["zygisk", "lkm"] })
+        : "Added partition: vendor_dlkm\n" };
       case "tail": return { stdout: "a\nb\n" };
       case "dmesg": return { stdout: "other kernel line\nKasumi first\nKAGAMIFS second\n" };
       default: throw new Error(`Unexpected command: ${command}`);
@@ -342,6 +344,20 @@ test("log and partition failures propagate while successful empty results stay e
     assert.deepEqual(await read(), action === "config sync-partitions" ? [] : "");
   }
   await assert.rejects(api.readLogs("system", "1; id"), /Invalid/);
+});
+
+test("partition cleanup requires a complete validated scan response", async () => {
+  const data = fixture();
+  const { api } = await loadApi(data.run);
+  assert.deepEqual(await api.getPartitionScan(), { partitions: ["vendor_dlkm"], invalid: ["zygisk", "lkm"] });
+  for (const response of [{}, { partitions: [], invalid: null }, { partitions: ["../data"], invalid: [] }, { partitions: [], invalid: [7] }]) {
+    data.failures.set("config sync-partitions", { stdout: JSON.stringify(response) });
+    await assert.rejects(api.getPartitionScan(), /invalid/i);
+  }
+  data.failures.set("config sync-partitions", { stdout: JSON.stringify({ partitions: [], invalid: [] }) });
+  assert.deepEqual(await api.getPartitionScan(), { partitions: [], invalid: [] });
+  data.failures.set("config sync-partitions", { errno: 1, stderr: "mount table unreadable" });
+  await assert.rejects(api.getPartitionScan(), /mount table unreadable/);
 });
 
 test("bridge failure, invalid status and timeouts reject and clean up callbacks", async () => {

@@ -34,6 +34,7 @@ set(KAGAMI_SOURCES
     src/core/lkm.cpp
     src/mount/backend.cpp
     src/mount/module_scan.cpp
+    src/mount/partition_scan.cpp
     src/mount/module_settings.cpp
     src/mount/mount_fs.cpp
     src/mount/module_runtime.cpp

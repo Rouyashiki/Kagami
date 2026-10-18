@@ -325,8 +325,9 @@ async function handleAction(target) {
   if (action === 'partition-scan') {
     if (!configReady(state)) return;
     await runMutation('config:partitions', async () => {
-      const discovered = await api.scanPartitionsFromModules();
-      const partitions = [...new Set([...effectivePartitions(), ...discovered])];
+      const scan = await api.getPartitionScan();
+      const invalid = new Set(scan.invalid);
+      const partitions = [...new Set([...effectivePartitions(), ...scan.partitions])].filter(name => !invalid.has(name));
       if (JSON.stringify(partitions) !== JSON.stringify(state.resources.config.data.partitions)) await api.saveConfig({ partitions });
     }, { reload: ['config', 'system'], success: 'ui.nextBoot' }); return;
   }

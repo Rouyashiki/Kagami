@@ -429,6 +429,20 @@ try {
       await page.locator('[data-key="save-config:partitions"]').getByText("Saved changes are used at the next boot.", { exact: true }).waitFor();
     }, { query: "?tab=settings&view=partitions", fixture: { partitions: [] } });
 
+    await runCase(project, "partition-scan-failure-preserves-config", async (page) => {
+      await page.locator(selector("partition-scan")).click();
+      await page.getByText(/Fixture failure: config sync-partitions/).first().waitFor();
+      const state = await page.evaluate(() => ({ partitions: window.__kagamiFixture.config.partitions, commands: window.__kagamiFixture.commands }));
+      assert.deepEqual(state.partitions, []);
+      assert.equal(state.commands.some(command => command.includes("config merge-json")), false);
+    }, { query: "?tab=settings&view=partitions", fixture: { partitions: [], failures: { "config sync-partitions": 1 } } });
+
+    await runCase(project, "partition-scan-removes-obsolete-resource-directories", async (page) => {
+      await page.locator(selector("partition-scan")).click();
+      await page.waitForFunction(() => window.__kagamiFixture.config.partitions.includes("odm_dlkm"));
+      assert.deepEqual(await page.evaluate(() => window.__kagamiFixture.config.partitions), ["system", "vendor_dlkm", "my_product", "odm_dlkm"]);
+    }, { query: "?tab=settings&view=partitions", fixture: { partitions: ["system", "vendor_dlkm", "my_product", "zygisk", "lkm", "webroot"], invalidPartitions: ["zygisk", "lkm", "webroot"] } });
+
     await runCase(project, "config-write-failure-retry", async (page) => {
       const toggle = page.locator('md-switch[data-field="debug"]');
       await toggle.click();

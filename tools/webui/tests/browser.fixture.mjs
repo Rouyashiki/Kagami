@@ -68,7 +68,9 @@ export function installHostFixture(options = {}) {
     if (verb === "config show") return json(config);
     if (verb === "config merge-json") { Object.assign(config, JSON.parse(args[2])); return ok(); }
     if (verb === "config apply") return ok();
-    if (verb === "config sync-partitions") return ok("Added partition: vendor_dlkm\nAdded partition: odm_dlkm\n");
+    if (verb === "config sync-partitions") return args.includes("--json")
+      ? json({ partitions: ["vendor_dlkm", "odm_dlkm"], invalid: options.invalidPartitions || [] })
+      : ok("Added partition: vendor_dlkm\nAdded partition: odm_dlkm\n");
     if (verb === "api meta") return json({ module_id: "kagami", metamodule: true, version: "v9.8.7-fixture", data_dir: "/data/adb/kagami", modules_dir: config.moduledir, config_file: "/data/adb/kagami/config.json", log_file: config.logfile });
     if (verb === "api system") return json(fixture.system);
     if (verb === "api storage") return json({ size: "2.0G", used: "256M", avail: "1.7G", percent: 13, mode: "ext4" });
