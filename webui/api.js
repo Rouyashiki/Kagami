@@ -280,6 +280,7 @@ const mockState = {
     features: {
       bitmask: 0x1e5,
       names: [
+        "rule_bypass",
         "mount_hide",
         "maps_spoof",
         "statfs_spoof",
@@ -356,15 +357,22 @@ const mockApi = {
     module.mode = mode;
   },
 
-  async addModuleRule(id, path, mode) {
+  async setModuleBypass(id, bypass) {
+    validModuleId(id);
+    const module = mockState.modules.find(item => item.id === id);
+    if (!module) throw new Error("Module not found");
+    module.bypass = bypass;
+  },
+
+  async addModuleRule(id, path, mode, bypass = false) {
     validModuleId(id);
     validPath(path);
     validMode(mode, true);
     const module = mockState.modules.find((item) => item.id === id);
     if (!module) throw new Error("Module not found");
     const rule = module.rules.find((item) => item.path === path);
-    if (rule) rule.mode = mode;
-    else module.rules.push({ path, mode });
+    if (rule) { rule.mode = mode; rule.bypass = bypass; }
+    else module.rules.push({ path, mode, bypass });
   },
 
   async removeModuleRule(id, path) {
@@ -417,8 +425,8 @@ const mockApi = {
     mockState.systemInfo.kasumiModules = mockState.systemInfo.kasumiModules.filter((item) => item !== moduleId);
   },
 
-  async getUserHideRules() {
-    return clone(mockState.userHideRules);
+  async getUserHideRules(details = false) {
+    return details ? mockState.userHideRules.map(path => ({ path, bypass: mockState.hideBypasses?.[path] === true })) : clone(mockState.userHideRules);
   },
 
   async getAllRules() {
@@ -427,8 +435,10 @@ const mockApi = {
     return clone(mockState.allRules).map((rule) => ({ ...rule, active: true, isUserDefined: rule.type === "HIDE" && userSet.has(rule.path) }));
   },
 
-  async addUserHideRule(path) {
+  async addUserHideRule(path, bypass = false) {
     validPath(path);
+    mockState.hideBypasses ??= {};
+    mockState.hideBypasses[path] = bypass;
     if (!mockState.userHideRules.includes(path)) {
       mockState.userHideRules.unshift(path);
       if (mockState.systemInfo.kasumiAvailable) mockState.allRules.unshift({ type: "HIDE", path, isUserDefined: true });
@@ -540,7 +550,7 @@ const realApi = {
       const rules = arrayResponse(item.rules ?? []).map((rule) => {
         objectResponse(rule);
         if (typeof rule.path !== "string" || typeof rule.mode !== "string") throw new Error("Invalid module rule response");
-        return { path: rule.path, mode: rule.mode };
+        return { path: rule.path, mode: rule.mode, bypass: rule.bypass === true };
       });
       return {
         id: item.id,
@@ -549,6 +559,7 @@ const realApi = {
         author: item.author || "",
         description: item.description || "",
         mode: item.mode || "auto",
+        bypass: item.bypass === true,
         strategy: item.strategy || "unknown",
         runtime: moduleRuntime(item.runtime),
         path: item.path || "",
@@ -563,11 +574,16 @@ const realApi = {
     await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module set-mode '${shellEscape(id)}' '${shellEscape(mode)}'`));
   },
 
-  async addModuleRule(id, path, mode) {
+  async setModuleBypass(id, bypass) {
+    validModuleId(id);
+    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module set-bypass '${shellEscape(id)}' ${bypass ? 'on' : 'off'}`));
+  },
+
+  async addModuleRule(id, path, mode, bypass = false) {
     validModuleId(id);
     validPath(path);
     validMode(mode, true);
-    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module add-rule '${shellEscape(id)}' '${shellEscape(path)}' '${shellEscape(mode)}'`));
+    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module add-rule '${shellEscape(id)}' '${shellEscape(path)}' '${shellEscape(mode)}'${bypass ? ' --bypass' : ''}`));
   },
 
   async removeModuleRule(id, path) {
@@ -677,7 +693,15 @@ const realApi = {
     await checkedExec(`${PATHS.BINARY} module hot-unmount '${shellEscape(moduleId)}'`);
   },
 
-  async getUserHideRules() {
+  async getUserHideRules(details = false) {
+    if (details) {
+      return arrayResponse(await execJson(`${PATHS.BINARY} hide list --details`)).map(value => {
+        const rule = typeof value === "string" ? { path: value, bypass: false } : objectResponse(value);
+        validPath(rule.path);
+        if (typeof rule.bypass !== "boolean") throw new Error("Invalid hide bypass flag");
+        return { path: rule.path, bypass: rule.bypass };
+      });
+    }
     const paths = arrayResponse(await execJson(`${PATHS.BINARY} hide list`));
     if (paths.some((path) => typeof path !== "string" || !path.startsWith("/"))) throw new Error("Invalid saved hide rule response");
     return paths;
@@ -714,9 +738,9 @@ const realApi = {
     return enabled ? rules : [];
   },
 
-  async addUserHideRule(path) {
+  async addUserHideRule(path, bypass = false) {
     validPath(path);
-    await checkedExec(`${PATHS.BINARY} hide add '${shellEscape(path)}'`);
+    await checkedExec(`${PATHS.BINARY} hide add '${shellEscape(path)}'${bypass ? ' --bypass' : ''}`);
     // The CLI guarantees persistence, not kernel acceptance. Only a separate
     // active-rule read can confirm that the rule is currently observed.
     return { persisted: true };

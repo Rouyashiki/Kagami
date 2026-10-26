@@ -427,3 +427,20 @@ test("mock implements incremental editing, metadata and persisted versus active 
   assert.ok((await api.getUserHideRules()).includes("/system/pending"));
   await assert.rejects(api.getAllRules(), /unavailable/);
 });
+
+test("bypass is opt-in and reaches each native command", async () => {
+  const commands = [];
+  const { api } = await loadApi(command => { commands.push(shellWords(command)); return { stdout: "" }; });
+  await api.setModuleBypass("visible", true);
+  await api.setModuleBypass("visible", false);
+  await api.addModuleRule("visible", "/system/ordinary", "kasumi");
+  await api.addModuleRule("visible", "/system/global", "kasumi", true);
+  await api.addUserHideRule("/system/hide");
+  await api.addUserHideRule("/system/global-hide", true);
+  assert.deepEqual(commands.map(args => args.slice(1)), [
+    ["module", "set-bypass", "visible", "on"], ["module", "set-bypass", "visible", "off"],
+    ["module", "add-rule", "visible", "/system/ordinary", "kasumi"],
+    ["module", "add-rule", "visible", "/system/global", "kasumi", "--bypass"],
+    ["hide", "add", "/system/hide"], ["hide", "add", "/system/global-hide", "--bypass"],
+  ]);
+});

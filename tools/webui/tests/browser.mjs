@@ -158,6 +158,49 @@ try {
   const { chromium } = await loadPlaywright();
   browser = await chromium.launch({ headless: true, ...(process.env.KAGAMI_BROWSER_EXECUTABLE_PATH ? { executablePath: process.env.KAGAMI_BROWSER_EXECUTABLE_PATH } : {}) });
   for (const project of projects) {
+    await runCase(project, "bypass-module-rule-hide-roundtrip", async (page) => {
+      await navigate(page, "modules");
+      await page.locator('[data-action="module-detail"][data-id="beta_audio"]').click();
+      const moduleSwitch = page.locator('md-switch[data-field="module_bypass"]');
+      assert.equal(await moduleSwitch.getAttribute('selected'), null);
+      await moduleSwitch.click();
+      await page.waitForFunction(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').bypass === true);
+      await page.waitForFunction(() => !document.querySelector('md-switch[data-field="module_bypass"]').disabled);
+      await moduleSwitch.click();
+      await page.waitForFunction(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').bypass === false);
+      await page.locator('[data-action="rule-add"]').click();
+      await page.locator('#editor input[name="path"]').fill('/system/bypass-test');
+      await page.locator('#editor input[name="bypass"]').check();
+      await page.locator(selector("dialog-save")).click(); await page.locator("#editor").waitFor({ state: "hidden" });
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').rules[0].bypass), true);
+      await page.locator('[data-action="rule-edit"][data-path="/system/bypass-test"]').click();
+      assert.equal(await page.locator('#editor input[name="bypass"]').isChecked(), true);
+      await page.locator('#editor input[name="bypass"]').uncheck();
+      await page.locator(selector("dialog-save")).click(); await page.locator("#editor").waitFor({ state: "hidden" });
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').rules[0].bypass), false);
+      await navigate(page, "kasumi");
+      await openView(page, "hide");
+      const hideSwitch = page.locator('md-switch[data-field="hide_bypass"]').first();
+      await hideSwitch.click();
+      await page.waitForFunction(() => window.__kagamiFixture.hideBypasses?.['/data/local/tmp/fixture-hidden'] === true);
+      await page.waitForFunction(() => {
+        const control = document.querySelector('md-switch[data-field="hide_bypass"]');
+        return control.selected && !control.disabled;
+      });
+      await hideSwitch.evaluate(async control => {
+        await control.updateComplete;
+        await Promise.all(control.shadowRoot.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})));
+      });
+      await assertNoOverflow(page);
+    });
+    await runCase(project, "bypass-unsupported-kernel", async (page) => {
+      await navigate(page, "modules");
+      await page.locator('[data-action="module-detail"][data-id="beta_audio"]').click();
+      assert.equal(await page.locator('md-switch[data-field="module_bypass"]').evaluate(node => node.disabled), true);
+      await page.locator('[data-action="rule-add"]').click();
+      assert.equal(await page.locator('#editor input[name="bypass"]').isDisabled(), true);
+    }, { fixture: { noBypass: true } });
+
     if (project === "bundle") await runCase(project, "standalone-file-offline", async (page) => {
       await navigate(page, "modules");
       await page.locator(selector("module-detail")).first().waitFor();
@@ -438,7 +481,7 @@ try {
       await page.locator(selector("dialog-save")).click();
       await page.locator("#editor").waitFor({ state: "hidden" });
       const state = await page.evaluate(() => ({ rules: window.__kagamiFixture.modules.find((item) => item.id === "alpha_fonts").rules, additions: window.__kagamiFixture.commands.filter((command) => command.includes("module add-rule")).length }));
-      assert.deepEqual(state.rules, [{ path: renamed, mode: "hide" }]);
+      assert.deepEqual(state.rules, [{ path: renamed, mode: "hide", bypass: false }]);
       assert.equal(state.additions, added, "Partial rename retry must not add the same rule again");
       await page.locator(selector("rule-remove")).click();
       await page.locator(selector("dialog-save")).click();

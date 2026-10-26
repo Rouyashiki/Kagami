@@ -11,6 +11,7 @@ namespace kagami::mount {
 struct ModuleRule {
     Argument path;
     Argument mode;
+    bool bypass;
 };
 using ModuleRuleSpan = bounded::Span<ModuleRule>;
 
@@ -35,8 +36,8 @@ public:
     [[nodiscard]] bool prepare_rules(const char* path, int& error) noexcept;
     ModuleRuleSpan find(std::string_view id) const noexcept;
     [[nodiscard]] bool write_update(bounded::Writer& output, std::string_view id,
-                                    std::string_view path, std::string_view mode,
-                                    bool remove) const noexcept;
+                                    std::string_view path, std::string_view mode, bool remove,
+                                    bool bypass = false) const noexcept;
 
 private:
     struct Entry {

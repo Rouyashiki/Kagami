@@ -26,9 +26,11 @@ bool quote(bounded::Writer& output, std::string_view value) noexcept {
     // Preserve the established control-plane escaping, including raw controls.
     return output.append('"') && bounded::escape(output, value) && output.append('"');
 }
-bool write_rule(bounded::Writer& output, std::string_view path, std::string_view mode) noexcept {
+bool write_rule(bounded::Writer& output, std::string_view path, std::string_view mode,
+                bool bypass) noexcept {
     return output.append("{\"path\":") && quote(output, path) && output.append(",\"mode\":") &&
-           quote(output, mode) && output.append('}');
+           quote(output, mode) && output.append(",\"bypass\":") &&
+           output.append(bypass ? "true}" : "false}");
 }
 }  // namespace
 
@@ -121,7 +123,8 @@ bool ModuleRules::prepare_rules(const char* path, int& error) noexcept {
         for (std::size_t j = 0; j < values.size(); ++j) {
             const auto value = values.child(j);
             if (valid_rule(value) && !rules_.append({Argument(value.find("path").string_or()),
-                                                     Argument(value.find("mode").string_or())})) {
+                                                     Argument(value.find("mode").string_or()),
+                                                     value.find("bypass").bool_or(false)})) {
                 error = ENOBUFS;
                 return false;
             }
@@ -147,7 +150,7 @@ ModuleRuleSpan ModuleRules::find(std::string_view id) const noexcept {
 }
 
 bool ModuleRules::write_update(bounded::Writer& output, std::string_view id, std::string_view path,
-                               std::string_view mode, bool remove) const noexcept {
+                               std::string_view mode, bool remove, bool bypass) const noexcept {
     if (!output.append("{\n"))
         return false;
     bool first = true;
@@ -170,13 +173,14 @@ bool ModuleRules::write_update(bounded::Writer& output, std::string_view id, std
                 continue;
             if ((!first_rule && !output.append(',')) ||
                 !write_rule(output, value.path,
-                            matches && !replaced ? mode : std::string_view(value.mode)))
+                            matches && !replaced ? mode : std::string_view(value.mode),
+                            matches && !replaced ? bypass : value.bypass))
                 return false;
             first_rule = false;
             replaced = replaced || matches;
         }
         if (update && !remove && !replaced &&
-            ((!first_rule && !output.append(',')) || !write_rule(output, path, mode)))
+            ((!first_rule && !output.append(',')) || !write_rule(output, path, mode, bypass)))
             return false;
         return output.append(']');
     };

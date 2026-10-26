@@ -907,6 +907,12 @@ int print_kasumi_rules_json(output::Context& destination) {
             }
             output::out(destination, ",\"args\":", bounded::quoted(rest));
         }
+        if (type == "ADD" || type == "MERGE" || type == "HIDE") {
+            unsigned flags = 0;
+            parts >> flags;
+            output::out(destination,
+                        ",\"bypass\":", flags & KSM_RULE_BYPASS_POLICY ? "true" : "false");
+        }
         output::out(destination, "}");
     }
     output::out(destination, "]\n");
@@ -1134,6 +1140,14 @@ int handle_api(output::Context& destination, Arguments args) {
     return 1;
 }
 
+bool save_bypass(const std::string& key, bool enabled, const char* file) {
+    int error = 0;
+    if (mount::update_module_mode(key, enabled ? "on" : "auto", error, file))
+        return true;
+    errno = error;
+    return false;
+}
+
 int handle_module(output::Context& destination, Arguments args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "list") {
@@ -1147,6 +1161,11 @@ int handle_module(output::Context& destination, Arguments args) {
             return 1;
         }
         const auto rule_map = mount::load_module_rules(settings_error);
+        const auto bypasses = mount::load_module_modes(settings_error, "module_bypass.json");
+        if (settings_error) {
+            output::err(destination, "failed to read module bypass settings\n");
+            return 1;
+        }
         if (settings_error) {
             output::err(destination, "cannot read module rules: ", std::strerror(settings_error),
                         '\n');
@@ -1249,6 +1268,7 @@ int handle_module(output::Context& destination, Arguments args) {
                         ",\"author\":", bounded::quoted(props.author),
                         ",\"description\":", bounded::quoted(props.description),
                         ",\"mode\":", bounded::quoted(mode),
+                        ",\"bypass\":", (bypasses.find(id) == "on") ? "true" : "false",
                         ",\"strategy\":", bounded::quoted(strategy), ",\"runtime\":");
             const auto& summary = has_runtime ? recorded->second : snapshot.missing;
             output::out(destination, "{\"backend\":");
@@ -1277,12 +1297,26 @@ int handle_module(output::Context& destination, Arguments args) {
                         output::out(destination, ',');
                     }
                     output::out(destination, "{\"path\":", bounded::quoted(module_rules[i].path),
-                                ",\"mode\":", bounded::quoted(module_rules[i].mode), '}');
+                                ",\"mode\":", bounded::quoted(module_rules[i].mode),
+                                ",\"bypass\":", module_rules[i].bypass ? "true}" : "false}");
                 }
             }
             output::out(destination, "]}");
         }
         output::out(destination, "]}\n");
+        return 0;
+    }
+    if (sub == "set-bypass") {
+        const std::string id = arg_or_default(args, 2, "");
+        const std::string value = arg_or_default(args, 3, "");
+        if (!valid_module_id(id) || args.size() != 4 || (value != "on" && value != "off"))
+            return 1;
+        if (value == "on" && !kasumi::rule_flags_supported(KSM_RULE_BYPASS_POLICY)) {
+            output::err(destination, "bypass requires a kernel with rule_bypass support\n");
+            return 1;
+        }
+        if (!save_bypass(id, value == "on", "module_bypass.json"))
+            return 1;
         return 0;
     }
     if (sub == "set-mode") {
@@ -1306,14 +1340,20 @@ int handle_module(output::Context& destination, Arguments args) {
         const std::string id = arg_or_default(args, 2, "");
         const std::string path = arg_or_default(args, 3, "");
         const std::string mode = arg_or_default(args, 4, "");
+        const bool bypass = args.size() == 6 && args[5] == "--bypass";
+        if ((args.size() != 5 && !bypass) ||
+            (bypass && !kasumi::rule_flags_supported(KSM_RULE_BYPASS_POLICY))) {
+            output::err(destination, "bypass requires a kernel with rule_bypass support\n");
+            return 1;
+        }
         if (!valid_module_id(id) || path.empty() || path.front() != '/' ||
             !valid_module_mode(mode)) {
             output::err(destination, "usage: kagamid module add-rule <id> <absolute-path> "
-                                     "kasumi|overlay|magic|none|hide\n");
+                                     "kasumi|overlay|magic|none|hide [--bypass]\n");
             return 1;
         }
         int settings_error = 0;
-        if (!mount::update_module_rule(id, path, mode, false, settings_error)) {
+        if (!mount::update_module_rule(id, path, mode, false, settings_error, bypass)) {
             errno = settings_error;
             output::err(destination, "failed to save module rules\n");
             return 1;
@@ -1848,12 +1888,35 @@ int handle_hide(output::Context& destination, Arguments args) {
     const auto sub = arg_or_default(args, 1, "");
     if (sub == "list") {
         const auto rules = load_user_hide_rules();
+        if (args.size() == 3 && args[2] == "--details") {
+            int settings_error = 0;
+            const auto bypasses = mount::load_module_modes(settings_error, "hide_bypass.json");
+            if (settings_error)
+                return 1;
+            output::out(destination, '[');
+            bool first = true;
+            for (const auto& path : rules) {
+                if (!first)
+                    output::out(destination, ',');
+                first = false;
+                output::out(destination, "{\"path\":", bounded::quoted(path),
+                            ",\"bypass\":", bypasses.find(path) == "on" ? "true}" : "false}");
+            }
+            output::out(destination, "]\n");
+            return 0;
+        }
         print_string_array(destination, rules);
         output::out(destination, "\n");
         return 0;
     }
     if (sub == "add") {
         const std::string path = arg_or_default(args, 2, "");
+        const bool bypass = args.size() == 4 && args[3] == "--bypass";
+        if ((args.size() != 3 && !bypass) ||
+            (bypass && !kasumi::rule_flags_supported(KSM_RULE_BYPASS_POLICY))) {
+            output::err(destination, "bypass requires a kernel with rule_bypass support\n");
+            return 1;
+        }
         if (path.empty() || path[0] != '/') {
             output::err(destination, "hide path must be absolute\n");
             return 1;
@@ -1862,11 +1925,16 @@ int handle_hide(output::Context& destination, Arguments args) {
         if (std::find(rules.begin(), rules.end(), path) == rules.end()) {
             rules.push_back(path);
         }
+        if (!save_bypass(path, bypass, "hide_bypass.json"))
+            return 1;
         if (!save_user_hide_rules(rules)) {
             return 1;
         }
         if (kasumi::is_available()) {
-            kasumi::hide_path(path);
+            if (!kasumi::hide_path(path, bypass ? KSM_RULE_BYPASS_POLICY : 0)) {
+                output::err(destination, "hide rule saved, but kernel rejected it\n");
+                return 1;
+            }
         }
         return 0;
     }
@@ -1874,6 +1942,8 @@ int handle_hide(output::Context& destination, Arguments args) {
         const std::string path = arg_or_default(args, 2, "");
         auto rules = load_user_hide_rules();
         rules.erase(std::remove(rules.begin(), rules.end(), path), rules.end());
+        if (!save_bypass(path, false, "hide_bypass.json"))
+            return 1;
         if (!save_user_hide_rules(rules)) {
             return 1;
         }
@@ -1974,7 +2044,8 @@ int run_command(output::Context& destination, Arguments args) {
     const auto group = args.empty() ? std::string_view{} : std::string_view(args.front());
     const auto policy_action = arg_or_default(args, 2, "show");
     const bool module_mutation = group == "module" && sub != "list" && sub != "check-conflicts" &&
-                                 sub != "set-mode" && sub != "add-rule" && sub != "remove-rule";
+                                 sub != "set-mode" && sub != "set-bypass" && sub != "add-rule" &&
+                                 sub != "remove-rule";
     const bool kasumi_mutation =
         group == "kasumi" && sub != "version" && sub != "list" && sub != "features" &&
         sub != "hooks" && sub != "conflicts" && sub != "ack-conflicts" &&

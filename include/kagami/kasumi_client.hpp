@@ -134,8 +134,9 @@ bool set_statfs_spoof(bool enable);
 bool set_selinux_guard(bool enable);
 bool clear_rules();
 bool add_rule(const std::string& target, const std::string& source, int type);
-bool add_merge_rule(const std::string& target, const std::string& source);
-bool hide_path(const std::string& path);
+bool add_merge_rule(const std::string& target, const std::string& source, int flags = 0);
+bool hide_path(const std::string& path, int flags = 0);
+bool rule_flags_supported(int flags);
 bool delete_rule(const std::string& path);
 bool add_maps_rule(unsigned long target_ino, unsigned long target_dev, unsigned long spoofed_ino,
                    unsigned long spoofed_dev, const std::string& spoofed_path);

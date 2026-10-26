@@ -69,11 +69,12 @@ struct MountReport {
 // no module.prop or with a disable/remove/skip_mount marker.
 std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config, int& error);
 
-ModuleModes load_module_modes(int& error);
+ModuleModes load_module_modes(int& error, const char* file = "module_mode.json");
 ModuleRules load_module_rules(int& error);
-bool update_module_mode(std::string_view id, std::string_view mode, int& error);
+bool update_module_mode(std::string_view id, std::string_view mode, int& error,
+                        const char* file = "module_mode.json");
 bool update_module_rule(std::string_view id, std::string_view path, std::string_view mode,
-                        bool remove, int& error);
+                        bool remove, int& error, bool bypass = false);
 
 // Rebuild only Kasumi mappings in the init namespace. This is safe to expose
 // post-boot for the Kasumi hot-mount controls; Overlay/Magic remain boot-only.

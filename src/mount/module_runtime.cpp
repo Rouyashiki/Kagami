@@ -126,8 +126,8 @@ private:
     };
     struct Less {
         bool operator()(Entry lhs, Entry rhs) const noexcept {
-            return std::tie(lhs.rule->kind, lhs.rule->path, lhs.rule->source) <
-                   std::tie(rhs.rule->kind, rhs.rule->path, rhs.rule->source);
+            return std::tie(lhs.rule->kind, lhs.rule->path, lhs.rule->source, lhs.rule->flags) <
+                   std::tie(rhs.rule->kind, rhs.rule->path, rhs.rule->source, rhs.rule->flags);
         }
     };
     bounded::Array<Entry> entries_;
@@ -216,7 +216,7 @@ bool backend_valid(const std::string& value) {
 bool rule_valid(const RuleEvidence& value) {
     return (value.kind == "ADD" || value.kind == "MERGE" || value.kind == "HIDE") &&
            !value.path.empty() && value.path.front() == '/' && safe_text(value.path) &&
-           safe_text(value.source);
+           safe_text(value.source) && !(value.flags & ~1U);
 }
 std::string ns_identity(const std::string& path) {
     struct stat st{};
@@ -242,7 +242,7 @@ void invalidate() {
 }
 bool store(const Database& database) {
     std::ostringstream out;
-    out << "KAGAMI_MODULE_RUNTIME_V2 " << std::quoted(database.boot) << ' ' << database.generation
+    out << "KAGAMI_MODULE_RUNTIME_V3 " << std::quoted(database.boot) << ' ' << database.generation
         << ' ' << std::quoted(database.namespace_id) << '\n';
     for (const auto& [id, record] : database.modules) {
         if (!safe_text(id) || !backend_valid(record.backend)) {
@@ -265,7 +265,7 @@ bool store(const Database& database) {
                 return false;
             }
             out << "rule " << std::quoted(id) << ' ' << rule.kind << ' ' << std::quoted(rule.path)
-                << ' ' << std::quoted(rule.source) << '\n';
+                << ' ' << std::quoted(rule.source) << ' ' << rule.flags << '\n';
         }
     }
     std::string error;
@@ -295,7 +295,8 @@ bool load(Database& database, std::string& reason, std::string& error) {
         return false;
     }
     std::istringstream header(line);
-    if (!(header >> version) || version != "KAGAMI_MODULE_RUNTIME_V2") {
+    if (!(header >> version) ||
+        (version != "KAGAMI_MODULE_RUNTIME_V2" && version != "KAGAMI_MODULE_RUNTIME_V3")) {
         const bool old_schema = version.rfind("KAGAMI_MODULE_RUNTIME_V", 0) == 0;
         reason = old_schema ? "unsupported_record" : "invalid_record";
         error = old_schema ? "" : "invalid module runtime record header";
@@ -345,6 +346,7 @@ bool load(Database& database, std::string& reason, std::string& error) {
             } else if (type == "rule") {
                 RuleEvidence rule;
                 if (!(row >> rule.kind >> std::quoted(rule.path) >> std::quoted(rule.source)) ||
+                    (version == "KAGAMI_MODULE_RUNTIME_V3" && !(row >> rule.flags)) ||
                     !rule_valid(rule))
                     break;
                 found->second.rules.push_back(std::move(rule));
@@ -554,9 +556,8 @@ bool rules_from_text(const std::string& text, std::vector<RuleEvidence>& rules) 
             return false;
         if (kind != "hide" && !(row >> rule.source))
             return false;
-        if (kind == "add") {
-            unsigned type = 0;
-            if (!(row >> type) || type != 0)
+        if (kind == "add" || !(row >> std::ws).eof()) {
+            if (!(row >> rule.flags) || (rule.flags & ~1U))
                 return false;
         }
         if (!(row >> std::ws).eof() || !rule_valid(rule))

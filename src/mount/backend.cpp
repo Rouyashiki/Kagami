@@ -286,9 +286,9 @@ std::vector<ModuleEntry> enumerate_mountable_modules(const Config& config, int& 
 
 // Per-module control-plane state is separate from module files so the manager
 // can select backends without modifying another module's contents.
-ModuleModes load_module_modes(int& error) {
+ModuleModes load_module_modes(int& error, const char* file) {
     ModuleModes modes;
-    (void)modes.prepare_modes((runtime_data_dir() / "module_mode.json").c_str(), error);
+    (void)modes.prepare_modes((runtime_data_dir() / file).c_str(), error);
     return modes;
 }
 ModuleRules load_module_rules(int& error) {
@@ -317,24 +317,24 @@ bool save_settings(const char* name, const Serialize& serialize, int& error) {
     return true;
 }
 }  // namespace
-bool update_module_mode(std::string_view id, std::string_view mode, int& error) {
-    const auto modes = load_module_modes(error);
+bool update_module_mode(std::string_view id, std::string_view mode, int& error, const char* file) {
+    const auto modes = load_module_modes(error, file);
     return !error && save_settings(
-                         "module_mode.json",
+                         file,
                          [&](bounded::Writer& output) noexcept {
                              return modes.write_update(output, id, mode);
                          },
                          error);
 }
 bool update_module_rule(std::string_view id, std::string_view path, std::string_view mode,
-                        bool remove, int& error) {
+                        bool remove, int& error, bool bypass) {
     const auto rules = load_module_rules(error);
     if (error || (remove && rules.find(id).empty()))
         return !error;
     return save_settings(
         "module_rules.json",
         [&](bounded::Writer& output) noexcept {
-            return rules.write_update(output, id, path, mode, remove);
+            return rules.write_update(output, id, path, mode, remove, bypass);
         },
         error);
 }

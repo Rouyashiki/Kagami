@@ -303,6 +303,8 @@ int features() {
 
 std::vector<std::string> feature_names(int bitmask) {
     std::vector<std::string> names;
+    if (bitmask & KSM_FEATURE_RULE_BYPASS)
+        names.emplace_back("rule_bypass");
     if (bitmask & KSM_FEATURE_MOUNT_HIDE)
         names.emplace_back("mount_hide");
     if (bitmask & KSM_FEATURE_MAPS_SPOOF)
@@ -452,7 +454,24 @@ bool clear_rules() {
     return execute(KSM_IOC_CLEAR_ALL, nullptr) == 0;
 }
 
+bool rule_flags_supported(int flags) {
+    if (flags & ~KSM_RULE_FLAGS_MASK) {
+        errno = EINVAL;
+        return false;
+    }
+    if (!flags)
+        return true;
+    const auto caps = feature_capabilities();
+    if (!caps.ok || !(caps.bitmask & KSM_FEATURE_RULE_BYPASS)) {
+        errno = caps.ok ? EOPNOTSUPP : caps.last_errno;
+        return false;
+    }
+    return true;
+}
+
 bool add_rule(const std::string& target, const std::string& source, int type) {
+    if (!rule_flags_supported(type))
+        return false;
     kasumi_syscall_arg arg = {};
     arg.src = target.c_str();
     arg.target = source.c_str();
@@ -460,16 +479,22 @@ bool add_rule(const std::string& target, const std::string& source, int type) {
     return execute(KSM_IOC_ADD_RULE, &arg) == 0;
 }
 
-bool add_merge_rule(const std::string& target, const std::string& source) {
+bool add_merge_rule(const std::string& target, const std::string& source, int flags) {
+    if (!rule_flags_supported(flags))
+        return false;
     kasumi_syscall_arg arg = {};
     arg.src = target.c_str();
     arg.target = source.c_str();
+    arg.type = flags;
     return execute(KSM_IOC_ADD_MERGE_RULE, &arg) == 0;
 }
 
-bool hide_path(const std::string& path) {
+bool hide_path(const std::string& path, int flags) {
+    if (!rule_flags_supported(flags))
+        return false;
     kasumi_syscall_arg arg = {};
     arg.src = path.c_str();
+    arg.type = flags;
     return execute(KSM_IOC_HIDE_RULE, &arg) == 0;
 }
 

@@ -7,7 +7,7 @@ export function createStore(api, notify = () => {}) {
   let queue = Promise.resolve();
   const reads = {
     config: () => api.loadConfig(), system: () => api.getSystemInfo(), modules: () => api.scanModules(),
-    storage: () => api.getStorageUsage(), lkm: () => api.getLkmStatus(), userRules: () => api.getUserHideRules(),
+    storage: () => api.getStorageUsage(), lkm: () => api.getLkmStatus(), userRules: () => api.getUserHideRules(true),
     rules: () => api.getAllRules(), meta: () => api.getMeta(), logs: () => api.readLogs(state.logType),
     conflicts: () => api.checkConflicts(),
     kasumiConflicts: () => api.getKasumiConflicts(),

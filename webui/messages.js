@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Existing translations and language selection remain in i18n.js.
 const strings = [
+  ['bypass.title', 'Global rules (bypass policy)', '全局生效（绕过策略）'],
+  ['bypass.description', 'Kasumi rules only. Enabled rules affect all processes regardless of policy. The module switch applies to all its Kasumi rules.', '仅作用于 Kasumi 规则。开启后对所有进程生效，不再跟随策略；模块开关作用于该模块的全部 Kasumi 规则。'],
+  ['bypass.unsupported', 'This kernel does not support rule bypass.', '当前内核不支持规则 bypass。'],
+
   ['conflict.title', 'Kasumi conflict blocked', 'Kasumi 已拦截冲突操作'],
   ['conflict.risk', 'Running Kasumi together with these components can crash the kernel. The following operations were refused.', 'Kasumi 与以下组件同时运行可能导致内核崩溃，已拒绝以下操作。'],
   ['conflict.loaded', 'Kasumi activation was refused because {target} was already loaded.', '尝试启用 Kasumi 时，冲突模块 {target} 已加载，Kasumi 已拒绝激活自身。'],

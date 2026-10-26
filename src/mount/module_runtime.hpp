@@ -99,6 +99,7 @@ struct RuleEvidence {
     std::string path;
     std::string source;
     std::vector<std::string> owners;
+    unsigned flags = 0;
 };
 
 // Supply the final rule winners, including failed expected rules. Live kernel

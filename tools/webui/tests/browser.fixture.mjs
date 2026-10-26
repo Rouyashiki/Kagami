@@ -34,7 +34,7 @@ export function installHostFixture(options = {}) {
     system: {
       kernel: "6.1.99-android14-fixture", selinux: "Enforcing", mount_base: "/dev/kagami/mirror",
       kasumi_available: true, kasumi_status: 0, hooks: "vfs_getattr: ready\niterate_dir: ready",
-      features: { names: ["STEALTH", "MOUNT_HIDE", "MAPS_SPOOF"], mask: 7 },
+      features: { names: ["STEALTH", "MOUNT_HIDE", "MAPS_SPOOF", ...(options.noBypass ? [] : ["rule_bypass"])], mask: 7 },
       mountStats: { total_mounts: 12, successful_mounts: 12, failed_mounts: 0, files_mounted: 0, dirs_mounted: 0, symlinks_created: 0, overlayfs_mounts: 8, success_rate: 100 },
       detectedPartitions: [{ name: "system", mount_point: "/system", fs_type: "ext4", is_read_only: true }, { name: "vendor_dlkm", mount_point: "/vendor_dlkm", fs_type: "erofs", is_read_only: true }],
       backends: { overlay: { available: true }, magic: { available: true }, kasumi: { available: true } },
@@ -93,16 +93,17 @@ export function installHostFixture(options = {}) {
     if (verb === "kasumi disable") return ok();
     if (verb === "module list") return json({ modules: args.includes("--include-inactive") ? modules : modules.filter((item) => !item.inactive) });
     if (verb === "module check-conflicts") return json([{ file: "/system/etc/shared.xml", modules: ["alpha_fonts", "beta_audio"] }]);
+    if (verb === "module set-bypass") { modules.find(item => item.id === args[2]).bypass = args[3] === "on"; return ok(); }
     if (verb === "module set-mode") { modules.find((item) => item.id === args[2]).mode = args[3]; return ok(); }
     if (verb === "module add-rule") {
       const module = modules.find((item) => item.id === args[2]);
       const old = module.rules.find((rule) => rule.path === args[3]);
-      if (old) old.mode = args[4]; else module.rules.push({ path: args[3], mode: args[4] });
+      if (old) { old.mode = args[4]; old.bypass = args.includes("--bypass"); } else module.rules.push({ path: args[3], mode: args[4], bypass: args.includes("--bypass") });
       return ok();
     }
     if (verb === "module remove-rule") { const module = modules.find((item) => item.id === args[2]); module.rules = module.rules.filter((rule) => rule.path !== args[3]); return ok(); }
-    if (verb === "hide list") return json(fixture.hides);
-    if (verb === "hide add") { if (!fixture.hides.includes(args[2])) fixture.hides.push(args[2]); return ok(); }
+    if (verb === "hide list") return json(args.includes("--details") ? fixture.hides.map(path => ({ path, bypass: fixture.hideBypasses?.[path] === true })) : fixture.hides);
+    if (verb === "hide add") { fixture.hideBypasses ??= {}; fixture.hideBypasses[args[2]] = args.includes("--bypass"); if (!fixture.hides.includes(args[2])) fixture.hides.push(args[2]); return ok(); }
     if (verb === "hide remove") { fixture.hides = fixture.hides.filter((path) => path !== args[2]); return ok(); }
     if (verb === "lkm set-autoload") { fixture.lkm.autoload = args[2] === "on"; config.lkm_autoload = fixture.lkm.autoload; return ok(); }
     if (verb === "lkm set-kmi") { fixture.lkm.kmi_override = args[2]; return ok(); }

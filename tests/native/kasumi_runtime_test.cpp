@@ -1,4 +1,5 @@
 #include "core/json.hpp"
+#include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
 #include "mount/kasumi.hpp"
 #include "mount/module_runtime.hpp"
@@ -39,6 +40,7 @@ struct Kernel {
     std::map<std::string, std::string> adds;
     std::vector<runtime::RuleEvidence> merges;
     std::set<std::string> hides;
+    std::map<std::string, unsigned> add_flags, hide_flags;
     std::vector<std::string> add_requests;
     std::string rejected_source;
     bool enabled = true;
@@ -65,11 +67,13 @@ runtime::Snapshot snapshot() {
     live.text = "Kasumi Protocol: " + std::to_string(KSM_PROTOCOL_VERSION) +
                 "\nKasumi Enabled: " + std::string(kernel.enabled ? "1\n" : "0\n");
     for (const auto& [path, source] : kernel.adds)
-        live.text += "add " + path + " " + source + " 0\n";
+        live.text +=
+            "add " + path + " " + source + " " + std::to_string(kernel.add_flags[path]) + "\n";
     for (const auto& rule : kernel.merges)
-        live.text += "merge " + rule.path + " " + rule.source + "\n";
+        live.text +=
+            "merge " + rule.path + " " + rule.source + " " + std::to_string(rule.flags) + "\n";
     for (const auto& path : kernel.hides)
-        live.text += "hide " + path + "\n";
+        live.text += "hide " + path + " " + std::to_string(kernel.hide_flags[path]) + "\n";
     return runtime::read_snapshot(live);
 }
 void state(const std::string& id, const std::string& expected) {
@@ -79,6 +83,7 @@ void state(const std::string& id, const std::string& expected) {
 }
 struct TestRule {
     std::string path, mode;
+    bool bypass = false;
 };
 struct Fixture {
     fs::path root;
@@ -136,7 +141,8 @@ struct Fixture {
                     saved << ',';
                 first_rule = false;
                 saved << "{\"path\":" << kagami::json_quote(rule.path)
-                      << ",\"mode\":" << kagami::json_quote(rule.mode) << '}';
+                      << ",\"mode\":" << kagami::json_quote(rule.mode)
+                      << ",\"bypass\":" << (rule.bypass ? "true}" : "false}");
             }
             saved << ']';
         }
@@ -237,7 +243,44 @@ void test_merge_and_hide_aliases() {
             "MERGE keeps final alias");
     state("module", "mounted");
 }
+void test_bypass_scope() {
+    Fixture fixture;
+    file(fixture.payload("module", "normal"));
+    file(fixture.payload("module", "global"));
+    file(fixture.payload("module", "merged/file"));
+    fs::create_directories(fixture.stock / "merged");
+    const auto path = [&](const char* leaf) { return (fixture.stock / leaf).string(); };
+    require(fixture.mount({"module"}, {{"module",
+                                        {{path("global"), "kasumi", true},
+                                         {path("merged"), "kasumi", true},
+                                         {path("hidden"), "hide", true}}}}),
+            "mixed bypass mount");
+    require(kernel.add_flags.at(path("normal")) == 0, "ordinary sibling remains policy-following");
+    require(kernel.add_flags.at(path("global")) == KSM_RULE_BYPASS_POLICY, "explicit ADD bypass");
+    require(kernel.merges.size() == 1 && kernel.merges[0].flags == KSM_RULE_BYPASS_POLICY,
+            "MERGE bypass reaches kernel");
+    require(kernel.hide_flags.at(path("hidden")) == KSM_RULE_BYPASS_POLICY,
+            "HIDE bypass reaches kernel");
+    state("module", "mounted");
+    kernel.add_flags[path("global")] = 0;
+    state("module", "partial");
+    kernel = {};
+    std::ofstream(fixture.root / "module_bypass.json") << "{\"module\":\"on\"}";
+    require(fixture.mount({"module"}), "module bypass mount");
+    require(kernel.add_flags.at(path("normal")) == KSM_RULE_BYPASS_POLICY,
+            "module bypass applies to default rule");
+    require(kernel.merges[0].flags == KSM_RULE_BYPASS_POLICY, "module bypass applies to merge");
+    state("module", "mounted");
+}
 }  // namespace
+
+namespace kagami::mount {
+ModuleModes load_module_modes(int& error, const char* name) {
+    ModuleModes modes;
+    (void)modes.prepare_modes((runtime_data_dir() / name).c_str(), error);
+    return modes;
+}
+}  // namespace kagami::mount
 
 namespace kagami::kasumi {
 bool is_available() {
@@ -279,27 +322,30 @@ bool clear_rules() {
     return true;
 }
 bool add_rule(const std::string& target, const std::string& source, int type) {
-    require(type == 0, "backend ADD type");
+    require((type & ~KSM_RULE_FLAGS_MASK) == 0, "backend ADD flags");
     kernel.add_requests.push_back(target);
     if (source == kernel.rejected_source) {
         errno = EIO;
         return false;
     }
     kernel.adds[kernel_add_key(target)] = source;
+    kernel.add_flags[kernel_add_key(target)] = type;
     return true;
 }
-bool add_merge_rule(const std::string& target, const std::string& source) {
-    kernel.merges.push_back({"MERGE", target, source, {}});
+bool add_merge_rule(const std::string& target, const std::string& source, int flags) {
+    kernel.merges.push_back({"MERGE", target, source, {}, static_cast<unsigned>(flags)});
     return true;
 }
-bool hide_path(const std::string& path) {
+bool hide_path(const std::string& path, int flags) {
     kernel.hides.insert(path);
+    kernel.hide_flags[path] = flags;
     return true;
 }
 }  // namespace kagami::kasumi
 
 int main() {
     try {
+        test_bypass_scope();
         test_leaf_alias();
         test_missing_and_dangling();
         test_alias_winners();
