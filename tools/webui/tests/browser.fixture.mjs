@@ -86,8 +86,10 @@ export function installHostFixture(options = {}) {
     if (verb === "kasumi list") return json([
       { type: "KASUMI", args: "Protocol: 18" },
       { type: "KASUMI", args: `Enabled: ${options.kasumiDisabled ? 0 : 1}` },
-      ...(options.hidesActive === false ? [] : fixture.hides.map((path) => ({ type: "HIDE", path }))),
-      { type: "MERGE", target: "/system/etc/audio", source: "/data/adb/modules/beta_audio/system/etc/audio" },
+      ...(options.activeRules ?? [
+        ...(options.hidesActive === false ? [] : fixture.hides.map((path) => ({ type: "HIDE", path }))),
+        { type: "MERGE", target: "/system/etc/audio", source: "/data/adb/modules/beta_audio/system/etc/audio" },
+      ]),
       { type: "STEALTH", args: "enabled" },
       { type: "MOUNT_HIDE", args: "enabled" },
     ]);

@@ -237,6 +237,26 @@ try {
       assert.equal(await row.locator('md-switch').evaluate(control => control.selected), true);
       await assertNoOverflow(page);
     }, { query: '?tab=kasumi&view=hide' });
+    await runCase(project, 'active-rules-kernel-bypass', async (page) => {
+      await page.evaluate(() => { window.__kagamiFixture.hideBypasses = { '/data/local/tmp/fixture-hidden': true }; });
+      await navigate(page, 'kasumi');
+      await openView(page, 'rules');
+      const rules = page.locator('.rule-details details');
+      await rules.first().waitFor();
+      assert.equal(await rules.count(), 4);
+      for (const path of ['/system/global-file', '/system/global-dir']) {
+        await rules.filter({ hasText: path }).locator('summary').getByText('Global', { exact: true }).waitFor();
+      }
+      for (const path of ['/data/local/tmp/fixture-hidden', '/system/legacy']) {
+        assert.equal(await rules.filter({ hasText: path }).getByText('Global', { exact: true }).count(), 0, 'Saved flags and missing flags cannot imply a live bypass');
+      }
+      await assertNoOverflow(page);
+    }, { fixture: { activeRules: [
+      { type: 'ADD', target: '/system/global-file', source: '/data/adb/modules/example/file', bypass: true },
+      { type: 'MERGE', target: '/system/global-dir', source: '/data/adb/modules/example/dir', bypass: true },
+      { type: 'HIDE', path: '/data/local/tmp/fixture-hidden', bypass: false },
+      { type: 'HIDE', path: '/system/legacy' },
+    ] } });
     await runCase(project, "bypass-unsupported-kernel", async (page) => {
       await navigate(page, "modules");
       await page.locator('[data-action="module-detail"][data-id="beta_audio"]').click();

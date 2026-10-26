@@ -151,7 +151,7 @@ function hidePage(s) {
 }
 function rulesPage(s) {
   const rules = data(s, 'rules', []);
-  return `${error(s, 'rules')}${rules.length ? `<div class="rule-details">${rules.map((rule, index) => `<details class="disclosure" data-key="rule-${index}-${e(rule.path)}"><summary><span><code dir="ltr">${e(rule.path)}</code><small>${e(rule.type)} · ${e(t(rule.isUserDefined ? 'ui.userRule' : 'ui.moduleRule'))}</small></span>${icon('chevron-down')}</summary>${info([[t('ui.type'), rule.type], [t('ui.target'), rule.target || '—', true], [t('ui.source'), rule.source || '—', true]])}</details>`).join('')}</div>` : s.resources.rules.ready ? empty(t('ui.noActiveRules'), 'list') : ''}`;
+  return `${error(s, 'rules')}${rules.length ? `<div class="rule-details">${rules.map((rule, index) => `<details class="disclosure" data-key="rule-${index}-${e(rule.path)}"><summary><span><code dir="ltr">${e(rule.path)}</code><small>${e(rule.type)} · ${e(t(rule.isUserDefined ? 'ui.userRule' : 'ui.moduleRule'))}</small>${rule.bypass === true ? badge(t('bypass.global')) : ''}</span>${icon('chevron-down')}</summary>${info([[t('ui.type'), rule.type], [t('ui.target'), rule.target || '—', true], [t('ui.source'), rule.source || '—', true]])}</details>`).join('')}</div>` : s.resources.rules.ready ? empty(t('ui.noActiveRules'), 'list') : ''}`;
 }
 function diagnostics(s) {
   const system = data(s, 'system');
