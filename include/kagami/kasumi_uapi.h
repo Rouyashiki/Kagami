@@ -18,11 +18,18 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
+#ifdef __linux__
+#include <linux/types.h>
+#else
+typedef uint32_t __u32;
+typedef int32_t __s32;
+#define __aligned_u64 uint64_t __attribute__((aligned(8)))
+#endif
 #endif  // #ifdef __KERNEL__
 
 #define KSM_MAGIC1 0x4B534D31  // "KSM1"
 #define KSM_MAGIC2 0x524F4F54  // "ROOT"
-#define KSM_PROTOCOL_VERSION 17
+#define KSM_PROTOCOL_VERSION 18
 
 #define KSM_MAX_LEN_PATHNAME 256
 
@@ -185,9 +192,7 @@ struct kasumi_spoof_kstat {
     int err;                                    /* Error code for userspace feedback */
 };
 
-/*
- * Feature flags for KSM_CMD_GET_FEATURES
- */
+/* Feature flags returned by KSM_IOC_GET_FEATURES. */
 #define KSM_FEATURE_KSTAT_SPOOF (1 << 0)
 /* Bit 1 remains reserved for the removed uname feature. */
 /* Bit 2 remains reserved for the removed cmdline feature. */
@@ -204,11 +209,35 @@ struct kasumi_spoof_kstat {
 #define KSM_FEATURE_SELINUX_FIX \
     (1 << 10) /* hide SELinux oracles from hidden app-zygote and isolated apps */
 #define KSM_FEATURE_FAKE_SELINUXFS KSM_FEATURE_SELINUX_FIX /* compatibility alias */
-#define KSM_FEATURE_QUIESCE (1 << 11)               /* terminal pre-unload quiesce handshake */
-#define KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE (1 << 12) /* mount-ns link projection */
+#define KSM_FEATURE_QUIESCE (1 << 11) /* terminal pre-unload quiesce handshake */
+/* Bit 12 remains reserved for removed mount namespace link projection. */
 
-#define KSM_MOUNT_HIDE_MODE_NORMAL 0
-#define KSM_MOUNT_HIDE_MODE_AGGRESSIVE 1
+#define KSM_FEATURE_MANAGED_HIDE (1 << 14)
+
+#define KSM_USER_HIDE_PATH_MAX 4096
+#define KSM_USER_HIDE_LIVE 0
+#define KSM_USER_HIDE_SUSPENDED 1
+#define KSM_USER_HIDE_PENDING 0
+#define KSM_USER_HIDE_BINDING 1
+#define KSM_USER_HIDE_BOUND 2
+#define KSM_USER_HIDE_ERROR 3
+
+/* Protocol 17 extension. QUERY returns the first ID greater than rule_id;
+ * rule_id == 0 in the reply marks the end. Paths include a terminating NUL,
+ * excluded from path_len. Input flags and reserved fields must be zero. */
+struct kasumi_user_hide_arg {
+    __u32 size;
+    __u32 flags;
+    __aligned_u64 rule_id;
+    __aligned_u64 generation;
+    __aligned_u64 reserved_id;
+    __u32 management;
+    __u32 binding;
+    __s32 error;
+    __u32 path_len;
+    __aligned_u64 reserved[2];
+    char path[KSM_USER_HIDE_PATH_MAX];
+};
 
 #define KSM_QUIESCE_API_VERSION 1
 
@@ -299,6 +328,37 @@ struct kasumi_statfs_spoof_arg {
     int err;
 };
 
+#define KSM_CONFLICT_MAX 16
+#define KSM_CONFLICT_NAME_LEN 64
+
+#define KSM_CONFLICT_LOADED_MODULE 1
+#define KSM_CONFLICT_BUILTIN_CONFIG 2
+#define KSM_CONFLICT_MODULE_LOAD 3
+
+/* Protocol 18 diagnostics persist for the host module's lifetime. Repeated
+ * (kind, target) pairs replace their sequence; a full queue replaces its oldest
+ * entry. GET does not acknowledge events or activate VFS. Entries are
+ * unordered, target is NUL-terminated, and all reserved fields are zero on
+ * output. */
+struct kasumi_conflict {
+    __aligned_u64 sequence;
+    __u32 kind;
+    __u32 reserved;
+    char target[KSM_CONFLICT_NAME_LEN];
+};
+
+struct kasumi_conflicts_arg {
+    __u32 count;
+    __u32 reserved;
+    struct kasumi_conflict events[KSM_CONFLICT_MAX];
+};
+
+/* Acknowledge through the maximum sequence in the displayed snapshot. Zero is
+ * a no-op; a sequence not yet issued returns -EINVAL. Newer events survive. */
+struct kasumi_conflict_ack_arg {
+    __aligned_u64 sequence;
+};
+
 // ioctl definitions (for fd-based mode)
 // Must be after struct definitions
 #define KSM_IOC_MAGIC 'S'
@@ -341,8 +401,18 @@ struct kasumi_statfs_spoof_arg {
 #define KSM_IOC_RESET_POLICY _IOWR(KSM_IOC_MAGIC, 36, struct kasumi_policy_config_arg)
 /* Idempotent terminal transition; repeat to poll until state is READY. */
 #define KSM_IOC_PREPARE_UNLOAD _IOWR(KSM_IOC_MAGIC, 37, struct kasumi_quiesce_arg)
-#define KSM_IOC_SET_MOUNT_HIDE_MODE _IOW(KSM_IOC_MAGIC, 38, int)
+/* Command 38 remains reserved for removed mount-hide mode selection. */
+
+#define KSM_IOC_USER_HIDE_UPSERT _IOWR(KSM_IOC_MAGIC, 40, struct kasumi_user_hide_arg)
+#define KSM_IOC_USER_HIDE_DELETE _IOWR(KSM_IOC_MAGIC, 41, struct kasumi_user_hide_arg)
+#define KSM_IOC_USER_HIDE_QUERY _IOWR(KSM_IOC_MAGIC, 42, struct kasumi_user_hide_arg)
+#define KSM_IOC_USER_HIDE_CLEAR _IO(KSM_IOC_MAGIC, 43)
+#define KSM_IOC_USER_HIDE_RETRY _IOWR(KSM_IOC_MAGIC, 44, struct kasumi_user_hide_arg)
 
 #define KSM_IOC_WATCH_INSTANCE _IOWR(KSM_IOC_MAGIC, 45, struct kasumi_instance_arg)
+
+/* Diagnostics remain available while a loaded instance is quiescing. */
+#define KSM_IOC_GET_CONFLICTS _IOR(KSM_IOC_MAGIC, 46, struct kasumi_conflicts_arg)
+#define KSM_IOC_ACK_CONFLICTS _IOW(KSM_IOC_MAGIC, 47, struct kasumi_conflict_ack_arg)
 
 #endif /* _KASUMI_UAPI_H */

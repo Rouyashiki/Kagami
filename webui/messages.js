@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Existing translations and language selection remain in i18n.js.
 const strings = [
+  ['conflict.title', 'Kasumi conflict blocked', 'Kasumi 已拦截冲突操作'],
+  ['conflict.risk', 'Running Kasumi together with these components can crash the kernel. The following operations were refused.', 'Kasumi 与以下组件同时运行可能导致内核崩溃，已拒绝以下操作。'],
+  ['conflict.loaded', 'Kasumi activation was refused because {target} was already loaded.', '尝试启用 Kasumi 时，冲突模块 {target} 已加载，Kasumi 已拒绝激活自身。'],
+  ['conflict.builtin', 'Kasumi activation was refused because the kernel has {target} enabled.', '尝试启用 Kasumi 时，当前内核已启用 {target}，Kasumi 已拒绝激活自身。'],
+  ['conflict.loading', 'Loading {target} was refused because Kasumi was already active.', '尝试加载 {target} 时 Kasumi 已激活，已拒绝加载该模块。'],
+  ['conflict.unknown', 'Kasumi refused a conflicting operation involving {target}.', 'Kasumi 已拒绝涉及 {target} 的冲突操作。'],
+  ['conflict.recovery', 'Choose one implementation and reboot. For a built-in conflict, use a kernel without that feature. Acknowledging this warning does not change settings.', '请选择一种实现并重启。若冲突功能内置于内核，请更换不含该功能的内核。确认此警告不会更改设置。'],
   ['nav.settings', 'Settings', '设置'],
   ['ui.back', 'Back', '返回'], ['ui.close', 'Close', '关闭'], ['ui.retry', 'Retry', '重试'],
   ['ui.preview', 'Preview', '预览'], ['ui.previewNote', 'Sample data · changes stay in this preview', '示例数据 · 修改仅在此次预览中生效'],

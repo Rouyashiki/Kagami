@@ -170,6 +170,32 @@ try {
       await assertNoOverflow(page);
     }, { fixture: false, offlineFile: true });
 
+    await runCase(project, "kasumi-conflict-ack", async (page) => {
+      const dialog = page.locator('#editor[open]');
+      await dialog.waitFor();
+      await page.getByText('Kasumi conflict blocked', { exact: true }).waitFor();
+      assert.ok((await dialog.innerText()).includes('susfs_guard_lkm'));
+      assert.equal(await dialog.locator('[data-action="close-dialog"]').isVisible(), false);
+      await page.keyboard.press('Escape');
+      assert.equal(await dialog.count(), 1);
+      await page.evaluate(() => {
+        window.__kagamiFixture.kasumiConflicts.push({ sequence: '9007199254740994', kind: 3, target: 'pathmask' });
+      });
+      await dialog.locator('[data-action="dialog-save"]').click();
+      await page.locator('#dialog-error:not([hidden])').waitFor();
+      assert.equal(await dialog.count(), 1);
+      await dialog.locator('[data-action="dialog-save"]').click();
+      await page.getByText('Loading pathmask was refused because Kasumi was already active.', { exact: true }).waitFor();
+      assert.equal(await page.getByText('Loading susfs_guard_lkm was refused because Kasumi was already active.', { exact: true }).count(), 0);
+      await dialog.locator('[data-action="dialog-save"]').click();
+      await page.waitForFunction(() => !document.querySelector('#editor[open]'));
+      const commands = await page.evaluate(() => window.__kagamiFixture.commands.filter(command => command.includes('ack-conflicts')));
+      assert.equal(commands.length, 3);
+      assert.ok(commands[0].includes('9007199254740993'));
+      assert.ok(commands[1].includes('9007199254740993'));
+      assert.ok(commands[2].includes('9007199254740994'));
+    }, { fixture: { kasumiConflicts: [{ sequence: '9007199254740993', kind: 3, target: 'susfs_guard_lkm' }], failures: { 'kasumi ack-conflicts': 1 } } });
+
     await runCase(project, "first-use-confirmation", async (page) => {
       const confirm = page.locator(selector("dialog-save"));
       await page.locator("#editor[open]").waitFor();

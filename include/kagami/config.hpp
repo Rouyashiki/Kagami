@@ -58,7 +58,6 @@ struct Config {
     bool enable_stealth = true;
     bool enable_overlay_xattr_hide = false;
     bool enable_mount_hide = false;
-    Argument mount_hide_mode = "normal";
     bool enable_maps_spoof = false;
     bool enable_statfs_spoof = false;
     bool enable_selinux_fix = false;

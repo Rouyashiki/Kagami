@@ -31,7 +31,6 @@ export const DEFAULT_CONFIG = {
   kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
   enable_overlay_xattr_hide: false,
   enable_mount_hide: false,
-  mount_hide_mode: "normal",
   enable_maps_spoof: false,
   enable_statfs_spoof: false,
   enable_selinux_fix: false,
@@ -99,6 +98,7 @@ function hasOwn(value, key) {
 
 function normalizeConfig(rawConfig) {
   const raw = rawConfig && typeof rawConfig === "object" ? clone(rawConfig) : {};
+  delete raw.mount_hide_mode;
   const splitKeys = [
     "enable_overlay_xattr_hide",
     "enable_mount_hide",
@@ -111,7 +111,6 @@ function normalizeConfig(rawConfig) {
 
   if (hasSplitFeatures) {
     raw.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
-    raw.mount_hide_mode = raw.mount_hide_mode === "aggressive" ? "aggressive" : "normal";
     delete raw.enable_hidexattr;
     return raw;
   }
@@ -122,7 +121,6 @@ function normalizeConfig(rawConfig) {
     kasumi_feature_config_version: KASUMI_FEATURE_CONFIG_VERSION,
     enable_overlay_xattr_hide: legacy,
     enable_mount_hide: legacy,
-    mount_hide_mode: "normal",
     enable_maps_spoof: legacy,
     enable_statfs_spoof: legacy,
     enable_selinux_fix: legacy || raw.enable_selinux_fix === true,
@@ -163,6 +161,13 @@ function arrayResponse(value) {
   return value;
 }
 
+function conflictSequence(value) {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(value) || BigInt(value) > 18446744073709551615n) {
+    throw new Error("Invalid conflict sequence");
+  }
+  return value;
+}
+
 function validModuleId(id) {
   if (typeof id !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(id) || id === "." || id === "..") {
     throw new Error("Invalid module ID");
@@ -198,7 +203,7 @@ function moduleRuntime(value) {
 function configPatch(updates) {
   const patch = clone(objectResponse(updates || {}));
   for (const key of ["lkm_autoload", "__lkmAutoloadPresent", "kasumi_available", "tmpfs_xattr_supported"]) delete patch[key];
-  if (Object.keys(patch).some((key) => (key.startsWith("enable_") && key !== "enable_nuke") || key === "mount_hide_mode")) {
+  if (Object.keys(patch).some((key) => (key.startsWith("enable_") && key !== "enable_nuke"))) {
     patch.kasumi_feature_config_version = KASUMI_FEATURE_CONFIG_VERSION;
   }
   return patch;
@@ -324,6 +329,8 @@ const mockState = {
 };
 
 const mockApi = {
+  async getKasumiConflicts() { return { events: [] }; },
+  async ackKasumiConflicts(sequence) { conflictSequence(sequence); },
   async getMeta() {
     return { ...MODULE_META, version: "Preview", module_id: "kagami", config_file: PATHS.CONFIG, log_file: PATHS.DEFAULT_LOG };
   },
@@ -470,6 +477,21 @@ const mockApi = {
 };
 
 const realApi = {
+  async getKasumiConflicts() {
+    const snapshot = objectResponse(await execJson(`${PATHS.BINARY} kasumi conflicts`));
+    const events = arrayResponse(snapshot.events);
+    if (events.length > 16) throw new Error("Invalid conflict snapshot");
+    for (const event of events) {
+      objectResponse(event);
+      if (conflictSequence(event.sequence) === "0" || !Number.isInteger(event.kind) || typeof event.target !== "string") {
+        throw new Error("Invalid conflict event");
+      }
+    }
+    return { events };
+  },
+  async ackKasumiConflicts(sequence) {
+    await checkedExec(`${PATHS.BINARY} kasumi ack-conflicts ${conflictSequence(sequence)}`);
+  },
   async getMeta() {
     const data = objectResponse(await execJson(`${PATHS.BINARY} api meta`));
     if (typeof data.version !== "string" || !data.version) throw new Error("The module version is unavailable");

@@ -1,6 +1,7 @@
 #include "core/command.hpp"
 #include <iterator>
 
+#include <charconv>
 #include <chrono>
 #include "core/daemon.hpp"
 #include "core/human_bytes.hpp"
@@ -13,7 +14,7 @@
 #include "core/runtime.hpp"
 #include "kagami/config.hpp"
 #include "kagami/kasumi_client.hpp"
-#include "kagami/kasumi_uapi_compat.hpp"
+#include "kagami/kasumi_uapi.h"
 #include "mount/backend.hpp"
 #include "mount/kasumi.hpp"
 #include "mount/magic_mount.hpp"
@@ -91,7 +92,7 @@ void print_usage(output::Context& destination) {
         "  kagamid recovery status|boot-completed|reset\n",
         "  kagamid kasumi "
         "version|list|enable|disable|clear|fix-mounts|hide-overlay-xattrs|mount-hide "
-        "off|normal|aggressive|maps|policy\n",
+        "off|on|normal|maps|policy|conflicts|ack-conflicts\n",
         "  kagamid lkm load|unload|status|autoload|set-autoload|set-kmi|clear-kmi\n");
 }
 
@@ -1474,6 +1475,39 @@ int handle_module(output::Context& destination, Arguments args) {
 
 int handle_kasumi(output::Context& destination, Arguments args) {
     const auto sub = arg_or_default(args, 1, "");
+    if (sub == "conflicts") {
+        kasumi_conflicts_arg snapshot{};
+        if (!kasumi::get_conflicts(snapshot)) {
+            output::err(destination, "cannot read Kasumi conflicts: ", std::strerror(errno), '\n');
+            return 1;
+        }
+        output::out(destination, "{\"events\":[");
+        for (__u32 i = 0; i < snapshot.count; ++i) {
+            const auto& event = snapshot.events[i];
+            output::out(destination, i ? "," : "", "{\"sequence\":\"", event.sequence,
+                        "\",\"kind\":", event.kind, ",\"target\":", bounded::quoted(event.target),
+                        "}");
+        }
+        output::out(destination, "]}\n");
+        return 0;
+    }
+    if (sub == "ack-conflicts") {
+        const auto value = arg_or_default(args, 2, "");
+        std::uint64_t sequence = 0;
+        const auto result = std::from_chars(value.data(), value.data() + value.size(), sequence);
+        if (args.size() != 3 || value.empty() || result.ec != std::errc{} ||
+            result.ptr != value.data() + value.size()) {
+            errno = EINVAL;
+            output::err(destination, "usage: kagamid kasumi ack-conflicts SEQUENCE\n");
+            return 1;
+        }
+        if (!kasumi::acknowledge_conflicts(sequence)) {
+            output::err(destination, "cannot acknowledge Kasumi conflicts: ", std::strerror(errno),
+                        '\n');
+            return 1;
+        }
+        return 0;
+    }
     if (sub == "version") {
         return print_kasumi_version_json(destination);
     }
@@ -1693,17 +1727,14 @@ int handle_kasumi(output::Context& destination, Arguments args) {
     if (sub == "mount-hide" || sub == "maps-spoof" || sub == "statfs-spoof" ||
         sub == "selinux-fix") {
         const std::string value = arg_or_default(args, 2, "off");
-        const bool on = value == "on" || value == "normal" || value == "aggressive";
+        const bool on = value == "on" || value == "normal";
         bool ok = false;
         if (sub == "mount-hide") {
-            if (value != "off" && value != "on" && value != "normal" && value != "aggressive") {
-                output::err(destination,
-                            "usage: kagamid kasumi mount-hide off|normal|aggressive\n");
+            if (value != "off" && value != "on" && value != "normal") {
+                output::err(destination, "usage: kagamid kasumi mount-hide off|on|normal\n");
                 return 1;
             }
-            ok =
-                kasumi::set_mount_hide(on, value == "aggressive" ? kasumi::MountHideMode::Aggressive
-                                                                 : kasumi::MountHideMode::Normal);
+            ok = kasumi::set_mount_hide(on);
         } else if (sub == "maps-spoof") {
             ok = kasumi::set_maps_spoof(on);
         } else if (sub == "statfs-spoof") {
@@ -1946,7 +1977,7 @@ int run_command(output::Context& destination, Arguments args) {
                                  sub != "set-mode" && sub != "add-rule" && sub != "remove-rule";
     const bool kasumi_mutation =
         group == "kasumi" && sub != "version" && sub != "list" && sub != "features" &&
-        sub != "hooks" &&
+        sub != "hooks" && sub != "conflicts" && sub != "ack-conflicts" &&
         !(sub == "policy" && (policy_action == "show" || policy_action == "state"));
     const bool lkm_mutation = group == "lkm" && (sub == "load" || sub == "unload" ||
                                                  sub == "force-unload" || sub == "autoload");
@@ -1973,8 +2004,8 @@ bool is_query(Arguments args) {
            (args[0] == "config" && sub == "show") ||
            (args[0] == "module" && (sub == "list" || sub == "check-conflicts")) ||
            (args[0] == "hide" && sub == "list") ||
-           (args[0] == "kasumi" &&
-            (sub == "version" || sub == "list" || sub == "features" || sub == "hooks")) ||
+           (args[0] == "kasumi" && (sub == "version" || sub == "list" || sub == "features" ||
+                                    sub == "hooks" || sub == "conflicts")) ||
            (args[0] == "recovery" && sub == "status");
 }
 
@@ -1998,7 +2029,6 @@ std::string operation_description(Arguments args) {
                                                          "enable_kernel_debug",
                                                          "enable_stealth",
                                                          "enable_mount_hide",
-                                                         "mount_hide_mode",
                                                          "enable_maps_spoof",
                                                          "enable_statfs_spoof",
                                                          "enable_overlay_xattr_hide",

@@ -8,7 +8,7 @@ export function installHostFixture(options = {}) {
     debug: false, verbose: false, lkm_autoload: false, kasumi_enabled: true,
     disable_umount: false, enable_nuke: true, enable_kernel_debug: false,
     enable_stealth: true, enable_overlay_xattr_hide: false, enable_mount_hide: false,
-    mount_hide_mode: "normal", enable_maps_spoof: false, enable_statfs_spoof: false,
+    enable_maps_spoof: false, enable_statfs_spoof: false,
     enable_selinux_fix: false, kasumi_feature_config_version: 3,
     overlayfs_enabled: true, magic_mount_enabled: true, mount_backend: "auto",
     work_dir: "/dev/kagami", mirror_dir: "", mirror_img: "/data/adb/kagami/mirror.img",
@@ -28,6 +28,7 @@ export function installHostFixture(options = {}) {
     commands: [], unhandled: [], failures: { ...(options.failures || {}) }, config, modules,
     held: [], pending: [], execCalls: 0, spawnCalls: 0,
     hides: ["/data/local/tmp/fixture-hidden"], toasts: [],
+    kasumiConflicts: options.kasumiConflicts || [],
     logs: "[INFO] Kagami fixture ready\n[WARN] Fixture warning\n[ERROR] Fixture failure detail\n",
     lkm: { loaded: true, builtin: false, autoload: false, kmi_override: "", detected_kmi: "android14-6.1", asset: "kasumi-android14-6.1.ko", last_error: "", unload: { allowed: true, can_unload: true, reason: "" } },
     system: {
@@ -66,6 +67,11 @@ export function installHostFixture(options = {}) {
     const args = shellWords(cli);
     const verb = args.slice(0, 2).join(" ");
     if (verb === "config show") return json(config);
+    if (verb === "kasumi conflicts") return json({ events: fixture.kasumiConflicts });
+    if (verb === "kasumi ack-conflicts") {
+      fixture.kasumiConflicts = fixture.kasumiConflicts.filter(event => BigInt(event.sequence) > BigInt(args[2]));
+      return ok();
+    }
     if (verb === "config merge-json") { Object.assign(config, JSON.parse(args[2])); return ok(); }
     if (verb === "config apply") return ok();
     if (verb === "config sync-partitions") return args.includes("--json")
@@ -75,14 +81,14 @@ export function installHostFixture(options = {}) {
     if (verb === "api system") return json(fixture.system);
     if (verb === "api storage") return json({ size: "2.0G", used: "256M", avail: "1.7G", percent: 13, mode: "ext4" });
     if (verb === "api lkm") return json(fixture.lkm);
-    if (verb === "kasumi version") return json({ kasumi_available: fixture.system.kasumi_available, protocol_version: 17, kernel_version: options.mismatch ? 16 : 17, protocol_mismatch: Boolean(options.mismatch), mismatch_message: options.mismatch ? "Kasumi protocol mismatch" : "", active_modules: options.mismatch ? [] : ["beta_audio"], mount_base: fixture.system.mount_base });
+    if (verb === "kasumi version") return json({ kasumi_available: fixture.system.kasumi_available, protocol_version: 18, kernel_version: options.mismatch ? 17 : 18, protocol_mismatch: Boolean(options.mismatch), mismatch_message: options.mismatch ? "Kasumi protocol mismatch" : "", active_modules: options.mismatch ? [] : ["beta_audio"], mount_base: fixture.system.mount_base });
     if (verb === "kasumi list") return json([
-      { type: "KASUMI", args: "Protocol: 17" },
+      { type: "KASUMI", args: "Protocol: 18" },
       { type: "KASUMI", args: `Enabled: ${options.kasumiDisabled ? 0 : 1}` },
       ...(options.hidesActive === false ? [] : fixture.hides.map((path) => ({ type: "HIDE", path }))),
       { type: "MERGE", target: "/system/etc/audio", source: "/data/adb/modules/beta_audio/system/etc/audio" },
       { type: "STEALTH", args: "enabled" },
-      { type: "MOUNT_HIDE", args: "enabled mode=normal" },
+      { type: "MOUNT_HIDE", args: "enabled" },
     ]);
     if (verb === "kasumi disable") return ok();
     if (verb === "module list") return json({ modules: args.includes("--include-inactive") ? modules : modules.filter((item) => !item.inactive) });

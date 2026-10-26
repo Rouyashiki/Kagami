@@ -174,6 +174,27 @@ void test_permission_denied() {
     require(chmod(path.c_str(), 0600) == 0, "restore fixture readability");
     require(read_text(path) == original, "unreadable config was never replaced with defaults");
 }
+void test_removed_mount_hide_mode() {
+    Fixture fixture;
+    const auto path = fixture.path / "config.json";
+    const std::string original = "{\"kasumi_feature_config_version\":3,\"enable_mount_hide\":true,"
+                                 "\"mount_hide_mode\":\"aggressive\",\"unknown\":42}\n";
+    write_text(path, original);
+    std::string error;
+    kagami::PreparedConfig config;
+    require(kagami::read_config_file(path.string(), config, error) && config.enable_mount_hide,
+            "legacy mode does not disable ordinary mount hiding");
+    require(!kagami::merge_config_json(path.string(), "{\"mount_hide_mode\":\"normal\"}", error),
+            "removed mode rejects new writes");
+    require(read_text(path) == original, "rejected mode update preserves original bytes");
+    require(kagami::merge_config_json(path.string(), "{\"debug\":true}", error),
+            "unrelated merge removes obsolete mode");
+    const auto saved = document(path);
+    require(saved.find("mount_hide_mode") == nullptr &&
+                field(saved, "enable_mount_hide").bool_value &&
+                field(saved, "unknown").number_value == 42,
+            "obsolete mode removal preserves ordinary hiding and unrelated fields");
+}
 void test_preservation_and_migration() {
     Fixture fixture;
     const auto path = fixture.path / "config.json";
@@ -189,9 +210,7 @@ void test_preservation_and_migration() {
     require(kagami::merge_config_json(path.string(), "{\"debug\":true}", error), "unrelated merge");
     require(field(document(path), "enable_hidexattr").bool_value,
             "unrelated save retains legacy state");
-    require(kagami::merge_config_json(
-                path.string(), "{\"enable_mount_hide\":false,\"mount_hide_mode\":\"aggressive\"}",
-                error),
+    require(kagami::merge_config_json(path.string(), "{\"enable_mount_hide\":false}", error),
             "migrate feature configuration");
     auto saved = document(path);
     require(saved.find("enable_hidexattr") == nullptr &&
@@ -199,9 +218,9 @@ void test_preservation_and_migration() {
             "split migration replaces legacy feature switch");
     kagami::PreparedConfig config;
     require(kagami::read_config_file(path.string(), config, error), "read migrated config");
-    require(config.debug && !config.enable_mount_hide && config.mount_hide_mode == "aggressive" &&
-                config.enable_overlay_xattr_hide && config.enable_maps_spoof &&
-                config.enable_statfs_spoof && config.enable_selinux_fix && config.enable_stealth,
+    require(config.debug && !config.enable_mount_hide && config.enable_overlay_xattr_hide &&
+                config.enable_maps_spoof && config.enable_statfs_spoof &&
+                config.enable_selinux_fix && config.enable_stealth,
             "migration preserves all unrelated enabled projections");
     require(config.mirror_dir == "/legacy/mirror" && config.mirror_img == "/legacy/image" &&
                 config.mirror_img_size_mb == 256,
@@ -236,6 +255,7 @@ int main() {
         test_missing();
         test_invalid_documents();
         test_permission_denied();
+        test_removed_mount_hide_mode();
         test_preservation_and_migration();
         std::cout << "config read fixtures passed\n";
         return 0;

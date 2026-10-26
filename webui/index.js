@@ -58,6 +58,7 @@ function render() {
   const loading = pageResources(state.route).some(name => state.resources[name].loading);
   patchHtml(document.getElementById('page-heading'), `${state.route.view ? iconButton('back', 'arrow-left', t('ui.back')) : ''}<h1>${e(title)}</h1>${state.preview ? `<span class="preview-badge">${e(t('ui.preview'))}</span>` : ''}${iconButton('refresh', 'refresh-cw', t('ui.refresh'), { disabled: loading, 'aria-busy': loading })}`);
   patchHtml(document.getElementById('page-content'), renderPage(state));
+  queueMicrotask(showKasumiWarning);
 }
 function animatePage() {
   if (reducedMotion.matches) return;
@@ -94,12 +95,28 @@ function schedulePoll() {
   }, 15000);
 }
 async function refreshCurrent() {
-  const names = pageResources(state.route);
+  const names = [...new Set([...pageResources(state.route), 'kasumiConflicts'])];
   // Route-specific queued refreshes retain the destination that requested them.
   if (refreshPromise && names.every(name => state.resources[name].loading)) return refreshPromise;
   const promise = store.refresh(names);
   refreshPromise = promise;
   try { return await promise; } finally { if (refreshPromise === promise) refreshPromise = null; }
+}
+function showKasumiWarning() {
+  const resource = state.resources.kasumiConflicts;
+  if (dialog.open || !resource.ready || resource.error || !resource.data.events.length) return;
+  const events = resource.data.events;
+  const sequence = events.reduce((highest, event) => BigInt(event.sequence) > BigInt(highest) ? event.sequence : highest, '0');
+  const rows = events.map(event => {
+    const key = { 1: 'conflict.loaded', 2: 'conflict.builtin', 3: 'conflict.loading' }[event.kind] || 'conflict.unknown';
+    return `<p>${e(t(key, { target: event.target }))}</p>`;
+  }).join('');
+  showDialog({ title: t('conflict.title'), body: `<p>${e(t('conflict.risk'))}</p>${rows}<p>${e(t('conflict.recovery'))}</p>`, confirm: t('ui.understand'), requiredAck: true, async submit() {
+    await api.ackKasumiConflicts(sequence);
+    resource.data = { events: resource.data.events.filter(event => BigInt(event.sequence) > BigInt(sequence)) };
+    await store.refresh(['kasumiConflicts']);
+    return true;
+  } });
 }
 function showToast(message) {
   clearTimeout(toastTimer);
@@ -180,11 +197,6 @@ function editConfig(key) {
   let options;
   if (field.type === 'mode') options = modes().filter(option => option.value !== 'none');
   if (field.choices) options = field.choices.map(([value, label]) => ({ value, label: t(label) }));
-  if (key === 'mount_hide_mode') {
-    const resource = state.resources.system;
-    const supported = resource.ready && !resource.error && resource.data.features?.names?.includes('mount_hide_aggressive');
-    options = options.map(option => ({ ...option, disabled: option.value === 'aggressive' && !supported, description: option.value === 'aggressive' && !supported ? t('ui.unsupported') : t(option.value === 'aggressive' ? 'config.mountHideModeAggressiveDesc' : 'config.mountHideModeNormalDesc') }));
-  }
   showDialog({ title: t(field.title), body: options ? radioOptions(options, value) : textField(t(field.title), value, { type: field.type === 'number' ? 'number' : 'text', required: !field.optional }), submit(form) {
     let next = String(form.get('value') ?? '').trim();
     if (options && !options.some(option => String(option.value) === next && !option.disabled)) throw new Error(t('ui.required'));
@@ -424,7 +436,7 @@ if (!state.preview) {
     link.onload = () => { link.media = 'all'; }; document.head.appendChild(link);
   }
 }
-void store.refresh([...new Set(['config', 'system', 'modules', 'storage', 'lkm', 'meta', ...pageResources(state.route)])]);
+void store.refresh([...new Set(['config', 'system', 'modules', 'storage', 'lkm', 'meta', 'kasumiConflicts', ...pageResources(state.route)])]);
 if (!state.preview && preference('kagami_experimental_ack', '') !== 'true') {
   showDialog({ title: t('ui.experimental'), body: `<p>${e(t('ui.experimentalBody'))}</p>`, confirm: t('ui.understand'), requiredAck: true, submit() { storePreference('kagami_experimental_ack', 'true'); return true; } });
 }

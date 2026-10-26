@@ -5,7 +5,7 @@
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
 #include "kagami/kasumi_client.hpp"
-#include "kagami/kasumi_uapi_compat.hpp"
+#include "kagami/kasumi_uapi.h"
 #include "mount/module_runtime.hpp"
 #include "mount/mount_fs.hpp"
 
@@ -346,7 +346,7 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
         owner = ::kagami::kasumi::PolicyOwner::Disabled;
     } else {
         error = policy.owner == "magisk"
-                    ? "Magisk has no Kasumi API 17 policy provider; use manual"
+                    ? "Magisk has no Kasumi policy provider; use manual"
                     : "invalid policy owner: " + std::string(std::string_view(policy.owner));
         return false;
     }
@@ -377,7 +377,6 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
 
 bool apply_feature_config(const Config& config, std::string& error) {
     mlog("apply features: mount_hide=" + std::to_string(config.enable_mount_hide) +
-         " mode=" + std::string(std::string_view(config.mount_hide_mode)) +
          " maps=" + std::to_string(config.enable_maps_spoof) +
          " statfs=" + std::to_string(config.enable_statfs_spoof) +
          " overlay_xattrs=" + std::to_string(config.enable_overlay_xattr_hide) +
@@ -394,11 +393,7 @@ bool apply_feature_config(const Config& config, std::string& error) {
 
     apply(::kagami::kasumi::set_debug(config.enable_kernel_debug), "kernel debug");
     apply(::kagami::kasumi::set_stealth(config.enable_stealth), "stealth");
-    const auto mount_hide_mode = config.mount_hide_mode == "aggressive"
-                                     ? ::kagami::kasumi::MountHideMode::Aggressive
-                                     : ::kagami::kasumi::MountHideMode::Normal;
-    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide, mount_hide_mode),
-          "mount hide");
+    apply(::kagami::kasumi::set_mount_hide(config.enable_mount_hide), "mount hide");
     apply(::kagami::kasumi::set_maps_spoof(config.enable_maps_spoof), "maps spoof");
     apply(::kagami::kasumi::set_statfs_spoof(config.enable_statfs_spoof), "statfs spoof");
     apply(::kagami::kasumi::set_selinux_guard(config.enable_selinux_fix), "SELinux guard");

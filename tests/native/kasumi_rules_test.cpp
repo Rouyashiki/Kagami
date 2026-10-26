@@ -1,5 +1,5 @@
 #include "kagami/kasumi_client.hpp"
-#include "kagami/kasumi_uapi_compat.hpp"
+#include "kagami/kasumi_uapi.h"
 
 #include <cerrno>
 #include <cstddef>

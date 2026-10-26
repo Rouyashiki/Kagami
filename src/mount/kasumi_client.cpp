@@ -1,6 +1,6 @@
 #include "kagami/kasumi_client.hpp"
 
-#include "kagami/kasumi_uapi_compat.hpp"
+#include "kagami/kasumi_uapi.h"
 
 #include <algorithm>
 #include <cctype>
@@ -25,9 +25,11 @@ static_assert(static_cast<std::uint32_t>(QuiesceState::Active) == KSM_QUIESCE_ST
 static_assert(static_cast<std::uint32_t>(QuiesceState::Draining) == KSM_QUIESCE_STATE_DRAINING);
 static_assert(static_cast<std::uint32_t>(QuiesceState::Ready) == KSM_QUIESCE_STATE_READY);
 static_assert(static_cast<std::uint32_t>(QuiesceState::Failed) == KSM_QUIESCE_STATE_FAILED);
-static_assert(static_cast<std::uint32_t>(MountHideMode::Normal) == KSM_MOUNT_HIDE_MODE_NORMAL);
-static_assert(static_cast<std::uint32_t>(MountHideMode::Aggressive) ==
-              KSM_MOUNT_HIDE_MODE_AGGRESSIVE);
+static_assert(sizeof(kasumi_conflict) == 80);
+static_assert(sizeof(kasumi_conflicts_arg) == 1288);
+static_assert(sizeof(kasumi_conflict_ack_arg) == 8);
+static_assert(KSM_IOC_GET_CONFLICTS == 0x8508532eU);
+static_assert(KSM_IOC_ACK_CONFLICTS == 0x4008532fU);
 static_assert(sizeof(kasumi_quiesce_arg) == 64);
 static_assert(sizeof(kasumi_instance_arg) == 64);
 
@@ -315,8 +317,6 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("selinux_bypass");
     if (bitmask & KSM_FEATURE_FAKE_MOUNTINFO)
         names.emplace_back("fake_mountinfo");
-    if (bitmask & KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE)
-        names.emplace_back("mount_hide_aggressive");
     if (bitmask & KSM_FEATURE_SELINUX_FIX)
         names.emplace_back("selinux_fix");
     if (bitmask & KSM_FEATURE_QUIESCE)
@@ -405,22 +405,30 @@ bool hide_overlay_xattrs(const std::string& path) {
     return execute(KSM_IOC_HIDE_OVERLAY_XATTRS, &arg) == 0;
 }
 
-bool set_mount_hide(bool enable, MountHideMode mode) {
-    const int bitmask = features();
-    const bool mode_supported = (bitmask & KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE) != 0;
-
-    if (enable && mode == MountHideMode::Aggressive && !mode_supported) {
-        errno = EOPNOTSUPP;
-        return false;
-    }
-    if (mode_supported) {
-        int raw_mode = static_cast<int>(mode);
-        if (execute(KSM_IOC_SET_MOUNT_HIDE_MODE, &raw_mode) != 0)
-            return false;
-    }
+bool set_mount_hide(bool enable) {
     kasumi_mount_hide_arg arg = {};
     arg.enable = enable ? 1 : 0;
     return ioctl_arg_ok(execute(KSM_IOC_SET_MOUNT_HIDE, &arg), arg.err);
+}
+
+bool get_conflicts(kasumi_conflicts_arg& snapshot) {
+    snapshot = {};
+    if (execute(KSM_IOC_GET_CONFLICTS, &snapshot) != 0)
+        return false;
+    if (snapshot.count > KSM_CONFLICT_MAX) {
+        snapshot = {};
+        errno = EPROTO;
+        return false;
+    }
+    for (__u32 i = 0; i < snapshot.count; ++i)
+        snapshot.events[i].target[KSM_CONFLICT_NAME_LEN - 1] = '\0';
+    return true;
+}
+
+bool acknowledge_conflicts(std::uint64_t sequence) {
+    kasumi_conflict_ack_arg ack{};
+    ack.sequence = sequence;
+    return execute(KSM_IOC_ACK_CONFLICTS, &ack) == 0;
 }
 
 bool set_maps_spoof(bool enable) {

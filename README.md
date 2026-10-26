@@ -92,8 +92,18 @@ executable and does not depend on `ksud`; `init_module` is retained only as a
 compatibility fallback when the fd-based path is unavailable. An exact
 kmsg-confirmed vermagic mismatch rebuilds `.modinfo` and is retried once.
 
-`mount_hide_mode` selects the Kasumi mount-hide level. `normal` removes
-root-owned mounts while preserving the real zygote_next shared namespace view;
-`aggressive` also projects shared propagation and `/proc/*/ns/mnt` links. The
-default is `normal`, and the aggressive setting requires a Kasumi module that
-advertises `KSM_FEATURE_MOUNT_HIDE_AGGRESSIVE`.
+Kasumi API 18 retains ordinary mount hiding through `enable_mount_hide` and
+`kagamid kasumi mount-hide off|on|normal`. The aggressive mode and its WebUI
+selector are removed. Existing `mount_hide_mode` fields are ignored when
+loading and removed by the next `config merge-json`; new writes to that field
+are rejected. Update the controller and the Kasumi LKM together.
+
+The C++ client includes the self-contained `include/kagami/kasumi_uapi.h`
+directly, synchronized from Kasumi's `src/include/kasumi_uapi.h`.
+`kagamid kasumi conflicts` reads the API 18 diagnostic queue;
+`kagamid kasumi ack-conflicts SEQUENCE` acknowledges only through the displayed
+snapshot. Sequences are decimal strings in JSON so WebUI does not lose 64-bit
+precision. WebUI requires explicit confirmation and retains the warning if ACK
+fails; later conflicts remain pending. Loading Kasumi itself can be refused
+before any hook is installed, in which case the load error and kernel log carry
+the diagnosis because a rejected LKM cannot retain its queue.

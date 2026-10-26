@@ -152,7 +152,6 @@ std::string_view default_config_json() noexcept {
   "kasumi_feature_config_version": 3,
   "enable_overlay_xattr_hide": false,
   "enable_mount_hide": false,
-  "mount_hide_mode": "normal",
   "enable_maps_spoof": false,
   "enable_statfs_spoof": false,
   "enable_selinux_fix": false,
@@ -233,10 +232,6 @@ void apply_config_document(json::Value root, Config& config) {
             json_bool_or(root, "enable_overlay_xattr_hide", config.enable_overlay_xattr_hide);
         config.enable_mount_hide =
             json_bool_or(root, "enable_mount_hide", config.enable_mount_hide);
-        config.mount_hide_mode = json_string_or(root, "mount_hide_mode", config.mount_hide_mode);
-        if (config.mount_hide_mode != "normal" && config.mount_hide_mode != "aggressive") {
-            config.mount_hide_mode = "normal";
-        }
         config.enable_maps_spoof =
             json_bool_or(root, "enable_maps_spoof", config.enable_maps_spoof);
         config.enable_statfs_spoof =
@@ -473,6 +468,10 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
     if (!prepare_document(patch_input, patch_document, error))
         return false;
     const auto patch = patch_document.root();
+    if (patch.find("mount_hide_mode")) {
+        error = "mount_hide_mode was removed in Kasumi API 18";
+        return false;
+    }
     if (patch.find("lkm_autoload")) {
         error = "use 'lkm set-autoload' to update lkm_autoload";
         return false;
@@ -489,8 +488,7 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
     const auto has_split_features = [](json::Value value) noexcept {
         return json_int_or(value, "kasumi_feature_config_version", 0) >= 2 ||
                value.find("enable_overlay_xattr_hide") || value.find("enable_mount_hide") ||
-               value.find("mount_hide_mode") || value.find("enable_maps_spoof") ||
-               value.find("enable_statfs_spoof");
+               value.find("enable_maps_spoof") || value.find("enable_statfs_spoof");
     };
     if (!has_split_features(root) && has_split_features(patch)) {
         const bool legacy = json_bool_or(root, "enable_hidexattr", false);
@@ -498,7 +496,6 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
             return patch.find(edit.key) || replace(merged, edit, error);
         };
         if (!migrate({"kasumi_feature_config_version", {}, {}, json::Type::Number, 3}) ||
-            !migrate({"mount_hide_mode", {}, "normal", json::Type::String}) ||
             !migrate({"enable_hidexattr", {}, {}, json::Type::Null, 0, false, true}))
             return false;
         for (const auto* key :
@@ -519,8 +516,7 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
                 return false;
         }
     }
-    if (patch.find("mount_hide_mode") &&
-        !replace(merged, {"kasumi_feature_config_version", {}, {}, json::Type::Number, 3}, error))
+    if (!replace(merged, {"mount_hide_mode", {}, {}, json::Type::Null, 0, false, true}, error))
         return false;
     const bool saved = save_document(path, merged, error);
     if (saved)

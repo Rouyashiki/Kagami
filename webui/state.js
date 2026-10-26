@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // All reads and writes share a queue so a late read cannot undo a newer edit.
 export function createStore(api, notify = () => {}) {
-  const resources = Object.fromEntries(['config', 'system', 'modules', 'storage', 'lkm', 'userRules', 'rules', 'meta', 'logs', 'conflicts']
+  const resources = Object.fromEntries(['config', 'system', 'modules', 'storage', 'lkm', 'userRules', 'rules', 'meta', 'logs', 'conflicts', 'kasumiConflicts']
     .map(name => [name, { data: null, ready: false, loading: false, error: '' }]));
   const state = { resources, mutations: {}, pendingConfig: {}, logType: 'system', updated: '' };
   let queue = Promise.resolve();
@@ -10,6 +10,7 @@ export function createStore(api, notify = () => {}) {
     storage: () => api.getStorageUsage(), lkm: () => api.getLkmStatus(), userRules: () => api.getUserHideRules(),
     rules: () => api.getAllRules(), meta: () => api.getMeta(), logs: () => api.readLogs(state.logType),
     conflicts: () => api.checkConflicts(),
+    kasumiConflicts: () => api.getKasumiConflicts(),
   };
   const schedule = task => {
     const next = queue.catch(() => {}).then(task);

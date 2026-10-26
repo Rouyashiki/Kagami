@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kagami/fixed_array.hpp"
+#include "kagami/kasumi_uapi.h"
 
 #include <cstdint>
 #include <string>
@@ -79,11 +80,6 @@ enum class PolicyUidList : std::uint32_t {
     All = 3,
 };
 
-enum class MountHideMode : std::uint32_t {
-    Normal = 0,
-    Aggressive = 1,
-};
-
 struct PolicyState {
     bool ok = false;
     int last_errno = 0;
@@ -130,7 +126,9 @@ bool set_debug(bool enable);
 bool set_stealth(bool enable);
 bool fix_mounts();
 bool hide_overlay_xattrs(const std::string& path);
-bool set_mount_hide(bool enable, MountHideMode mode = MountHideMode::Normal);
+bool set_mount_hide(bool enable);
+bool get_conflicts(kasumi_conflicts_arg& snapshot);
+bool acknowledge_conflicts(std::uint64_t sequence);
 bool set_maps_spoof(bool enable);
 bool set_statfs_spoof(bool enable);
 bool set_selinux_guard(bool enable);

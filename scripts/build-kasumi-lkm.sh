@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build a Kasumi API 17 LKM without writing generated files into the Kasumi
+# Build a Kasumi API 18 LKM without writing generated files into the Kasumi
 # checkout. The source is copied into Kagami's ignored build directory first.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_REF="${KASUMI_REF:-main}"
-EXPECTED_PROTOCOL=17
+EXPECTED_PROTOCOL=18
 KASUMI_SOURCE="${KASUMI_DIR:-}"
 KMI="${KASUMI_KMI:-}"
 ARCH="arm64"

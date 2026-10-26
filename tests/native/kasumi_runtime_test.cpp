@@ -62,8 +62,8 @@ runtime::Snapshot snapshot() {
     runtime::KasumiObservation live;
     live.ok = true;
     live.enabled = kernel.enabled;
-    live.text =
-        "Kasumi Protocol: 17\nKasumi Enabled: " + std::string(kernel.enabled ? "1\n" : "0\n");
+    live.text = "Kasumi Protocol: " + std::to_string(KSM_PROTOCOL_VERSION) +
+                "\nKasumi Enabled: " + std::string(kernel.enabled ? "1\n" : "0\n");
     for (const auto& [path, source] : kernel.adds)
         live.text += "add " + path + " " + source + " 0\n";
     for (const auto& rule : kernel.merges)
@@ -256,7 +256,7 @@ bool set_debug(bool) {
 bool set_stealth(bool) {
     return true;
 }
-bool set_mount_hide(bool, MountHideMode) {
+bool set_mount_hide(bool) {
     return true;
 }
 bool set_maps_spoof(bool) {

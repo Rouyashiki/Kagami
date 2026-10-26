@@ -81,7 +81,7 @@ jobs:
         run: bash scripts/check-format.sh
 
   build-kasumi-lkm:
-    name: Kasumi API 17 (${{ matrix.kmi }})
+    name: Kasumi API 18 (${{ matrix.kmi }})
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     container:
@@ -151,7 +151,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Download Kasumi API 17 LKM matrix
+      - name: Download Kasumi API 18 LKM matrix
         uses: actions/download-artifact@v5
         with:
           pattern: kasumi-lkm-*

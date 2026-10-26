@@ -13,7 +13,6 @@ export const FIELDS = {
   enable_stealth: { title: 'config.enableStealth', type: 'switch', icon: 'shield' },
   enable_overlay_xattr_hide: { title: 'config.enableOverlayXattrHide', description: 'config.enableOverlayXattrHideDesc', type: 'switch', icon: 'layers' },
   enable_mount_hide: { title: 'config.enableMountHide', description: 'config.enableMountHideDesc', type: 'switch', icon: 'eye-off' },
-  mount_hide_mode: { title: 'config.mountHideMode', type: 'choice', icon: 'sliders-horizontal', choices: [['normal', 'config.mountHideModeNormal'], ['aggressive', 'config.mountHideModeAggressive']] },
   enable_maps_spoof: { title: 'config.enableMapsSpoof', description: 'config.enableMapsSpoofDesc', type: 'switch', icon: 'file-text' },
   enable_statfs_spoof: { title: 'config.enableStatfsSpoof', description: 'config.enableStatfsSpoofDesc', type: 'switch', icon: 'hard-drive' },
   enable_selinux_fix: { title: 'config.enableSelinuxFix', description: 'config.enableSelinuxFixDesc', type: 'switch', icon: 'shield-check' },
@@ -48,7 +47,7 @@ export function mutation(s, key) {
 export function setting(s, key) {
   const field = FIELDS[key];
   const saving = s.mutations[`config:${key}`]?.phase === 'saving';
-  const disabled = !configReady(s) || saving || (key === 'mount_hide_mode' && !configValue(s, 'enable_mount_hide'));
+  const disabled = !configReady(s) || saving;
   const value = configValue(s, key);
   const summary = field.type === 'mode' ? modeLabel(value) : field.choices ? t(field.choices.find(([choice]) => choice === value)?.[1] ?? String(value ?? 'ui.unknown')) : String(value ?? '');
   const description = field.description ? t(field.description) : '';
@@ -116,7 +115,7 @@ function kasumi(s) {
     ${system.kasumiMismatch ? notice(t('status.kasumiMismatch'), system.mismatchMessage, 'danger') : ''}
     <div class="runtime-overview ${system.kasumiMismatch ? 'danger' : ''}" data-key="kasumi-status"><span class="runtime-symbol">${icon('cpu')}</span><div><h2>Kasumi</h2><p>${e(s.resources.system.error || !s.resources.system.ready ? t('ui.unknown') : available ? t('ui.available') : t('ui.unavailable'))}${lkm.builtin ? ` · ${e(t('ui.builtin'))}` : ''}</p></div></div>
     ${section(t('ui.behavior'), settings(s, ['kasumi_enabled', 'enable_stealth']), { key: 'kasumi-behavior' })}
-    ${section(t('ui.protection'), settings(s, ['enable_mount_hide', 'mount_hide_mode', 'enable_overlay_xattr_hide', 'enable_maps_spoof', 'enable_statfs_spoof', 'enable_selinux_fix']), { key: 'kasumi-visibility' })}
+    ${section(t('ui.protection'), settings(s, ['enable_mount_hide', 'enable_overlay_xattr_hide', 'enable_maps_spoof', 'enable_statfs_spoof', 'enable_selinux_fix']), { key: 'kasumi-visibility' })}
     ${section(t('ui.features'), list(viewRow('lkm', '', lkm.builtin ? t('ui.builtin') : t('ui.external'), 'cpu') + viewRow('hide', '', t('hideRules.subtitle'), 'eye-off') + viewRow('rules', '', '', 'list') + viewRow('diagnostics', '', t('kasumi.hooks.title'), 'terminal')), { key: 'kasumi-links' })}`;
 }
 function settingsPage(s) {

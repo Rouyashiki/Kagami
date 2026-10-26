@@ -8,7 +8,7 @@
 
 namespace kagami::mount::kasumi {
 
-// Apply the API17 policy owner, UID lists, and flags before installing Kasumi
+// Apply the policy owner, UID lists, and flags before installing Kasumi
 // rules. Policy is kernel state and is lost when an LKM reloads, so this must
 // be part of the mount path rather than a manager-only side action.
 bool apply_policy_config(const PolicyConfig& policy, std::string& error);
