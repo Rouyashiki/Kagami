@@ -179,9 +179,10 @@ bool prepare_runtime(std::string& error) {
         !prepare_private_directory(runtime_log_file().parent_path(), error))
         return false;
     // These are controller records, not mounted module payloads or LKM assets.
-    for (const auto* name : {"config.json", "config.json.lock", "module_mode.json",
-                             "module_rules.json", "user_hide_rules.json", "kagamid.pid",
-                             "kagamid.sock", "kagamid.lock", "mirror.img", "mirror.erofs"}) {
+    for (const auto* name :
+         {"config.json", "config.json.lock", "module_mode.json", "module_rules.json",
+          "module_bypass.json", "user_hide_rules.json", "hide_bypass.json", "kagamid.pid",
+          "kagamid.sock", "kagamid.lock", "mirror.img", "mirror.erofs"}) {
         if (!prepare_private_file(runtime_data_dir() / name, error))
             return false;
     }

@@ -87,7 +87,8 @@ void print_usage(output::Context& destination) {
         "  kagamid daemon status|serve|call|ping|stop\n",
         "  kagamid api system|storage|lkm|kasumi|features|hooks|policy|backends|meta\n",
         "  kagamid module "
-        "list|add|delete|set-mode|add-rule|remove-rule|hot-mount|hot-unmount|check-conflicts|"
+        "list|add|delete|set-mode|set-bypass|add-rule|remove-rule|apply|hot-mount|hot-unmount|"
+        "check-conflicts|"
         "mount-all|unmount|normalize\n",
         "  kagamid recovery status|boot-completed|reset\n",
         "  kagamid kasumi "
@@ -1304,6 +1305,45 @@ int handle_module(output::Context& destination, Arguments args) {
             output::out(destination, "]}");
         }
         output::out(destination, "]}\n");
+        return 0;
+    }
+    if (sub == "apply") {
+        const std::string id = arg_or_default(args, 2, "");
+        if (args.size() != 3 || !valid_module_id(id)) {
+            output::err(destination, "usage: kagamid module apply <id>\n");
+            return 1;
+        }
+        PreparedConfig cfg;
+        std::string error;
+        if (!read_config_file(config_file().string(), cfg, error)) {
+            output::err(destination, "failed to read configuration: ", error, '\n');
+            return 1;
+        }
+        const fs::path root =
+            cfg.module_dir.empty() ? modules_dir() : fs::path(std::string_view(cfg.module_dir));
+        std::error_code directory_error;
+        if (!fs::is_directory(root, directory_error)) {
+            output::err(destination, "module directory is unavailable: ", root.string(), '\n');
+            return 1;
+        }
+        const auto replayable = mount::kasumi::replayable_module_ids();
+        int enumeration_error = 0;
+        const auto modules = mount::enumerate_mountable_modules(cfg, enumeration_error);
+        if (enumeration_error) {
+            output::err(destination,
+                        "module enumeration failed: ", std::strerror(enumeration_error), '\n');
+            return 1;
+        }
+        const bool applicable =
+            cfg.kasumi_enabled &&
+            std::find(replayable.begin(), replayable.end(), id) != replayable.end() &&
+            std::any_of(modules.begin(), modules.end(),
+                        [&](const auto& module) { return module.id == id; });
+        if (applicable && !mount::refresh_kasumi_modules(cfg)) {
+            output::err(destination, "settings saved, but failed to refresh Kasumi mappings\n");
+            return 1;
+        }
+        output::out(destination, "{\"applied\":", applicable ? "true" : "false", "}\n");
         return 0;
     }
     if (sub == "set-bypass") {

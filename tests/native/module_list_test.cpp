@@ -200,12 +200,42 @@ void test_partition_command() {
             "invalid config must not silently scan the default module directory");
     require(unsetenv("KAGAMI_MODULES_DIR") == 0, "restore default module directory");
 }
+void test_module_apply() {
+    Fixture fixture;
+    fixture.module("payload", "system");
+    const kagami::Argument args[] = {"module", "apply", "payload"};
+    std::vector<char> out(4096), err(4096);
+    kagami::output::Context destination{{out.data(), out.size()}, {err.data(), err.size()}};
+    auto result = kagami::run_command_capture(args, destination);
+    require(result.exit_code == 0 && result.stdout_text == "{\"applied\":false}\n",
+            "unassigned modules must wait for boot instead of migrating backends");
+    {
+        runtime::Operation operation;
+        require(runtime::assign_modules({{"payload", "magic"}}), "assign non-Kasumi backend");
+        operation.finish();
+    }
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code == 0 && result.stdout_text == "{\"applied\":false}\n",
+            "Magic ownership must not become live Kasumi ownership");
+    file(fixture.path / "config.json", "{");
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty(), "reject corrupt configuration");
+    file(fixture.path / "not-a-directory", "file");
+    file(fixture.path / "config.json",
+         "{\"moduledir\":\"" + (fixture.path / "not-a-directory").string() + "\"}");
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty(), "report module scan failure");
+    const kagami::Argument invalid[] = {"module", "apply", "../payload"};
+    result = kagami::run_command_capture(invalid, destination);
+    require(result.exit_code != 0, "reject invalid module identifier");
+}
 }  // namespace
 int main() {
     try {
         test_inventory();
         test_partition_scan();
         test_partition_command();
+        test_module_apply();
         std::cout << "module list fixtures passed\n";
         return 0;
     } catch (const std::exception& error) {
