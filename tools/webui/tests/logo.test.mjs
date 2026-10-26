@@ -209,7 +209,8 @@ test('actual rule and partition buttons retain horizontal layout and 48px touch 
           await page.goto(`${origin}/webui/index.html${query}`, { waitUntil: 'networkidle' });
           const button = page.locator(`[data-action="${action}"]`);
           await button.waitFor();
-          await button.scrollIntoViewIfNeeded();
+          // Viewport visibility alone does not exclude the fixed bottom navigation.
+          await button.evaluate(button => button.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
           await page.waitForFunction(action => {
             const button = document.querySelector(`[data-action="${action}"]`);
             return button && !button.disabled && button.querySelector('svg')?.getBBox().width > 0;
@@ -235,7 +236,7 @@ test('actual rule and partition buttons retain horizontal layout and 48px touch 
           // Material's native button content box is smaller than its .touch
           // element. Exercise both extended vertical edges, outside the label.
           for (const edge of ['top', 'bottom']) {
-            await button.scrollIntoViewIfNeeded();
+            await button.evaluate(button => button.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
             await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
             const touch = await button.evaluate(button => {
               const box = button.shadowRoot.querySelector('.touch').getBoundingClientRect();
