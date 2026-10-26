@@ -1162,14 +1162,14 @@ int handle_module(output::Context& destination, Arguments args) {
             return 1;
         }
         const auto rule_map = mount::load_module_rules(settings_error);
-        const auto bypasses = mount::load_module_modes(settings_error, "module_bypass.json");
-        if (settings_error) {
-            output::err(destination, "failed to read module bypass settings\n");
-            return 1;
-        }
         if (settings_error) {
             output::err(destination, "cannot read module rules: ", std::strerror(settings_error),
                         '\n');
+            return 1;
+        }
+        const auto bypasses = mount::load_module_modes(settings_error, "module_bypass.json");
+        if (settings_error) {
+            output::err(destination, "failed to read module bypass settings\n");
             return 1;
         }
         const auto replayable = mount::kasumi::replayable_module_ids();

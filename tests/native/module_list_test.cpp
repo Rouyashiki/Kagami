@@ -169,6 +169,31 @@ void test_partition_scan() {
             "failed partition reads preserve the caller's previous result");
 }
 
+void test_invalid_settings() {
+    Fixture fixture;
+    fixture.module("payload", "system");
+    const kagami::Argument args[] = {"module", "list", "--include-inactive"};
+    std::vector<char> out(4096), err(4096);
+    kagami::output::Context destination{{out.data(), out.size()}, {err.data(), err.size()}};
+    file(fixture.path / "module_rules.json", "{");
+    auto result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty() &&
+                result.stderr_text.find("cannot read module rules") != std::string_view::npos,
+            "missing bypass settings must not hide invalid module rules");
+    file(fixture.path / "module_bypass.json", "{}");
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty() &&
+                result.stderr_text.find("cannot read module rules") != std::string_view::npos,
+            "valid bypass settings must not hide invalid module rules");
+    file(fixture.path / "module_rules.json", "{}");
+    file(fixture.path / "module_bypass.json", "{");
+    result = kagami::run_command_capture(args, destination);
+    require(result.exit_code != 0 && result.stdout_text.empty() &&
+                result.stderr_text.find("failed to read module bypass settings") !=
+                    std::string_view::npos,
+            "report invalid bypass settings");
+}
+
 void test_partition_command() {
     Fixture fixture;
     const auto decoy = fixture.path / "default-modules";
@@ -233,6 +258,7 @@ void test_module_apply() {
 int main() {
     try {
         test_inventory();
+        test_invalid_settings();
         test_partition_scan();
         test_partition_command();
         test_module_apply();
