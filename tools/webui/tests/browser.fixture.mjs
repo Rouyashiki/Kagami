@@ -74,6 +74,7 @@ export function installHostFixture(options = {}) {
     }
     if (verb === "config merge-json") { Object.assign(config, JSON.parse(args[2])); return ok(); }
     if (verb === "config apply") return ok();
+    if (verb === "module apply") return json({ applied: config.kasumi_enabled && modules.some(module => module.id === args[2] && module.runtime?.backend === "kasumi") });
     if (verb === "config sync-partitions") return args.includes("--json")
       ? json({ partitions: ["vendor_dlkm", "odm_dlkm"], invalid: options.invalidPartitions || [] })
       : ok("Added partition: vendor_dlkm\nAdded partition: odm_dlkm\n");

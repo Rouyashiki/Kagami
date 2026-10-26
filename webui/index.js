@@ -146,7 +146,7 @@ function closeDialog() {
 function setDialogBusy(busy) {
   if (!dialogModel) return;
   dialogModel.busy = busy;
-  for (const control of dialog.querySelectorAll('input,button,md-filled-button,md-text-button')) {
+  for (const control of dialog.querySelectorAll('input,button,md-switch,md-filled-button,md-text-button')) {
     if (busy) {
       control.dataset.wasDisabled = String(Boolean(control.disabled));
       control.disabled = true;
@@ -229,7 +229,12 @@ function bypassSupported() {
 }
 function bypassField(checked, inherited = false) {
   const disabled = inherited || (!bypassSupported() && !checked);
-  return `<label class="radio-option"><span class="row-copy"><strong>${e(t('bypass.title'))}</strong><small>${e(t('bypass.description'))}</small>${!bypassSupported() ? `<small>${e(t('bypass.unsupported'))}</small>` : ''}</span><input type="checkbox" name="bypass" ${checked || inherited ? 'checked' : ''} ${disabled ? 'disabled' : ''}></label>`;
+  return `<label class="setting-row"><span class="row-copy"><strong>${e(t('bypass.title'))}</strong><small>${e(t('bypass.description'))}</small>${!bypassSupported() ? `<small>${e(t('bypass.unsupported'))}</small>` : ''}</span><md-switch name="bypass" aria-label="${e(t('bypass.title'))}" ${checked || inherited ? 'selected' : ''} ${disabled ? 'disabled' : ''}></md-switch></label>`;
+}
+const moduleApplyMessage = result => result?.applied ? 'ui.moduleRulesApplied' : 'ui.nextBoot';
+async function saveModuleRules(id, save) {
+  await save();
+  return api.applyModuleRules(id);
 }
 function editRule(id, originalPath = '') {
   const module = getModule(id);
@@ -250,8 +255,9 @@ function editRule(id, originalPath = '') {
         try { await api.removeModuleRule(id, originalPath); }
         catch (error) { error.message = `${t('ui.ruleRenamePartial')} ${error.message}`; throw error; }
       }
+      return api.applyModuleRules(id);
     };
-    return runMutation(`module:${id}:rule:${originalPath || path}`, operation, { reload: ['modules'], success: 'ui.nextBoot' });
+    return runMutation(`module:${id}:rule:${originalPath || path}`, operation, { reload: ['modules'], success: moduleApplyMessage });
   } });
 }
 function confirmAction(title, body, key, operation, options = {}) {
@@ -259,7 +265,7 @@ function confirmAction(title, body, key, operation, options = {}) {
 }
 function addHideRule(initial = '') {
   if (!state.resources.userRules.ready || state.resources.userRules.error) return;
-  showDialog({ title: t('ui.hiddenPaths'), body: textField(t('modules.path'), initial) + bypassField(false), submit(form) {
+  showDialog({ title: t('ui.hiddenPaths'), body: textField(t('modules.path'), initial) + `<details class="disclosure"><summary><span>${e(t('bypass.options'))}</span>${icon('chevron-down')}</summary>${bypassField(false)}</details>`, submit(form) {
     const path = requirePath(form.get('value'));
     if (state.resources.userRules.data.some(rule => (rule.path ?? rule) === path)) throw new Error(t('ui.duplicatePath'));
     return runMutation(`hide:${path}`, () => api.addUserHideRule(path, form.has('bypass')), { reload: ['userRules', 'rules'] });
@@ -316,7 +322,7 @@ async function handleAction(target) {
   if (action === 'rule-add' || action === 'rule-edit') { editRule(target.dataset.id, target.dataset.path); return; }
   if (action === 'rule-remove') {
     const { id, path } = target.dataset;
-    confirmAction(t('ui.removeRule'), path, `module:${id}:rule:${path}`, () => api.removeModuleRule(id, path), { reload: ['modules'], success: 'ui.nextBoot' }); return;
+    confirmAction(t('ui.removeRule'), path, `module:${id}:rule:${path}`, () => saveModuleRules(id, () => api.removeModuleRule(id, path)), { reload: ['modules'], success: moduleApplyMessage }); return;
   }
   if (action === 'module-filter') {
     const options = [{ value: 'all', label: t('ui.all') }, ...modes(), { value: 'active', label: t('ui.mounted') }];
@@ -387,7 +393,7 @@ document.addEventListener('change', event => {
   const key = target.dataset.field;
   const value = target.selected;
   const task = key === 'module_bypass'
-    ? runMutation(`module:${target.dataset.id}:bypass`, () => api.setModuleBypass(target.dataset.id, value), { reload: ['modules'], success: 'ui.nextBoot' })
+    ? runMutation(`module:${target.dataset.id}:bypass`, () => saveModuleRules(target.dataset.id, () => api.setModuleBypass(target.dataset.id, value)), { reload: ['modules'], success: moduleApplyMessage })
     : key === 'hide_bypass'
     ? runMutation(`hide:${target.dataset.path}`, () => api.addUserHideRule(target.dataset.path, value), { reload: ['userRules', 'rules'] })
     : key === 'lkm_autoload'

@@ -137,15 +137,22 @@ Manager and Kagami WebUI expose module and individual-rule switches, initially
 off. The module flag applies to every Kasumi rule owned by that module; a
 single path rule uses the existing longest-prefix selection. Effective bypass
 is the module flag OR the selected path-rule flag. OverlayFS and Magic Mount
-do not consume this setting. Module edits take effect when the module rules
-are rebuilt, such as a Kasumi hot mount or the next boot; saved user hides are
-submitted immediately and retain their existing binding-status reporting.
+do not consume this setting. WebUI reads saved flags back before applying
+module bypass and path-rule edits. Enabled, mountable modules already assigned
+to Kasumi this boot are refreshed immediately; other modules retain the saved
+settings for the next boot. Changing the mount backend still requires a reboot.
+An apply failure is reported separately from a successful save. Saved user hides
+are submitted immediately and retain their existing binding-status reporting.
+Hide rule options are collapsed by default; expand a row or the add dialog's
+rule options to change its global switch. A global badge stays visible on
+collapsed saved rows.
 
 CLI examples (use `ksud kagami` as the prefix in YukiSU):
 
 ```sh
 kagamid module set-bypass example on
 kagamid module add-rule example /system/etc/example kasumi --bypass
+kagamid module apply example
 kagamid hide add /data/local/tmp/example --bypass
 kagamid hide list --details
 ```
@@ -156,3 +163,9 @@ overrides are stored as `"on"` entries in `module_bypass.json` and
 `hide_bypass.json`; absence means off. `hide list` retains the legacy string
 array, while `--details` returns `{path, bypass}` objects. `LIST_RULES` reports
 the numeric flags after ADD, MERGE, and HIDE records.
+
+CLI module edits save settings; run `module apply <id>` after completing the
+edits to refresh eligible Kasumi mappings. It returns `{"applied":true}` for a
+successful refresh, `{"applied":false}` when the module must wait for boot,
+and a nonzero exit status on failure. It never migrates a live OverlayFS or
+Magic Mount module to Kasumi.

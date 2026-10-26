@@ -2,6 +2,10 @@
 // Existing translations and language selection remain in i18n.js.
 const strings = [
   ['bypass.title', 'Global rules (bypass policy)', '全局生效（绕过策略）'],
+  ['bypass.options', 'Rule options', '规则选项'],
+  ['bypass.global', 'Global', '全局生效'],
+  ['ui.moduleRulesApplied', 'Saved and applied to Kasumi.', '已保存并应用到 Kasumi。'],
+  ['ui.mountBackendNextBoot', 'Mount backend changes take effect at the next boot.', '挂载后端的修改将在下次启动时生效。'],
   ['bypass.description', 'Kasumi rules only. Enabled rules affect all processes regardless of policy. The module switch applies to all its Kasumi rules.', '仅作用于 Kasumi 规则。开启后对所有进程生效，不再跟随策略；模块开关作用于该模块的全部 Kasumi 规则。'],
   ['bypass.unsupported', 'This kernel does not support rule bypass.', '当前内核不支持规则 bypass。'],
 

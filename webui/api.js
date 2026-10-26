@@ -386,6 +386,12 @@ const mockApi = {
     return [];
   },
 
+  async applyModuleRules(id) {
+    validModuleId(id);
+    const module = mockState.modules.find(item => item.id === id);
+    return { applied: mockState.config.kasumi_enabled && module?.runtime?.backend === "kasumi" };
+  },
+
   async syncPartitions() {
     return "sync completed";
   },
@@ -571,25 +577,59 @@ const realApi = {
   async setModuleMode(id, mode) {
     validModuleId(id);
     validMode(mode);
-    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module set-mode '${shellEscape(id)}' '${shellEscape(mode)}'`));
+    await queueModuleWrite(async () => {
+      await checkedExec(`${PATHS.BINARY} module set-mode '${shellEscape(id)}' '${shellEscape(mode)}'`);
+      await this.verifyModule(id, module => module.mode === mode);
+    });
   },
 
   async setModuleBypass(id, bypass) {
     validModuleId(id);
-    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module set-bypass '${shellEscape(id)}' ${bypass ? 'on' : 'off'}`));
+    await queueModuleWrite(async () => {
+      await checkedExec(`${PATHS.BINARY} module set-bypass '${shellEscape(id)}' ${bypass ? 'on' : 'off'}`);
+      await this.verifyModule(id, module => module.bypass === bypass);
+    });
   },
 
   async addModuleRule(id, path, mode, bypass = false) {
     validModuleId(id);
     validPath(path);
     validMode(mode, true);
-    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module add-rule '${shellEscape(id)}' '${shellEscape(path)}' '${shellEscape(mode)}'${bypass ? ' --bypass' : ''}`));
+    await queueModuleWrite(async () => {
+      await checkedExec(`${PATHS.BINARY} module add-rule '${shellEscape(id)}' '${shellEscape(path)}' '${shellEscape(mode)}'${bypass ? ' --bypass' : ''}`);
+      await this.verifyModule(id, module => module.rules.some(rule => rule.path === path && rule.mode === mode && rule.bypass === bypass));
+    });
   },
 
   async removeModuleRule(id, path) {
     validModuleId(id);
     validPath(path);
-    await queueModuleWrite(() => checkedExec(`${PATHS.BINARY} module remove-rule '${shellEscape(id)}' '${shellEscape(path)}'`));
+    await queueModuleWrite(async () => {
+      await checkedExec(`${PATHS.BINARY} module remove-rule '${shellEscape(id)}' '${shellEscape(path)}'`);
+      await this.verifyModule(id, module => module.rules.every(rule => rule.path !== path));
+    });
+  },
+
+  async verifyModule(id, matches) {
+    const module = (await this.scanModules()).find(item => item.id === id);
+    if (!module || !matches(module)) throw new Error("Saved module settings do not match the requested change");
+  },
+
+  async applyModuleRules(id) {
+    validModuleId(id);
+    return queueModuleWrite(async () => {
+      try {
+        const result = objectResponse(await execJson(`${PATHS.BINARY} module apply '${shellEscape(id)}'`));
+        if (typeof result.applied !== "boolean") throw new Error("Invalid module apply response");
+        return result;
+      } catch (error) {
+        if (error.outcomeUnknown) {
+          error.configPersisted = true;
+          throw error;
+        }
+        throw configPersistedError(error.message);
+      }
+    });
   },
 
   async checkConflicts() {
@@ -741,14 +781,18 @@ const realApi = {
   async addUserHideRule(path, bypass = false) {
     validPath(path);
     await checkedExec(`${PATHS.BINARY} hide add '${shellEscape(path)}'${bypass ? ' --bypass' : ''}`);
-    // The CLI guarantees persistence, not kernel acceptance. Only a separate
-    // active-rule read can confirm that the rule is currently observed.
+    if (!(await this.getUserHideRules(true)).some(rule => rule.path === path && rule.bypass === bypass)) {
+      throw new Error("Saved hide rule does not match the requested change");
+    }
     return { persisted: true };
   },
 
   async removeUserHideRule(path) {
     validPath(path);
     await checkedExec(`${PATHS.BINARY} hide remove '${shellEscape(path)}'`);
+    if ((await this.getUserHideRules()).includes(path)) {
+      throw new Error("Hide rule is still saved after removal");
+    }
     return { persisted: true };
   },
 

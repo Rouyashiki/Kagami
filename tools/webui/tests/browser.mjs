@@ -166,21 +166,24 @@ try {
       await moduleSwitch.click();
       await page.waitForFunction(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').bypass === true);
       await page.waitForFunction(() => !document.querySelector('md-switch[data-field="module_bypass"]').disabled);
+      await page.getByText('Saved and applied to Kasumi.', { exact: true }).waitFor();
       await moduleSwitch.click();
       await page.waitForFunction(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').bypass === false);
       await page.locator('[data-action="rule-add"]').click();
       await page.locator('#editor input[name="path"]').fill('/system/bypass-test');
-      await page.locator('#editor input[name="bypass"]').check();
+      await page.locator('#editor md-switch[name="bypass"]').click();
       await page.locator(selector("dialog-save")).click(); await page.locator("#editor").waitFor({ state: "hidden" });
       assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').rules[0].bypass), true);
       await page.locator('[data-action="rule-edit"][data-path="/system/bypass-test"]').click();
-      assert.equal(await page.locator('#editor input[name="bypass"]').isChecked(), true);
-      await page.locator('#editor input[name="bypass"]').uncheck();
+      assert.equal(await page.locator('#editor md-switch[name="bypass"]').evaluate(node => node.selected), true);
+      await page.locator('#editor md-switch[name="bypass"]').click();
       await page.locator(selector("dialog-save")).click(); await page.locator("#editor").waitFor({ state: "hidden" });
       assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(m => m.id === 'beta_audio').rules[0].bypass), false);
       await navigate(page, "kasumi");
       await openView(page, "hide");
       const hideSwitch = page.locator('md-switch[data-field="hide_bypass"]').first();
+      assert.equal(await hideSwitch.isVisible(), false);
+      await page.locator('.hide-options summary').first().click();
       await hideSwitch.click();
       await page.waitForFunction(() => window.__kagamiFixture.hideBypasses?.['/data/local/tmp/fixture-hidden'] === true);
       await page.waitForFunction(() => {
@@ -191,14 +194,55 @@ try {
         await control.updateComplete;
         await Promise.all(control.shadowRoot.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})));
       });
+      await page.locator('.hide-options summary').first().click();
+      assert.equal(await hideSwitch.isVisible(), false);
+      await page.locator('.hide-options summary').getByText('Global', { exact: true }).waitFor();
+      const applies = await page.evaluate(() => window.__kagamiFixture.commands.filter(command => command.includes('module apply')));
+      assert.equal(applies.length, 4, 'Each completed module edit applies its saved rules');
       await assertNoOverflow(page);
     });
+    await runCase(project, 'bypass-module-apply-failure-retry', async (page) => {
+      await page.locator('md-switch[data-field="module_bypass"]').click();
+      await page.getByText(/Saved, but runtime application failed/).first().waitFor();
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(module => module.id === 'beta_audio').bypass), true);
+      await page.locator('[data-action="retry-mutation"][data-key="module:beta_audio:bypass"]').click();
+      await page.getByText('Saved and applied to Kasumi.', { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.commands.filter(command => command.includes('module apply')).length), 2);
+    }, { query: '?tab=modules&view=module&id=beta_audio', fixture: { failures: { 'module apply': 1 } } });
+    await runCase(project, 'bypass-module-reboot-pending', async (page) => {
+      await page.locator('md-switch[data-field="module_bypass"]').click();
+      await page.getByText('Saved changes are used at the next boot.', { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.modules.find(module => module.id === 'alpha_fonts').runtime.backend), 'overlay');
+      assert.equal(await page.getByText('Saved and applied to Kasumi.', { exact: true }).count(), 0);
+    }, { query: '?tab=modules&view=module&id=alpha_fonts' });
+    await runCase(project, 'hide-bypass-collapsed-editor', async (page) => {
+      await page.locator('[data-action="hide-add"]').first().click();
+      const toggle = page.locator('#editor md-switch[name="bypass"]');
+      assert.equal(await toggle.isVisible(), false);
+      await page.locator('#editor details summary').click();
+      await toggle.click();
+      await page.locator('#editor input[name="value"]').fill('/system/global-new');
+      await page.evaluate(() => { window.__kagamiFixture.held.push('hide add'); });
+      await page.locator(selector('dialog-save')).click();
+      await page.waitForFunction(() => document.querySelector('#editor md-switch[name="bypass"]').disabled);
+      await page.evaluate(() => window.__kagamiFixture.release());
+      await page.locator('#editor').waitFor({ state: 'hidden' });
+      await page.locator('.hide-options summary').filter({ hasText: '/system/global-new' }).getByText('Global', { exact: true }).waitFor();
+      await navigate(page, 'modules');
+      await navigate(page, 'kasumi');
+      await openView(page, 'hide');
+      const row = page.locator('.hide-options').filter({ hasText: '/system/global-new' });
+      assert.equal(await row.locator('md-switch').isVisible(), false);
+      await row.locator('summary').click();
+      assert.equal(await row.locator('md-switch').evaluate(control => control.selected), true);
+      await assertNoOverflow(page);
+    }, { query: '?tab=kasumi&view=hide' });
     await runCase(project, "bypass-unsupported-kernel", async (page) => {
       await navigate(page, "modules");
       await page.locator('[data-action="module-detail"][data-id="beta_audio"]').click();
       assert.equal(await page.locator('md-switch[data-field="module_bypass"]').evaluate(node => node.disabled), true);
       await page.locator('[data-action="rule-add"]').click();
-      assert.equal(await page.locator('#editor input[name="bypass"]').isDisabled(), true);
+      assert.equal(await page.locator('#editor md-switch[name="bypass"]').evaluate(node => node.disabled), true);
     }, { fixture: { noBypass: true } });
 
     if (project === "bundle") await runCase(project, "standalone-file-offline", async (page) => {
@@ -478,6 +522,7 @@ try {
       assert.equal(await page.locator('#editor input[name="path"]').inputValue(), renamed, "Failed saves must retain the draft");
       const added = await page.evaluate(() => window.__kagamiFixture.commands.filter((command) => command.includes("module add-rule")).length);
       assert.equal(added, 1);
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.commands.some(command => command.includes('module apply'))), false, 'Do not apply a partially renamed rule');
       await page.locator(selector("dialog-save")).click();
       await page.locator("#editor").waitFor({ state: "hidden" });
       const state = await page.evaluate(() => ({ rules: window.__kagamiFixture.modules.find((item) => item.id === "alpha_fonts").rules, additions: window.__kagamiFixture.commands.filter((command) => command.includes("module add-rule")).length }));

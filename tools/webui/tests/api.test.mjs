@@ -45,6 +45,7 @@ function fixture() {
   const data = {
     config: { moduledir: "/data/adb/modules", debug: false, enable_hidexattr: true, custom: { keep: 1 } },
     modes: { visible: "auto", disabled: "magic" },
+    bypasses: {}, hideBypasses: {}, applied: true,
     rules: { visible: [{ path: "/system/etc/old", mode: "overlay" }], disabled: [{ path: "/system/hidden", mode: "none" }] },
     saved: ["/system/saved"],
     active: [
@@ -75,19 +76,21 @@ function fixture() {
       case "api lkm": value = data.lkm; break;
       case "api storage": value = { size: "2G", used: "1G", avail: "1G", percent: 50, mode: "tmpfs" }; break;
       case "kasumi version": value = { protocol_mismatch: false, active_modules: ["visible"] }; break;
-      case "module list": value = { modules: data.modules || [{ id: "visible", mode: data.modes.visible, strategy: "kasumi", runtime: data.runtime, rules: data.rules.visible }] }; break;
+      case "module list": value = { modules: data.modules || (data.includeDisabled ? ["visible", "disabled"] : ["visible"]).map(id => ({ id, mode: data.modes[id], bypass: data.bypasses[id] === true, strategy: "kasumi", runtime: data.runtime, rules: data.rules[id] })) }; break;
+      case "module set-bypass": data.bypasses[args[3]] = args[4] === "on"; return { stdout: "" };
+      case "module apply": value = { applied: data.applied }; break;
       case "module set-mode": data.modes[args[3]] = args[4]; return { stdout: "" };
       case "module add-rule": {
         const rules = data.rules[args[3]] ||= [];
         const existing = rules.find((rule) => rule.path === args[4]);
-        if (existing) existing.mode = args[5];
-        else rules.push({ path: args[4], mode: args[5] });
+        if (existing) Object.assign(existing, { mode: args[5], bypass: args.includes("--bypass") });
+        else rules.push({ path: args[4], mode: args[5], bypass: args.includes("--bypass") });
         return { stdout: "" };
       }
       case "module remove-rule": data.rules[args[3]] = (data.rules[args[3]] || []).filter((rule) => rule.path !== args[4]); return { stdout: "" };
       case "module check-conflicts": value = [{ file: "/system/etc/a", modules: ["visible", "disabled"] }]; break;
-      case "hide list": value = data.saved; break;
-      case "hide add": data.saved.push(args[3]); return { stdout: "" };
+      case "hide list": value = args.includes("--details") ? data.saved.map(path => ({ path, bypass: data.hideBypasses[path] === true })) : data.saved; break;
+      case "hide add": if (!data.saved.includes(args[3])) data.saved.push(args[3]); data.hideBypasses[args[3]] = args.includes("--bypass"); return { stdout: "" };
       case "hide remove": data.saved = data.saved.filter((path) => path !== args[3]); return { stdout: "" };
       case "kasumi list": value = data.active; break;
       case "config sync-partitions": return { stdout: args.includes("--json")
@@ -225,6 +228,7 @@ test("legacy module metadata and failed runtime reads cannot imply a mounted mod
 
 test("module edits serialize across modules and a failure does not poison later edits", async () => {
   const data = fixture();
+  data.includeDisabled = true;
   let running = 0, maxRunning = 0;
   const { api } = await loadApi(async (command) => {
     running += 1;
@@ -429,18 +433,48 @@ test("mock implements incremental editing, metadata and persisted versus active 
 });
 
 test("bypass is opt-in and reaches each native command", async () => {
-  const commands = [];
-  const { api } = await loadApi(command => { commands.push(shellWords(command)); return { stdout: "" }; });
+  const data = fixture();
+  const { api } = await loadApi(data.run);
   await api.setModuleBypass("visible", true);
   await api.setModuleBypass("visible", false);
   await api.addModuleRule("visible", "/system/ordinary", "kasumi");
   await api.addModuleRule("visible", "/system/global", "kasumi", true);
   await api.addUserHideRule("/system/hide");
   await api.addUserHideRule("/system/global-hide", true);
-  assert.deepEqual(commands.map(args => args.slice(1)), [
+  assert.deepEqual(data.commands.filter(command => !command.includes(" list")).map(command => shellWords(command).slice(1)), [
     ["module", "set-bypass", "visible", "on"], ["module", "set-bypass", "visible", "off"],
     ["module", "add-rule", "visible", "/system/ordinary", "kasumi"],
     ["module", "add-rule", "visible", "/system/global", "kasumi", "--bypass"],
     ["hide", "add", "/system/hide"], ["hide", "add", "/system/global-hide", "--bypass"],
   ]);
+  const reopened = (await loadApi(data.run)).api;
+  assert.equal((await reopened.scanModules())[0].rules.find(rule => rule.path === "/system/global").bypass, true);
+  assert.equal((await reopened.getUserHideRules(true)).find(rule => rule.path === "/system/global-hide").bypass, true);
+});
+
+test("successful exit cannot conceal discarded module or hide bypass settings", async () => {
+  const data = fixture();
+  const { api } = await loadApi(data.run);
+  data.failures.set("module set-bypass", { stdout: "" });
+  await assert.rejects(api.setModuleBypass("visible", true), /do not match/);
+  data.failures.set("module add-rule", { stdout: "" });
+  await assert.rejects(api.addModuleRule("visible", "/system/global", "kasumi", true), /do not match/);
+  data.failures.set("hide list", { stdout: JSON.stringify(["/system/global"]) });
+  await assert.rejects(api.addUserHideRule("/system/global", true), /does not match/);
+  assert.equal(data.commands.some(command => command.includes("module apply")), false);
+});
+
+test("module apply distinguishes live application, reboot pending, and a persisted failure", async () => {
+  const data = fixture();
+  const { api } = await loadApi(data.run);
+  await api.setModuleBypass("visible", true);
+  assert.deepEqual(await api.applyModuleRules("visible"), { applied: true });
+  assert.match(data.commands.at(-2), /module list --include-inactive$/);
+  data.applied = false;
+  assert.deepEqual(await api.applyModuleRules("visible"), { applied: false });
+  data.failures.set("module apply", { errno: 1, stderr: "replay failed" });
+  await assert.rejects(api.applyModuleRules("visible"), error => error.configPersisted && /replay failed/.test(error.message));
+  assert.equal((await api.scanModules())[0].bypass, true);
+  data.failures.set("module apply", { stdout: "{}" });
+  await assert.rejects(api.applyModuleRules("visible"), error => error.configPersisted && /Invalid/.test(error.message));
 });
