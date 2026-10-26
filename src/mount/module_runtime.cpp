@@ -116,8 +116,15 @@ public:
     }
     [[nodiscard]] bool contains(const RuleEvidence& rule) const noexcept {
         const auto entries = entries_.view();
-        return !entries.empty() &&
-               std::binary_search(entries.begin(), entries.end(), Entry{&rule}, Less{});
+        if (entries.empty())
+            return false;
+        const auto* found = std::lower_bound(entries.begin(), entries.end(), Entry{&rule}, Less{});
+        if (found == entries.end())
+            return false;
+        const auto& live = *found->rule;
+        return live.kind == rule.kind && live.path == rule.path && live.source == rule.source &&
+               (live.flags == rule.flags ||
+                (rule.kind == "HIDE" && (live.flags & rule.flags) == rule.flags));
     }
 
 private:
@@ -959,6 +966,40 @@ bool record_rules(const std::vector<RuleEvidence>& rules, bool complete) {
     return update([&](Database& database) {
         distribute(database, "kasumi", rules, complete, &Record::rules);
     });
+}
+
+bool read_module_hides(const std::vector<std::string>& owners, std::map<std::string, int>& hides) {
+    if (writer.depth == 0 || writer.fd < 0) {
+        errno = EBUSY;
+        return false;
+    }
+    std::error_code publication_error;
+    if (fs::exists(invalid_file(), publication_error) || publication_error) {
+        errno = EIO;
+        return false;
+    }
+    Database database;
+    std::string reason;
+    std::string error;
+    if (!load(database, reason, error)) {
+        errno = EIO;
+        return false;
+    }
+    std::map<std::string, int> collected;
+    for (const auto& owner : owners) {
+        const auto found = database.modules.find(owner);
+        if (found == database.modules.end() || found->second.backend != "kasumi" ||
+            !found->second.complete) {
+            errno = EIO;
+            return false;
+        }
+        for (const auto& rule : found->second.rules) {
+            if (rule.kind == "HIDE")
+                collected[rule.path] |= static_cast<int>(rule.flags);
+        }
+    }
+    hides = std::move(collected);
+    return true;
 }
 
 bool detail::prepare_snapshot(SnapshotContext& context, Snapshot& result) {

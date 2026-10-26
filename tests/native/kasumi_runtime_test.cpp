@@ -272,6 +272,84 @@ void test_bypass_scope() {
     require(kernel.merges[0].flags == KSM_RULE_BYPASS_POLICY, "module bypass applies to merge");
     state("module", "mounted");
 }
+
+void test_shared_user_hides() {
+    Fixture fixture;
+    const auto path = (fixture.stock / "hidden").string();
+    file(fixture.payload("module", "payload"));
+    require(fixture.mount({"module"}, {{"module", {{path, "hide", true}}}}),
+            "mount global module hide");
+    require(backend::record_replayable_mappings({fixture.module("module")}), "record boot owner");
+    const auto edit = [&](bool remove, int flags = 0) {
+        runtime::Operation operation;
+        const bool ok = backend::update_legacy_user_hide(path, remove, flags);
+        operation.finish(ok);
+        return ok;
+    };
+    require(edit(false), "add ordinary user hide over global module hide");
+    require(kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY, "keep global module flag");
+    kernel.hide_flags[path] = 0;
+    state("module", "partial");
+    kernel.hide_flags[path] = KSM_RULE_BYPASS_POLICY;
+    require(edit(false, KSM_RULE_BYPASS_POLICY) && edit(false), "toggle user bypass off");
+    require(kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY,
+            "user toggle retains module flag");
+    file(fixture.module("module").path / "disable");
+    std::ofstream(fixture.root / "config.json") << "{\"kasumi_enabled\":false}";
+    std::ofstream(fixture.root / "module_rules.json") << "{}";
+    kernel.enabled = false;
+    require(edit(true), "remove user hide with pending module changes");
+    require(kernel.hides.count(path) == 1 && kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY &&
+                !kernel.enabled,
+            "retain installed module hide without applying pending changes or enabling Kasumi");
+    kernel.enabled = true;
+    state("module", "mounted");
+    std::ofstream(fixture.root / "user_hide_rules.json") << '[' << kagami::json_quote(path) << ']';
+    {
+        runtime::Operation operation;
+        std::string error;
+        require(backend::restore_persisted_hide_rules(error), error);
+        operation.finish();
+    }
+    require(kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY, "restore retains module bypass");
+
+    kernel = {};
+    std::ofstream(fixture.root / "hide_bypass.json")
+        << '{' << kagami::json_quote(path) << ":\"on\"}";
+    require(fixture.mount({"module"}, {{"module", {{path, "hide"}}}}),
+            "mount ordinary module hide with global user hide");
+    state("module", "mounted");
+    require(edit(false), "disable user bypass over ordinary module hide");
+    require(kernel.hide_flags.at(path) == 0, "user bypass does not become module bypass");
+    state("module", "mounted");
+    require(edit(false, KSM_RULE_BYPASS_POLICY), "enable user bypass over ordinary module hide");
+    state("module", "mounted");
+    require(edit(true) && kernel.hides.count(path) == 1 && kernel.hide_flags.at(path) == 0,
+            "removing global user hide retains ordinary module hide");
+    state("module", "mounted");
+
+    {
+        runtime::Operation operation;
+        require(runtime::assign_modules({}, "kasumi"), "withdraw hot-unmounted module evidence");
+        kernel = {};
+        kagami::mount::ModuleRules rules;
+        require(backend::mount_modules({}, fixture.config, rules),
+                "restore user hides without modules");
+        operation.finish();
+    }
+    require(edit(true) && kernel.hides.count(path) == 0,
+            "hot-unmounted module no longer retains the user hide");
+    require(fixture.mount({"module"}, {{"module", {{path, "hide"}}}}), "restore module ownership");
+
+    std::ofstream(fixture.root / "run/module_runtime/state") << "invalid";
+    require(!edit(true) && kernel.hides.count(path) == 1,
+            "unreadable module ownership must not delete the live rule");
+    backend::clear_replayable_mappings();
+    require(
+        edit(false, KSM_RULE_BYPASS_POLICY) && kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY,
+        "unowned hide retains direct updates");
+    require(edit(true) && kernel.hides.count(path) == 0, "unowned hide retains direct removal");
+}
 }  // namespace
 
 namespace kagami::mount {
@@ -341,11 +419,17 @@ bool hide_path(const std::string& path, int flags) {
     kernel.hide_flags[path] = flags;
     return true;
 }
+bool delete_rule(const std::string& path) {
+    kernel.hides.erase(path);
+    kernel.hide_flags.erase(path);
+    return true;
+}
 }  // namespace kagami::kasumi
 
 int main() {
     try {
         test_bypass_scope();
+        test_shared_user_hides();
         test_leaf_alias();
         test_missing_and_dangling();
         test_alias_winners();

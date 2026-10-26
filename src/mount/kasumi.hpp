@@ -24,6 +24,7 @@ bool disable_control_state(std::string& error);
 // safe after a post-boot LKM load even when modules already use a fallback
 // OverlayFS or Magic Mount backend.
 bool restore_persisted_hide_rules(std::string& error);
+bool update_legacy_user_hide(const std::string& path, bool remove, int flags = 0);
 
 // Disable Kasumi and clear path rules without requiring an active mirror.
 bool deactivate(std::string& error);

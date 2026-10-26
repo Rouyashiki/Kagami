@@ -428,9 +428,18 @@ bool restore_persisted_hide_rules(std::string& error) {
         error = "failed to read hide bypass settings";
         return false;
     }
+    std::map<std::string, int> module_hides;
+    const auto owners = replayable_module_ids();
+    if (!owners.empty() && (!module_runtime::read_module_hides(owners, module_hides) ||
+                            (!module_hides.empty() && !is_active()))) {
+        error = "failed to read module hide ownership";
+        return false;
+    }
     for (const auto& path : user_hide_rules()) {
-        if (!::kagami::kasumi::hide_path(
-                path, bypasses.find(path) == "on" ? KSM_RULE_BYPASS_POLICY : 0)) {
+        const auto module = module_hides.find(resolve_virtual_path(path));
+        const int flags = (module == module_hides.end() ? 0 : module->second) |
+                          (bypasses.find(path) == "on" ? KSM_RULE_BYPASS_POLICY : 0);
+        if (!::kagami::kasumi::hide_path(path, flags)) {
             ok = false;
         }
     }
@@ -438,6 +447,18 @@ bool restore_persisted_hide_rules(std::string& error) {
         error = "failed to restore one or more persistent hide rules";
     }
     return ok;
+}
+
+bool update_legacy_user_hide(const std::string& path, bool remove, int flags) {
+    std::map<std::string, int> module_hides;
+    const auto owners = replayable_module_ids();
+    if (!owners.empty() && (!module_runtime::read_module_hides(owners, module_hides) ||
+                            (!module_hides.empty() && !is_active())))
+        return false;
+    const auto module = module_hides.find(resolve_virtual_path(path));
+    if (module != module_hides.end())
+        return ::kagami::kasumi::hide_path(path, module->second | (remove ? 0 : flags));
+    return remove ? ::kagami::kasumi::delete_rule(path) : ::kagami::kasumi::hide_path(path, flags);
 }
 
 bool deactivate(std::string& error) {
@@ -463,6 +484,7 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     }
     const auto persisted_hide_rules = user_hide_rules();
     if (modules.empty()) {
+        (void)module_runtime::record_rules({}, true);
         std::string error;
         const bool ok = restore_persisted_hide_rules(error);
         if (ok) {
@@ -476,7 +498,6 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
             fs::remove(active_file(), ec);
             mlog("kasumi: one or more persistent hide rules failed", logging::Level::Error);
         }
-        (void)module_runtime::record_rules({}, true);
         return ok;
     }
 
@@ -583,6 +604,13 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
                                 static_cast<unsigned>(installed->second.flags)});
         }
     }
+    for (const auto& [path, owners] : batch.hide_owners) {
+        evidence.push_back({"HIDE",
+                            path,
+                            "",
+                            {owners.begin(), owners.end()},
+                            static_cast<unsigned>(batch.hide.at(path))});
+    }
     for (const auto& path : persisted_hide_rules) {
         batch.hide[path] |= hide_bypasses.find(path) == "on" ? KSM_RULE_BYPASS_POLICY : 0;
     }
@@ -593,13 +621,6 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
                  hidden ? logging::Level::Debug : logging::Level::Error);
         }
         ok = hidden && ok;
-    }
-    for (const auto& [path, owners] : batch.hide_owners) {
-        evidence.push_back({"HIDE",
-                            path,
-                            "",
-                            {owners.begin(), owners.end()},
-                            static_cast<unsigned>(batch.hide.at(path))});
     }
     (void)module_runtime::record_rules(evidence, true);
     std::error_code ec;

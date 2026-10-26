@@ -105,6 +105,8 @@ struct RuleEvidence {
 // Supply the final rule winners, including failed expected rules. Live kernel
 // readback determines presence; an ioctl return alone does not prove activity.
 bool record_rules(const std::vector<RuleEvidence>& rules, bool complete);
+// Read the installed boot plan under an Operation; uncertain ownership is an error.
+bool read_module_hides(const std::vector<std::string>& owners, std::map<std::string, int>& hides);
 
 struct KasumiObservation {
     bool ok = false;

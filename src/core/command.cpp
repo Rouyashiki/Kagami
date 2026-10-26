@@ -1971,8 +1971,9 @@ int handle_hide(output::Context& destination, Arguments args) {
             return 1;
         }
         if (kasumi::is_available()) {
-            if (!kasumi::hide_path(path, bypass ? KSM_RULE_BYPASS_POLICY : 0)) {
-                output::err(destination, "hide rule saved, but kernel rejected it\n");
+            if (!mount::kasumi::update_legacy_user_hide(path, false,
+                                                        bypass ? KSM_RULE_BYPASS_POLICY : 0)) {
+                output::err(destination, "hide rule saved, but failed to apply it\n");
                 return 1;
             }
         }
@@ -1988,7 +1989,11 @@ int handle_hide(output::Context& destination, Arguments args) {
             return 1;
         }
         if (kasumi::is_available()) {
-            kasumi::delete_rule(path);
+            if (!mount::kasumi::update_legacy_user_hide(path, true)) {
+                output::err(destination,
+                            "hide rule removed from settings, but failed to apply it\n");
+                return 1;
+            }
         }
         return 0;
     }
