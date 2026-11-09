@@ -5,8 +5,10 @@
 #include "mount/module_runtime.hpp"
 
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
@@ -32,6 +34,11 @@ void file(const fs::path& path) {
     std::ofstream output(path);
     output << "fixture\n";
     require(output.good(), "write fixture " + path.string());
+}
+void whiteout(const fs::path& path) {
+    fs::create_directories(path.parent_path());
+    require(mknod(path.c_str(), S_IFCHR | 0600, makedev(0, 0)) == 0,
+            "create whiteout " + path.string());
 }
 
 // Replace only the kernel client boundary. The real backend compiles the
@@ -59,6 +66,20 @@ std::string kernel_add_key(const std::string& path) {
         return full;
     const auto parent = resolved(fs::path(path).parent_path().string());
     return parent.empty() ? path : (fs::path(parent) / fs::path(path).filename()).string();
+}
+bool has_payload_mapping(const fs::path& path) {
+    const auto supplies = [&](const std::string& target, const std::string& source) {
+        const auto relative = path.lexically_relative(kernel_add_key(target));
+        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..")
+            return false;
+        std::error_code ec;
+        const auto payload = relative == "." ? fs::path(source) : fs::path(source) / relative;
+        return fs::exists(fs::symlink_status(payload, ec));
+    };
+    return std::any_of(kernel.adds.begin(), kernel.adds.end(),
+                       [&](const auto& add) { return supplies(add.first, add.second); }) ||
+           std::any_of(kernel.merges.begin(), kernel.merges.end(),
+                       [&](const auto& merge) { return supplies(merge.path, merge.source); });
 }
 runtime::Snapshot snapshot() {
     runtime::KasumiObservation live;
@@ -350,6 +371,221 @@ void test_shared_user_hides() {
         "unowned hide retains direct updates");
     require(edit(true) && kernel.hides.count(path) == 0, "unowned hide retains direct removal");
 }
+void test_merged_whiteouts() {
+    Fixture fixture;
+    const auto browser = fixture.stock / "priv-app/Browser";
+    const auto nested = fixture.stock / "priv-app/Nested/Removed";
+    file(nested);
+    file(fixture.stock / "priv-app/Keep");
+    fs::create_symlink("Keep", browser);
+    for (const auto* id : {"first", "second"}) {
+        const auto whiteout = fixture.payload(id, "priv-app/Browser");
+        fs::create_directories(whiteout.parent_path());
+        require(mknod(whiteout.c_str(), S_IFCHR | 0600, makedev(0, 0)) == 0,
+                "create whiteout fixture");
+    }
+    const auto nested_whiteout = fixture.payload("first", "priv-app/Nested/Removed");
+    fs::create_directories(nested_whiteout.parent_path());
+    require(mknod(nested_whiteout.c_str(), S_IFCHR | 0600, makedev(0, 0)) == 0,
+            "create nested whiteout");
+    file(fixture.payload("first", "priv-app/Added"));
+    const auto added_whiteout = fixture.payload("first", "priv-app/New/Removed");
+    fs::create_directories(added_whiteout.parent_path());
+    require(mknod(added_whiteout.c_str(), S_IFCHR | 0600, makedev(0, 0)) == 0,
+            "create whiteout under a module-only directory");
+    file(fixture.payload("first", "priv-app/New/Keep"));
+    require(fixture.mount({"first", "second"},
+                          {{"first", {{(fixture.stock / "priv-app").string(), "kasumi", true}}}}),
+            "mount merged whiteouts");
+    require(kernel.merges.empty() && kernel.adds.size() == 2,
+            "expand whiteout subtrees before selecting the final hides");
+    require(kernel.hides ==
+                std::set<std::string>{browser.string(), nested.string(), added_whiteout.string()},
+            "hide existing names and module-only backing entries without following the leaf");
+    require(kernel.hide_flags.at(browser.string()) == KSM_RULE_BYPASS_POLICY &&
+                kernel.hide_flags.at(nested.string()) == KSM_RULE_BYPASS_POLICY &&
+                kernel.hide_flags.at(added_whiteout.string()) == KSM_RULE_BYPASS_POLICY,
+            "retain inherited whiteout bypass flags");
+    state("first", "mounted");
+    state("second", "mounted");
+    require(
+        backend::record_replayable_mappings({fixture.module("first"), fixture.module("second")}),
+        "record whiteout owners");
+    {
+        runtime::Operation operation;
+        const bool ok = backend::update_legacy_user_hide(browser.string(), false) &&
+                        backend::update_legacy_user_hide(browser.string(), true);
+        operation.finish(ok);
+        require(ok, "edit a user hide over the module whiteout");
+    }
+    require(kernel.hides.count(browser.string()) == 1 &&
+                kernel.hide_flags.at(browser.string()) == KSM_RULE_BYPASS_POLICY,
+            "removing a user hide retains the module-owned whiteout");
+}
+void test_new_directory_whiteout() {
+    Fixture fixture;
+    const auto whiteout = fixture.payload("module", "New/Removed");
+    fs::create_directories(whiteout.parent_path());
+    require(mknod(whiteout.c_str(), S_IFCHR | 0600, makedev(0, 0)) == 0,
+            "create unmerged whiteout");
+    file(fixture.payload("module", "New/Keep"));
+    require(fixture.mount({"module"}), "mount an entirely new directory with whiteout");
+    require(kernel.merges.empty() && kernel.adds.size() == 1 &&
+                kernel.hides == std::set<std::string>{whiteout.string()},
+            "bind whiteout to its backing parent when no merge exists");
+    state("module", "mounted");
+}
+void test_whiteout_priority() {
+    for (const auto* leaf : {"entry", "merged/entry", "new/entry"}) {
+        for (const bool higher_whiteout : {false, true}) {
+            Fixture fixture;
+            const auto path = fixture.stock / leaf;
+            if (std::string_view(leaf) != "new/entry")
+                file(path);
+            whiteout(fixture.payload(higher_whiteout ? "a" : "z", leaf));
+            file(fixture.payload(higher_whiteout ? "z" : "a", leaf));
+            require(fixture.mount({"a", "z"}, {{"z", {{path.string(), "kasumi", true}}}}),
+                    "mount competing whiteout and file");
+            if (higher_whiteout) {
+                const auto key = fs::exists(path.parent_path())
+                                     ? path.string()
+                                     : fixture.payload("a", leaf).string();
+                require(
+                    kernel.hides == std::set<std::string>{key} && kernel.hide_flags.at(key) == 0,
+                    "higher whiteout wins without inheriting lower file bypass");
+                if (!fs::exists(path.parent_path())) {
+                    require(!has_payload_mapping(path),
+                            "whiteout removes lower payload from the virtual directory");
+                    state("z", "unmounted");
+                }
+            } else {
+                require(kernel.hides.empty(), "higher file cancels the lower whiteout");
+                require(kernel.hide_flags.empty(), "overridden whiteout retains no bypass");
+                state("a", "mounted");
+                state("z", "unmounted");
+            }
+        }
+        Fixture fixture;
+        const auto path = fixture.stock / leaf;
+        if (std::string_view(leaf) != "new/entry")
+            file(path);
+        file(fixture.payload("z", leaf));
+        whiteout(fixture.payload("m", leaf));
+        file(fixture.payload("a", leaf));
+        require(fixture.mount({"a", "m", "z"}), "mount file-whiteout-file sequence");
+        require(kernel.hides.empty(), "last file cancels an intermediate whiteout");
+        if (kernel.merges.empty())
+            require(kernel.adds.at(path.string()) == fixture.payload("a", leaf).string(),
+                    "highest file owns the effective ADD");
+        else
+            require(kernel.merges.back().source == fixture.payload("a", "merged").string(),
+                    "highest directory is merged last");
+        state("a", "mounted");
+        state("m", "unmounted");
+    }
+}
+void test_whiteout_explicit_hides() {
+    Fixture fixture;
+    const auto path = (fixture.stock / "entry").string();
+    file(path);
+    whiteout(fixture.payload("z", "entry"));
+    file(fixture.payload("a", "entry"));
+    require(fixture.mount({"a", "z"}, {{"z", {{path, "hide", true}}}}),
+            "mount explicit hide with a higher file");
+    require(kernel.hides.count(path) == 1 && kernel.hide_flags.at(path) == KSM_RULE_BYPASS_POLICY,
+            "explicit module hides remain independent of payload priority");
+    kernel = {};
+    std::ofstream(fixture.root / "user_hide_rules.json") << '[' << kagami::json_quote(path) << ']';
+    require(fixture.mount({"a", "z"}), "mount higher file with persisted user hide");
+    require(kernel.hides.count(path) == 1, "persisted user hides survive whiteout replacement");
+    state("z", "unmounted");
+}
+void test_whiteout_alias_priority() {
+    for (const bool same_link : {false, true}) {
+        Fixture fixture;
+        const auto alias = fixture.stock / "alias";
+        const auto real = fixture.stock / "real";
+        file(real);
+        fs::create_symlink("real", alias);
+        whiteout(fixture.payload("z", same_link ? "alias" : "real"));
+        if (same_link) {
+            const auto payload = fixture.payload("a", "alias");
+            fs::create_directories(payload.parent_path());
+            fs::create_symlink("real", payload);
+        } else {
+            file(fixture.payload("a", "alias"));
+        }
+        require(fixture.mount({"a", "z"}), "mount higher alias over whiteout");
+        require(kernel.hides.empty(), "alias replacement cancels the effective lower whiteout");
+        if (same_link)
+            require(kernel.adds.empty(), "retain the existing matching stock alias");
+        else
+            require(kernel.adds.at(real.string()) == fixture.payload("a", "alias").string(),
+                    "replacement uses the kernel's resolved ADD key");
+    }
+}
+void test_whiteout_special_siblings() {
+    Fixture fixture;
+    fs::create_directory(fixture.stock / "merged");
+    whiteout(fixture.payload("module", "merged/removed"));
+    const auto fifo = fixture.payload("module", "merged/fifo");
+    const auto device = fixture.payload("module", "merged/null");
+    require(mkfifo(fifo.c_str(), 0600) == 0 &&
+                mknod(device.c_str(), S_IFCHR | 0600, makedev(1, 3)) == 0,
+            "create special siblings");
+    require(fixture.mount({"module"}), "expand mixed whiteout and special sources");
+    require(kernel.merges.empty() && kernel.adds.size() == 2 &&
+                kernel.adds.at((fixture.stock / "merged/fifo").string()) == fifo.string() &&
+                kernel.adds.at((fixture.stock / "merged/null").string()) == device.string(),
+            "expansion retains non-whiteout special sources");
+}
+void test_virtual_whiteouts_in_lower_merge() {
+    for (const bool alias : {false, true}) {
+        Fixture fixture;
+        fs::create_directories(fixture.stock / "existing/unrelated");
+        if (alias)
+            fs::create_directory_symlink("existing", fixture.stock / "alias");
+        const std::string lower_root = alias ? "alias" : "existing";
+        const auto lower = [&](const std::string& path) {
+            std::string relative = lower_root;
+            relative += '/';
+            relative += path;
+            return fixture.payload("z", relative);
+        };
+        for (int i = 0; i < 10; ++i) {
+            const auto leaf = "new/entry" + std::to_string(i);
+            file(lower(leaf));
+            whiteout(fixture.payload("a", "existing/" + leaf));
+        }
+        file(lower("new/removed/child"));
+        whiteout(fixture.payload("a", "existing/new/removed"));
+        file(lower("new/keep"));
+        file(lower("unrelated/keep"));
+        file(fixture.payload("a", "existing/new/higher"));
+        require(fixture.mount({"a", "z"},
+                              {{"z", {{(fixture.stock / lower_root).string(), "kasumi", true}}}}),
+                "mount whiteouts over a lower directory merge");
+        for (int i = 0; i < 10; ++i)
+            require(!has_payload_mapping(fixture.stock / "existing/new" /
+                                         ("entry" + std::to_string(i))),
+                    "lower merge cannot reintroduce a whiteout target");
+        require(!has_payload_mapping(fixture.stock / "existing/new/removed/child"),
+                "directory whiteout removes lower descendants");
+        require(has_payload_mapping(fixture.stock / "existing/new/keep") &&
+                    has_payload_mapping(fixture.stock / "existing/unrelated/keep") &&
+                    has_payload_mapping(fixture.stock / "existing/new/higher"),
+                "preserve unrelated lower and higher payloads");
+        require(kernel.add_flags.at((fixture.stock / "existing/new/keep").string()) ==
+                        KSM_RULE_BYPASS_POLICY &&
+                    kernel.add_flags.at((fixture.stock / "existing/new/higher").string()) == 0,
+                "expanded mappings retain each module's policy flags");
+        require(kernel.merges.size() == 1 &&
+                    kernel.merges.front().path == (fixture.stock / "existing/unrelated").string(),
+                "unaffected subtrees retain bulk merging");
+        state("a", "mounted");
+        state("z", "mounted");
+    }
+}
 }  // namespace
 
 namespace kagami::mount {
@@ -415,8 +651,14 @@ bool add_merge_rule(const std::string& target, const std::string& source, int fl
     return true;
 }
 bool hide_path(const std::string& path, int flags) {
-    kernel.hides.insert(path);
-    kernel.hide_flags[path] = flags;
+    const auto parent = resolved(fs::path(path).parent_path().string());
+    if (parent.empty()) {
+        errno = ENOENT;
+        return false;
+    }
+    const auto key = (fs::path(parent) / fs::path(path).filename()).string();
+    kernel.hides.insert(key);
+    kernel.hide_flags[key] = flags;
     return true;
 }
 bool delete_rule(const std::string& path) {
@@ -436,6 +678,13 @@ int main() {
         test_same_owner_aliases();
         test_failed_alias_replacement();
         test_merge_and_hide_aliases();
+        test_merged_whiteouts();
+        test_new_directory_whiteout();
+        test_whiteout_priority();
+        test_whiteout_explicit_hides();
+        test_whiteout_alias_priority();
+        test_whiteout_special_siblings();
+        test_virtual_whiteouts_in_lower_merge();
         std::cout << "Kasumi runtime alias fixtures passed\n";
         return 0;
     } catch (const std::exception& error) {
