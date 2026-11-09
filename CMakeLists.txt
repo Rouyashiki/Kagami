@@ -144,6 +144,12 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     target_compile_options(config_read_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME config_read COMMAND config_read_test)
 
+    add_executable(loop_image_test tests/native/loop_image_test.cpp src/core/runtime.cpp)
+    target_include_directories(loop_image_test PRIVATE include src)
+    target_compile_options(loop_image_test PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_options(loop_image_test PRIVATE -Wl,--wrap=lgetxattr -Wl,--wrap=lsetxattr)
+    add_test(NAME loop_image COMMAND loop_image_test)
+
     set(KAGAMI_COMMAND_TEST_SOURCES ${KAGAMI_SOURCES})
     list(REMOVE_ITEM KAGAMI_COMMAND_TEST_SOURCES src/main.cpp)
     add_executable(module_list_test tests/native/module_list_test.cpp ${KAGAMI_COMMAND_TEST_SOURCES})

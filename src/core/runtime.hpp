@@ -19,6 +19,7 @@ bool write_file_atomic(const std::string& path, std::string_view data, std::stri
 bool runtime_mount_here();
 bool prepare_private_directory(const std::filesystem::path& path, std::string& error);
 bool prepare_private_file(const std::filesystem::path& path, std::string& error);
+bool prepare_loop_image(const std::filesystem::path& path, std::string& error);
 bool prepare_runtime(std::string& error);
 bool prepare_package_metadata(const std::filesystem::path& path, std::string& error);
 

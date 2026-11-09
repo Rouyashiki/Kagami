@@ -1,0 +1,2 @@
+type kagami_image file_type
+allow kernel kagami_image file { read write }
