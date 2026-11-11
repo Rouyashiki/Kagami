@@ -71,6 +71,11 @@ target_compile_definitions(kagamid PRIVATE
 option(KAGAMI_BUILD_NATIVE_TESTS "Build focused native runtime fixture tests" OFF)
 if(KAGAMI_BUILD_NATIVE_TESTS)
     enable_testing()
+    if(CMAKE_HOST_UNIX)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME module_scripts COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tests/module_scripts_test.py)
+    endif()
     add_executable(module_runtime_test
         tests/native/module_runtime_test.cpp
         src/mount/module_runtime.cpp

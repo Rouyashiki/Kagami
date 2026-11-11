@@ -77,11 +77,10 @@ bool update_module_rule(std::string_view id, std::string_view path, std::string_
                         bool remove, int& error, bool bypass = false);
 
 // Rebuild only Kasumi mappings in the init namespace. This is safe to expose
-// post-boot for the Kasumi hot-mount controls; Overlay/Magic remain boot-only.
+// post-boot for the Kasumi hot-mount controls.
 bool refresh_kasumi_modules(const Config& config);
 
-// Pick a backend (magic mount), enter the init mount ns, mount every enabled
-// module. Safe to call from the daemon or a one-shot CLI.
+// Apply the boot or late-load module mount plan in the init mount namespace.
 MountReport mount_all_enabled(const Config& config);
 
 // Tear down everything Kagami mounted (enters the init mount ns).

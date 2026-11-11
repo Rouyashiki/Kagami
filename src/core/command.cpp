@@ -90,6 +90,7 @@ void print_usage(output::Context& destination) {
         "list|add|delete|set-mode|set-bypass|add-rule|remove-rule|apply|hot-mount|hot-unmount|"
         "check-conflicts|"
         "mount-all|unmount|normalize\n",
+        "  kagamid module mount-all [--late-load]\n",
         "  kagamid recovery status|boot-completed|reset\n",
         "  kagamid kasumi "
         "version|list|enable|disable|clear|fix-mounts|hide-overlay-xattrs|mount-hide "
@@ -101,9 +102,6 @@ std::string arg_or_default(Arguments args, std::size_t index, const std::string&
     return index < args.size() ? std::string(std::string_view(args[index])) : fallback;
 }
 
-// True once the device has finished booting. Magic mount must only run during
-// the post-fs-data boot stage (metamount.sh); mounting over the live system
-// afterwards breaks mount namespaces, so the CLI refuses mount-all post-boot.
 bool system_boot_completed() {
 #if defined(__ANDROID__)
     char value[PROP_VALUE_MAX] = {};
@@ -1511,12 +1509,11 @@ int handle_module(output::Context& destination, Arguments args) {
         return 0;
     }
     if (sub == "mount-all") {
-        // Boot-only entry (the metamodule metamount.sh hook). Refuse once the
-        // device has booted: magic mount over the live system post-boot breaks
-        // mount namespaces (it propagates into adbd / service namespaces).
-        if (system_boot_completed() && !runtime_mount_here()) {
-            output::err(destination, "refusing module mount-all: magic mount only runs at boot via "
-                                     "metamount.sh; post-boot mounting breaks namespaces\n");
+        // Pass the stage per request because an existing daemon may predate late-load.
+        const bool late_load = args.size() == 3 && args[2] == "--late-load";
+        if (system_boot_completed() && !runtime_mount_here() && !late_load) {
+            output::err(destination,
+                        "refusing module mount-all: mounting requires boot or --late-load\n");
             return 1;
         }
         PreparedConfig config;
