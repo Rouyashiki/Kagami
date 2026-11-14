@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
+#include <charconv>
+#include <cmath>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -156,6 +158,7 @@ std::string_view default_config_json() noexcept {
   "enable_statfs_spoof": false,
   "enable_selinux_fix": false,
   "kasumi_enabled": true,
+  "kasumi_kstat_rules": [],
   "overlayfs_enabled": true,
   "magic_mount_enabled": true,
   "mount_backend": "auto",
@@ -328,6 +331,119 @@ bool replace(json::ObjectWriter& writer, json::Edit edit, std::string& error) {
 }
 }  // namespace
 
+namespace {
+bool parse_kstat_rule(json::Value value, kasumi_transaction_kstat_rule& rule, std::string& error) {
+    const auto reject = [&error](const std::string& reason) {
+        error = "kasumi_kstat_rules " + reason;
+        return false;
+    };
+    if (!value.is_object())
+        return reject("entries must be objects");
+    struct IntegerField {
+        const char* name;
+        __u64* destination;
+    };
+    const IntegerField integers[] = {
+        {"target_ino", &rule.target_ino},
+        {"target_dev", &rule.target_dev},
+        {"spoofed_ino", &rule.spoofed_ino},
+        {"spoofed_dev", &rule.spoofed_dev},
+        {"spoofed_nlink", &rule.spoofed_nlink},
+        {"spoofed_size", &rule.spoofed_size},
+        {"spoofed_atime_sec", &rule.spoofed_atime_sec},
+        {"spoofed_atime_nsec", &rule.spoofed_atime_nsec},
+        {"spoofed_mtime_sec", &rule.spoofed_mtime_sec},
+        {"spoofed_mtime_nsec", &rule.spoofed_mtime_nsec},
+        {"spoofed_ctime_sec", &rule.spoofed_ctime_sec},
+        {"spoofed_ctime_nsec", &rule.spoofed_ctime_nsec},
+        {"spoofed_blksize", &rule.spoofed_blksize},
+        {"spoofed_blocks", &rule.spoofed_blocks},
+    };
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const auto item = value.child(i);
+        const auto key = item.key();
+        if (key == "fields" || key == "match_flags") {
+            const auto number = item.number_or(-1);
+            if (!item.is_number() || !std::isfinite(number) || number < 0 || number > UINT32_MAX ||
+                std::floor(number) != number)
+                return reject(std::string(key) + " must be a uint32 integer");
+            if (key == "fields")
+                rule.fields = static_cast<__u32>(number);
+            else
+                rule.match_flags = static_cast<__u32>(number);
+            continue;
+        }
+        if (key == "target_path") {
+            const auto path = item.string_or();
+            if (!item.is_string() || path.size() >= KSM_MAX_LEN_PATHNAME ||
+                path.find('\0') != std::string_view::npos)
+                return reject(
+                    "target_path must be a NUL-free pathname shorter than the UAPI limit");
+            std::memcpy(rule.target_pathname, path.data(), path.size());
+            continue;
+        }
+        bool matched = false;
+        for (const auto& integer : integers) {
+            if (key != integer.name)
+                continue;
+            matched = true;
+            const auto text = item.string_or();
+            if (!item.is_string() || text.empty())
+                return reject(std::string(key) + " must be an unsigned decimal string");
+            const auto parsed =
+                std::from_chars(text.data(), text.data() + text.size(), *integer.destination, 10);
+            if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+                return reject(std::string(key) + " must be an unsigned decimal uint64 string");
+            break;
+        }
+        if (!matched)
+            return reject("contains unknown field '" + std::string(key) + "'");
+    }
+    if (!value.find("fields"))
+        return reject("requires an explicit fields mask");
+    if ((!rule.target_pathname[0] && !rule.target_ino) ||
+        (rule.target_pathname[0] && rule.target_pathname[0] != '/') ||
+        (rule.fields & ~KSM_KSTAT_FIELDS_ALL) || (rule.match_flags & ~KSM_MATCH_ANY_DEVICE) ||
+        rule.target_dev > UINT32_MAX || rule.spoofed_dev > UINT32_MAX ||
+        rule.spoofed_nlink > UINT32_MAX || rule.spoofed_blksize > UINT32_MAX ||
+        ((rule.fields & KSM_KSTAT_FIELD_ATIME) && rule.spoofed_atime_nsec >= 1000000000) ||
+        ((rule.fields & KSM_KSTAT_FIELD_MTIME) && rule.spoofed_mtime_nsec >= 1000000000) ||
+        ((rule.fields & KSM_KSTAT_FIELD_CTIME) && rule.spoofed_ctime_nsec >= 1000000000))
+        return reject("contains an invalid target, field mask, device, link count, block size or "
+                      "nanosecond value");
+    return true;
+}
+bool prepare_kstat_config(json::Value value, bounded::Array<kasumi_transaction_kstat_rule>& rules,
+                          std::string& error) {
+    if (!value)
+        return true;
+    if (!value.is_array()) {
+        error = "kasumi_kstat_rules must be an array";
+        return false;
+    }
+    const auto count = value.size();
+    if (count > KSM_TX_MAX_OPERATIONS || count > static_cast<std::size_t>(KSM_TX_MAX_BYTES) /
+                                                     sizeof(kasumi_transaction_kstat_rule)) {
+        error = "kasumi_kstat_rules exceeds the transaction budget";
+        return false;
+    }
+    if (!rules.prepare_array(count, KSM_TX_MAX_OPERATIONS)) {
+        error = "cannot prepare kstat configuration array";
+        return false;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        kasumi_transaction_kstat_rule rule{};
+        if (!parse_kstat_rule(value.child(i), rule, error))
+            return false;
+        if (!rules.append(rule)) {
+            error = "kstat configuration capacity exceeded";
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+
 bool PreparedConfig::prepare_values(json::Value root, PreparedInput&& input, std::string& error) {
     if (prepared_) {
         error = "configuration storage has already been prepared";
@@ -339,6 +455,9 @@ bool PreparedConfig::prepare_values(json::Value root, PreparedInput&& input, std
     const auto deny = policy.find("deny_uids");
     bounded::Array<Argument> partitions;
     bounded::Array<std::uint32_t> uids;
+    bounded::Array<kasumi_transaction_kstat_rule> kstat_rules;
+    if (!prepare_kstat_config(root.find("kasumi_kstat_rules"), kstat_rules, error))
+        return false;
     if (!partitions.prepare_array(parts.is_array() ? parts.size() : 0,
                                   json::Document::maximum_nodes) ||
         !uids.prepare_array(
@@ -380,6 +499,7 @@ bool PreparedConfig::prepare_values(json::Value root, PreparedInput&& input, std
     Config next = static_cast<const Config&>(*this);  // Scalar and borrowed-view values only.
     apply_config_document(root, next);
     next.partitions = {partitions.view().data(), partitions.size()};
+    next.kasumi_kstat_rules = kstat_rules.view();
     if (policy.is_object()) {
         next.policy.allow_uids = {uids.view().data(), allow_count};
         next.policy.deny_uids = {uids.size() ? uids.view().data() + allow_count : nullptr,
@@ -417,6 +537,7 @@ bool PreparedConfig::prepare_values(json::Value root, PreparedInput&& input, std
     input_ = std::move(input);
     partitions_ = std::move(partitions);
     uids_ = std::move(uids);
+    kstat_rules_ = std::move(kstat_rules);
     static_cast<Config&>(*this) = next;
     prepared_ = true;
     logging::set_debug_enabled(debug || verbose);
@@ -517,6 +638,9 @@ bool merge_config_json(const std::string& path, const std::string& updates, std:
         }
     }
     if (!replace(merged, {"mount_hide_mode", {}, {}, json::Type::Null, 0, false, true}, error))
+        return false;
+    bounded::Array<kasumi_transaction_kstat_rule> kstat_rules;
+    if (!prepare_kstat_config(merged.find("kasumi_kstat_rules"), kstat_rules, error))
         return false;
     const bool saved = save_document(path, merged, error);
     if (saved)

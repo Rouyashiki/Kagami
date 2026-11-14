@@ -1,6 +1,7 @@
 #include "mount/kasumi.hpp"
 #include <iterator>
 #include "mount/kasumi_rule_index.hpp"
+#include "mount/overlayfs.hpp"
 
 #include "core/json_value.hpp"
 #include "core/runtime.hpp"
@@ -443,9 +444,8 @@ bool disable_kernel_features(std::string* error = nullptr) {
     return ok;
 }
 
-}  // namespace
-
-bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
+bool prepare_policy(const PolicyConfig& policy,
+                    ::kagami::kasumi::TransactionConfiguration& configuration, std::string& error) {
     ::kagami::kasumi::PolicyOwner owner = ::kagami::kasumi::PolicyOwner::Auto;
     if (policy.owner == "auto") {
         owner = ::kagami::kasumi::PolicyOwner::Auto;
@@ -476,16 +476,88 @@ bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
         flags |= KSM_POLICY_FLAG_INCLUDE_ISOLATED_UIDS;
     }
 
-    // Policy/provider changes are only legal while the kernel gate is down.
-    if (!::kagami::kasumi::set_enabled(false)) {
-        error = "failed to disable Kasumi before replacing policy";
-        return false;
-    }
-    if (!::kagami::kasumi::replace_policy(owner, flags, policy.allow_uids, policy.deny_uids)) {
-        error = "failed to atomically replace Kasumi policy";
-        return false;
-    }
+    configuration.fields |= KSM_TX_CONFIG_POLICY;
+    configuration.policy_owner = static_cast<std::uint32_t>(owner);
+    configuration.policy_flags = flags;
+    if (!policy.allow_uids.empty())
+        configuration.allow_uids.assign(policy.allow_uids.begin(), policy.allow_uids.end());
+    if (!policy.deny_uids.empty())
+        configuration.deny_uids.assign(policy.deny_uids.begin(), policy.deny_uids.end());
     return true;
+}
+
+constexpr std::uint64_t kConfigurationCapabilities =
+    KSM_CAP_ATOMIC_PATH_RULES | KSM_CAP_ATOMIC_SETTINGS | KSM_CAP_ATOMIC_POLICY;
+
+bool prepare_configuration(const Config& config,
+                           ::kagami::kasumi::TransactionConfiguration& configuration,
+                           std::string& error, bool replace_maps) {
+    configuration.fields = KSM_TX_CONFIG_SETTINGS | KSM_TX_CONFIG_KSTAT;
+    if (replace_maps)
+        configuration.fields |= KSM_TX_CONFIG_MAPS;
+    configuration.kstat.reserve(config.kasumi_kstat_rules.size());
+    for (const auto& rule : config.kasumi_kstat_rules) {
+        ::kagami::kasumi::TransactionKstatRule entry;
+        entry.fields = rule.fields;
+        entry.match_flags = rule.match_flags;
+        entry.target_ino = rule.target_ino;
+        entry.target_dev = rule.target_dev;
+        entry.spoofed_ino = rule.spoofed_ino;
+        entry.spoofed_dev = rule.spoofed_dev;
+        entry.spoofed_nlink = rule.spoofed_nlink;
+        entry.spoofed_size = rule.spoofed_size;
+        entry.spoofed_atime_sec = rule.spoofed_atime_sec;
+        entry.spoofed_atime_nsec = rule.spoofed_atime_nsec;
+        entry.spoofed_mtime_sec = rule.spoofed_mtime_sec;
+        entry.spoofed_mtime_nsec = rule.spoofed_mtime_nsec;
+        entry.spoofed_ctime_sec = rule.spoofed_ctime_sec;
+        entry.spoofed_ctime_nsec = rule.spoofed_ctime_nsec;
+        entry.spoofed_blksize = rule.spoofed_blksize;
+        entry.spoofed_blocks = rule.spoofed_blocks;
+        entry.target_path = rule.target_pathname;
+        configuration.kstat.push_back(std::move(entry));
+    }
+    configuration.enabled = config.kasumi_enabled;
+    configuration.debug = config.enable_kernel_debug;
+    configuration.stealth = config.enable_stealth;
+    const auto capabilities = ::kagami::kasumi::feature_capabilities();
+    if (!capabilities.ok) {
+        errno = capabilities.last_errno;
+        error = "failed to query Kasumi runtime features";
+        return false;
+    }
+    const std::uint32_t requested = (config.enable_mount_hide ? KSM_FEATURE_MOUNT_HIDE : 0) |
+                                    (config.enable_maps_spoof ? KSM_FEATURE_MAPS_SPOOF : 0) |
+                                    (config.enable_statfs_spoof ? KSM_FEATURE_STATFS_SPOOF : 0) |
+                                    (config.enable_selinux_fix ? KSM_FEATURE_SELINUX_FIX : 0);
+    configuration.features = requested & capabilities.bitmask;
+    const auto unsupported = requested & ~capabilities.bitmask;
+    if (unsupported) {
+        std::string message =
+            "kasumi: unavailable requested features mask=" + std::to_string(unsupported);
+        for (const auto& name : ::kagami::kasumi::feature_names(unsupported))
+            message += " " + name;
+        mlog(message, logging::Level::Warning);
+    }
+    return prepare_policy(config.policy, configuration, error);
+}
+
+}  // namespace
+
+bool apply_policy_config(const PolicyConfig& policy, std::string& error) {
+    ::kagami::kasumi::TransactionConfiguration configuration;
+    if (!prepare_policy(policy, configuration, error))
+        return false;
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        error = "failed to query Kasumi policy capabilities";
+        return false;
+    }
+    if (::kagami::kasumi::commit_transaction({}, configuration, 0))
+        return true;
+    error = "failed to publish Kasumi policy";
+    return false;
 }
 
 bool apply_feature_config(const Config& config, std::string& error) {
@@ -517,19 +589,23 @@ bool apply_feature_config(const Config& config, std::string& error) {
 }
 
 bool disable_control_state(std::string& error) {
-    bool ok = true;
-    if (!::kagami::kasumi::set_enabled(false)) {
-        error = "failed to disable Kasumi";
-        ok = false;
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        error = "failed to query Kasumi transaction capabilities";
+        return false;
     }
-    if (!disable_kernel_features(&error)) {
-        ok = false;
-    }
+    ::kagami::kasumi::TransactionConfiguration configuration;
+    configuration.fields = KSM_TX_CONFIG_SETTINGS;
+    const bool ok = ::kagami::kasumi::commit_transaction({}, configuration, 0);
+    if (!ok)
+        error = "failed to publish disabled Kasumi state";
     return ok;
 }
 
-bool restore_persisted_hide_rules(std::string& error) {
-    bool ok = true;
+namespace {
+bool collect_persisted_hide_rules(std::vector<::kagami::kasumi::PathRule>& rules,
+                                  std::string& error) {
     int settings_error = 0;
     const auto bypasses = load_module_modes(settings_error, "hide_bypass.json");
     if (settings_error) {
@@ -547,13 +623,22 @@ bool restore_persisted_hide_rules(std::string& error) {
         const auto module = module_hides.find(resolve_virtual_path(path));
         const int flags = (module == module_hides.end() ? 0 : module->second) |
                           (bypasses.find(path) == "on" ? KSM_RULE_BYPASS_POLICY : 0);
-        if (!::kagami::kasumi::hide_path(path, flags)) {
-            ok = false;
-        }
+        rules.push_back(
+            {::kagami::kasumi::PathOperation::Hide, path, "", static_cast<std::uint32_t>(flags)});
     }
-    if (!ok) {
+    return true;
+}
+}  // namespace
+
+bool restore_persisted_hide_rules(std::string& error) {
+    std::vector<::kagami::kasumi::PathRule> rules;
+    if (!collect_persisted_hide_rules(rules, error))
+        return false;
+    bool ok = true;
+    for (const auto& rule : rules)
+        ok = ::kagami::kasumi::hide_path(rule.path, rule.flags) && ok;
+    if (!ok)
         error = "failed to restore one or more persistent hide rules";
-    }
     return ok;
 }
 
@@ -570,44 +655,88 @@ bool update_legacy_user_hide(const std::string& path, bool remove, int flags) {
 }
 
 bool deactivate(std::string& error) {
-    bool ok = disable_control_state(error);
-    if (!::kagami::kasumi::clear_rules()) {
-        if (error.empty()) {
-            error = "failed to clear Kasumi rules";
-        }
-        ok = false;
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        error = "failed to query Kasumi transaction capabilities";
+        return false;
     }
-    invalidate_active_state();
+    ::kagami::kasumi::TransactionConfiguration configuration;
+    configuration.fields = KSM_TX_CONFIG_SETTINGS | KSM_TX_CONFIG_MAPS | KSM_TX_CONFIG_KSTAT;
+    const bool ok =
+        ::kagami::kasumi::commit_transaction({}, configuration, KSM_TX_REPLACE_PATH_RULES);
+    if (!ok)
+        error = "failed to publish disabled Kasumi state";
+    if (ok)
+        invalidate_active_state();
     return ok;
+}
+
+bool apply_atomic_config(const Config& config, std::string& error, bool& applied) {
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    applied = capabilities.ok && capabilities.protocol == KSM_PROTOCOL_VERSION;
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        error = "failed to query Kasumi transaction capabilities";
+        return false;
+    }
+    if ((capabilities.capabilities & kConfigurationCapabilities) != kConfigurationCapabilities) {
+        errno = EOPNOTSUPP;
+        error = "Kasumi does not support atomic configuration updates";
+        return false;
+    }
+    ::kagami::kasumi::TransactionConfiguration configuration;
+    if (!prepare_configuration(config, configuration, error, false))
+        return false;
+    std::vector<::kagami::kasumi::PathRule> rules;
+    if (!collect_persisted_hide_rules(rules, error))
+        return false;
+    const bool ok = fsutil::run_in_init_mount_ns([&]() {
+        std::vector<std::string> paths;
+        if (!overlay::xattr_hiding_paths(config, paths))
+            return false;
+        for (const auto& path : paths)
+            rules.push_back({::kagami::kasumi::PathOperation::HideXattrs, path, "", 0});
+        return ::kagami::kasumi::commit_transaction(rules, configuration,
+                                                    KSM_TX_REPLACE_XATTR_RULES);
+    });
+    if (!ok)
+        error = "failed to publish Kasumi configuration";
+    return ok;
+}
+
+bool prepare_rebuild(const Config& config, std::string& error, bool& atomic) {
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    atomic = capabilities.ok && capabilities.protocol == KSM_PROTOCOL_VERSION;
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        error = "failed to query Kasumi transaction capabilities";
+        return false;
+    }
+    const auto required = kConfigurationCapabilities | KSM_CAP_ATOMIC_MAPS | KSM_CAP_ATOMIC_KSTAT;
+    if ((capabilities.capabilities & required) != required) {
+        errno = EOPNOTSUPP;
+        error = "Kasumi does not support an atomic configuration rebuild";
+        return false;
+    }
+    (void)config;
+    return true;
 }
 
 bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config,
                    const ModuleRules& rules) {
-    // All kernel mutation remains in the existing order. These records only
-    // attribute the rules; readback, including the enabled gate, decides status.
-    (void)module_runtime::record_rules({}, false);
     if (!::kagami::kasumi::is_available()) {
         mlog("kasumi: backend requested but protocol is unavailable");
         return false;
     }
-    const auto persisted_hide_rules = user_hide_rules();
-    if (modules.empty()) {
-        (void)module_runtime::record_rules({}, true);
-        std::string error;
-        const bool ok = restore_persisted_hide_rules(error);
-        if (ok) {
-            if (!write_boot_marker(active_file())) {
-                mlog("kasumi: failed to record restored runtime state", logging::Level::Error);
-            }
-            mlog("kasumi: installed add=0 merge=0 hide=" +
-                 std::to_string(persisted_hide_rules.size()));
-        } else {
-            std::error_code ec;
-            fs::remove(active_file(), ec);
-            mlog("kasumi: one or more persistent hide rules failed", logging::Level::Error);
-        }
-        return ok;
+    const auto capabilities = ::kagami::kasumi::control_capabilities();
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION) {
+        errno = capabilities.ok ? EPROTO : capabilities.last_errno;
+        return false;
     }
+    const char* accepted_status = " staged";
+    std::vector<::kagami::kasumi::PathRule> transaction_rules;
+    const auto persisted_hide_rules = user_hide_rules();
 
     // Kasumi redirects each target straight to the real module tree under
     // /data/adb/modules; the vnode clones the source inode's SELinux SID, so no
@@ -666,7 +795,6 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
     size_t add_count = 0;
     size_t merge_count = 0;
     std::map<std::string, RuleBatch::Mapping> expected_add;
-    std::map<std::string, RuleBatch::Mapping> installed_add;
     std::vector<module_runtime::RuleEvidence> evidence;
     for (const auto& rule : batch.mappings) {
         std::string runtime_path = rule.path;
@@ -686,34 +814,20 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
             // compiler already resolved its existing parent components.
             expected_add[runtime_path] = rule;
         }
-        const bool added =
-            rule.merge ? ::kagami::kasumi::add_merge_rule(rule.path, rule.source, rule.flags)
-                       : ::kagami::kasumi::add_rule(rule.path, rule.source, rule.flags);
-        if (added && !rule.merge) {
-            installed_add[runtime_path] = rule;
-        }
+        transaction_rules.push_back({rule.merge ? ::kagami::kasumi::PathOperation::Merge
+                                                : ::kagami::kasumi::PathOperation::Redirect,
+                                     rule.path, rule.source,
+                                     static_cast<std::uint32_t>(rule.flags)});
         rule.merge ? ++merge_count : ++add_count;
-        if (!added || logging::enabled(logging::Level::Debug)) {
+        if (logging::enabled(logging::Level::Debug)) {
             mlog(std::string(rule.merge ? "merge" : "add") + " rule target=" + rule.path +
-                     " source=" + rule.source +
-                     (added ? " ok" : " failed errno=" + std::to_string(errno)),
-                 added ? logging::Level::Debug : logging::Level::Error);
+                     " source=" + rule.source + accepted_status,
+                 logging::Level::Debug);
         }
-        ok = added && ok;
     }
     for (const auto& [path, rule] : expected_add) {
         evidence.push_back(
             {"ADD", path, rule.source, {rule.owner}, static_cast<unsigned>(rule.flags)});
-        const auto installed = installed_add.find(path);
-        if (installed != installed_add.end() &&
-            (installed->second.source != rule.source || installed->second.flags != rule.flags)) {
-            // A failed replacement may leave the earlier module's rule alive.
-            evidence.push_back({"ADD",
-                                path,
-                                installed->second.source,
-                                {installed->second.owner},
-                                static_cast<unsigned>(installed->second.flags)});
-        }
     }
     for (const auto& [path, owners] : batch.hide_owners) {
         evidence.push_back({"HIDE",
@@ -726,12 +840,28 @@ bool mount_modules(const std::vector<ModuleEntry>& modules, const Config& config
         batch.hide[path] |= hide_bypasses.find(path) == "on" ? KSM_RULE_BYPASS_POLICY : 0;
     }
     for (const auto& [path, flags] : batch.hide) {
-        const bool hidden = ::kagami::kasumi::hide_path(path, flags);
-        if (!hidden || logging::enabled(logging::Level::Debug)) {
-            mlog("hide path=" + path + (hidden ? " ok" : " failed errno=" + std::to_string(errno)),
-                 hidden ? logging::Level::Debug : logging::Level::Error);
+        transaction_rules.push_back(
+            {::kagami::kasumi::PathOperation::Hide, path, "", static_cast<std::uint32_t>(flags)});
+        if (logging::enabled(logging::Level::Debug)) {
+            mlog("hide path=" + path + accepted_status, logging::Level::Debug);
         }
-        ok = hidden && ok;
+    }
+    std::vector<std::string> xattr_paths;
+    if (!overlay::xattr_hiding_paths(config, xattr_paths))
+        return false;
+    for (const auto& path : xattr_paths)
+        transaction_rules.push_back({::kagami::kasumi::PathOperation::HideXattrs, path, "", 0});
+    ::kagami::kasumi::TransactionConfiguration configuration;
+    std::string error;
+    if (!prepare_configuration(config, configuration, error, true)) {
+        mlog("kasumi: " + error, logging::Level::Error);
+        return false;
+    }
+    if (!::kagami::kasumi::commit_transaction(transaction_rules, configuration,
+                                              KSM_TX_REPLACE_PATH_RULES)) {
+        mlog("kasumi: atomic rule replacement failed errno=" + std::to_string(errno),
+             logging::Level::Error);
+        return false;
     }
     (void)module_runtime::record_rules(evidence, true);
     std::error_code ec;

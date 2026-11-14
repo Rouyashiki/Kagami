@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kagami/kasumi_uapi.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -54,6 +56,7 @@ struct Config {
     // boot-time action, or load the LKM manually from the control plane.
     bool lkm_autoload = false;
     bool kasumi_enabled = true;
+    bounded::Span<kasumi_transaction_kstat_rule> kasumi_kstat_rules;
     bool enable_kernel_debug = false;
     bool enable_stealth = true;
     bool enable_overlay_xattr_hide = false;
@@ -93,6 +96,7 @@ private:
     PreparedInput input_;
     bounded::Array<Argument> partitions_;
     bounded::Array<std::uint32_t> uids_;
+    bounded::Array<kasumi_transaction_kstat_rule> kstat_rules_;
     bounded::Storage runtime_paths_;
     bool prepared_ = false;
 };

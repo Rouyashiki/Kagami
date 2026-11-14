@@ -27,15 +27,15 @@ the following packaged filenames, in order:
 
 ## Protocol baseline
 
-Every supplied LKM must implement **Kasumi API 18**. The daemon is the sole
-owner of the Kasumi client and capability FD and uses a UAPI header whose
-`KSM_PROTOCOL_VERSION` is 18. A YukiSU hymo API 16 asset is not a compatible
-replacement. By default Kagami rejects a version mismatch and falls back to
-OverlayFS/Magic Mount rather than activating a mixed ABI.
+The daemon requires an exact Kasumi API 19 match. It uses per-file atomic
+transactions for complete rule and configuration updates. Both older and newer
+versions are rejected before configuration; there is no legacy update path.
+Operational ioctl commands are specific to the protocol version. Only version
+discovery uses a shared command.
 
-GitHub Actions builds and bundles this API 18 matrix with the same DDK target
-set as Kasumi/YukiSU: `android12-5.10`, `android13-5.10`, `android13-5.15`,
-`android14-5.15`, `android14-6.1`, `android15-6.6`, and `android16-6.12`.
+The DDK targets are `android12-5.10`, `android13-5.10`, `android13-5.15`,
+`android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12` and
+`android17-6.18`.
 
 `kagamid lkm status` reports the detected KMI and selected asset. The module
 loader deliberately keeps assets external to the binary, so Kagami can remain
@@ -55,6 +55,48 @@ When Kasumi is selected for a module, its module tree is materialized in the
 shared Kagami mirror at `/dev/kagami_mirror` by default. OverlayFS uses the
 same mirror; configure it once with `mirror_dir`/`mirror_img` rather than a
 separate Kasumi storage path.
+
+## Persistent kstat rules
+
+`kasumi_kstat_rules` stores the complete kstat table in the existing configuration
+document. `kagamid config apply` and the module rebuild publish it atomically with
+their other configuration fields. The embedded controller accepts the same
+array through `ksud kagami config apply`. A missing key or an empty array clears
+the kstat table on a successful full apply. A failed transaction preserves the
+previous published table and the saved configuration.
+
+```json
+{
+  "kasumi_kstat_rules": [
+    {
+      "fields": 9,
+      "target_path": "/system/example",
+      "spoofed_ino": "9007199254740993",
+      "spoofed_size": "0"
+    }
+  ]
+}
+```
+
+`fields` is a required uint32 JSON integer. Its bits select inode (1), device (2),
+link count (4), size (8), atime (16), mtime (32), ctime (64), block size (128) and
+blocks (256). Zero is a valid mask. Selected values may explicitly be zero.
+Omitted numeric members default to zero. Unknown bits and unknown member names
+are rejected.
+
+Every 64-bit member uses an unsigned decimal JSON string, including
+`target_ino`, `target_dev`, `spoofed_ino`, `spoofed_dev`, `spoofed_nlink`,
+`spoofed_size`, `spoofed_atime_sec`, `spoofed_atime_nsec`, `spoofed_mtime_sec`,
+`spoofed_mtime_nsec`, `spoofed_ctime_sec`, `spoofed_ctime_nsec`, `spoofed_blksize`
+and `spoofed_blocks`. Integer parsing preserves all uint64 values exactly.
+Device IDs, link counts and block sizes must also fit uint32. Selected timestamp
+nanoseconds must be below 1,000,000,000.
+
+A rule requires an absolute `target_path` or a nonzero `target_ino`. The optional
+uint32 integer `match_flags` defaults to zero for exact device matching, including
+device zero. Setting it to 1 selects `KSM_MATCH_ANY_DEVICE`. A resolvable pathname
+captures its current inode and device according to the kernel UAPI. API 19 requires
+`KSM_CAP_ATOMIC_KSTAT` and enforces its advertised count and byte budgets.
 
 ## License
 

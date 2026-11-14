@@ -117,6 +117,15 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     target_include_directories(kasumi_rules_test PRIVATE include)
     target_compile_options(kasumi_rules_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME kasumi_rules COMMAND kasumi_rules_test)
+    add_executable(kasumi_transaction_test
+        tests/native/kasumi_transaction_test.cpp
+        src/mount/kasumi_client.cpp
+    )
+    target_include_directories(kasumi_transaction_test PRIVATE include)
+    target_compile_options(kasumi_transaction_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_options(kasumi_transaction_test PRIVATE
+        -Wl,--wrap=syscall -Wl,--wrap=ioctl -Wl,--wrap=close)
+    add_test(NAME kasumi_transaction COMMAND kasumi_transaction_test)
     add_executable(kasumi_runtime_test
         tests/native/kasumi_runtime_test.cpp
         src/mount/kasumi.cpp
@@ -131,6 +140,7 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     )
     target_include_directories(kasumi_runtime_test PRIVATE include src)
     target_compile_options(kasumi_runtime_test PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_options(kasumi_runtime_test PRIVATE -Wl,--wrap=mount)
     if(ANDROID)
         target_link_libraries(kasumi_runtime_test PRIVATE z)
     else()
@@ -148,6 +158,16 @@ if(KAGAMI_BUILD_NATIVE_TESTS)
     target_include_directories(config_read_test PRIVATE include src)
     target_compile_options(config_read_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME config_read COMMAND config_read_test)
+    add_executable(kstat_config_test
+        tests/native/kstat_config_test.cpp
+        src/core/config.cpp
+        src/core/flat_json.cpp
+        src/core/runtime.cpp
+        src/core/log.cpp
+    )
+    target_include_directories(kstat_config_test PRIVATE include src)
+    target_compile_options(kstat_config_test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME kstat_config COMMAND kstat_config_test)
 
     add_executable(loop_image_test tests/native/loop_image_test.cpp src/core/runtime.cpp)
     target_include_directories(loop_image_test PRIVATE include src)

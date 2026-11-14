@@ -468,25 +468,15 @@ template <typename Mutation>
 bool mutate_policy_preserving_enabled(output::Context& destination,
                                       const kasumi::PolicyState& state,
                                       const std::string& operation, const Mutation& mutation) {
-    if (state.enabled && !kasumi::set_enabled(false)) {
-        output::err(destination,
-                    "failed to disable Kasumi before policy update: ", std::strerror(errno), "\n");
+    const auto capabilities = kasumi::control_capabilities();
+    if (!capabilities.ok) {
+        errno = capabilities.last_errno;
+        output::err(destination, "failed to query Kasumi policy capabilities\n");
         return false;
     }
-
+    (void)state;
     const bool changed = mutation();
     const int mutation_errno = errno;
-    if (state.enabled && !kasumi::set_enabled(true)) {
-        const int restore_errno = errno;
-        if (!changed) {
-            output::err(destination, "failed to ", operation, ": ", std::strerror(mutation_errno),
-                        "\n");
-        }
-        output::err(destination, "failed to re-enable Kasumi after policy update: ",
-                    std::strerror(restore_errno), "\n");
-        errno = restore_errno;
-        return false;
-    }
     if (!changed) {
         errno = mutation_errno;
         output::err(destination, "failed to ", operation, ": ", std::strerror(mutation_errno),
@@ -696,6 +686,15 @@ int apply_config_file(output::Context& destination, const fs::path& path,
             output::err(destination, "failed to replay persisted Kasumi configuration\n");
             return 1;
         }
+        return print_policy_json(destination);
+    }
+
+    bool atomic_applied = false;
+    if (!mount::kasumi::apply_atomic_config(config, error, atomic_applied)) {
+        output::err(destination, error, "\n");
+        return 1;
+    }
+    if (atomic_applied) {
         return print_policy_json(destination);
     }
 

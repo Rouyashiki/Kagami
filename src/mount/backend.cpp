@@ -498,11 +498,16 @@ MountReport mount_all_enabled_impl(const Config& config) {
 
     const bool manage_kasumi = config.kasumi_enabled && ::kagami::kasumi::is_available();
     bool kasumi_prepare_ok = true;
+    bool atomic_rebuild = false;
     if (manage_kasumi) {
         std::string error;
-        kasumi_prepare_ok = kasumi::deactivate(error);
+        kasumi_prepare_ok = kasumi::prepare_rebuild(config, error, atomic_rebuild);
         if (!kasumi_prepare_ok) {
             fsutil::mlog("kasumi: reset before rebuild failed: " + error, logging::Level::Error);
+            if (!config.kasumi_kstat_rules.empty()) {
+                report.detail = error;
+                return report;
+            }
         }
     }
 
@@ -583,7 +588,7 @@ MountReport mount_all_enabled_impl(const Config& config) {
             kasumi_rules_ok = false;
             fsutil::mlog("kasumi: failed to commit the boot mapping plan", logging::Level::Error);
         }
-        if (!kasumi_rules_ok || kasumi_set.empty()) {
+        if ((kasumi_rules_ok && kasumi_set.empty()) || (!kasumi_rules_ok && !atomic_rebuild)) {
             kasumi::clear_replayable_mappings();
         }
     } else {
@@ -593,8 +598,8 @@ MountReport mount_all_enabled_impl(const Config& config) {
     bool policy_ok = true;
     bool features_ok = true;
     if (manage_kasumi && kasumi_prepare_ok && kasumi_rules_ok) {
-        policy_ok = apply_kasumi_policy(config);
-        features_ok = policy_ok && apply_kasumi_features(config);
+        policy_ok = atomic_rebuild || apply_kasumi_policy(config);
+        features_ok = policy_ok && (atomic_rebuild || apply_kasumi_features(config));
     } else if (manage_kasumi) {
         policy_ok = false;
         features_ok = false;
@@ -602,10 +607,10 @@ MountReport mount_all_enabled_impl(const Config& config) {
     bool kasumi_ok =
         initial_kasumi_ok && kasumi_prepare_ok && policy_ok && features_ok && kasumi_rules_ok;
     if (manage_kasumi) {
-        if (!::kagami::kasumi::set_enabled(kasumi_ok)) {
+        if (!atomic_rebuild && !::kagami::kasumi::set_enabled(kasumi_ok)) {
             kasumi_ok = false;
         }
-        if (!kasumi_ok) {
+        if (!kasumi_ok && !atomic_rebuild) {
             std::string error;
             (void)kasumi::deactivate(error);
         }
@@ -700,25 +705,29 @@ bool refresh_kasumi_modules_impl(const Config& config) {
         return false;
     }
     std::string error;
-    const bool prepare_ok = kasumi::deactivate(error);
+    bool atomic_rebuild = false;
+    const bool prepare_ok = kasumi::prepare_rebuild(config, error, atomic_rebuild);
     if (!prepare_ok) {
         fsutil::mlog("kasumi: reset before refresh failed: " + error, logging::Level::Error);
+        if (!config.kasumi_kstat_rules.empty())
+            return false;
     } else {
         (void)module_runtime::assign_modules(assignments, "kasumi");
     }
     const bool mount_ok = prepare_ok && fsutil::run_in_init_mount_ns([&]() {
                               return kasumi::mount_modules(selected, config, rules);
                           });
-    const bool overlay_xattr_ok = mount_ok && fsutil::run_in_init_mount_ns([&]() {
-                                      return overlay::restore_xattr_hiding(config);
-                                  });
-    const bool policy_ok = overlay_xattr_ok && apply_kasumi_policy(config);
-    const bool features_ok = policy_ok && apply_kasumi_features(config);
+    const bool overlay_xattr_ok =
+        mount_ok && (atomic_rebuild || fsutil::run_in_init_mount_ns([&]() {
+                         return overlay::restore_xattr_hiding(config);
+                     }));
+    const bool policy_ok = overlay_xattr_ok && (atomic_rebuild || apply_kasumi_policy(config));
+    const bool features_ok = policy_ok && (atomic_rebuild || apply_kasumi_features(config));
     bool ok = prepare_ok && mount_ok && overlay_xattr_ok && policy_ok && features_ok;
-    if (!::kagami::kasumi::set_enabled(ok)) {
+    if (!atomic_rebuild && !::kagami::kasumi::set_enabled(ok)) {
         ok = false;
     }
-    if (!ok) {
+    if (!ok && !atomic_rebuild) {
         std::string cleanup_error;
         (void)kasumi::deactivate(cleanup_error);
     }

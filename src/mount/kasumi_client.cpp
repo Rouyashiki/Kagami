@@ -14,12 +14,19 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
 
 namespace kagami::kasumi {
+
+namespace {
+bool protocol_supported(int version) {
+    return version == KSM_PROTOCOL_VERSION;
+}
+}  // namespace
 
 static_assert(static_cast<std::uint32_t>(QuiesceState::Active) == KSM_QUIESCE_STATE_ACTIVE);
 static_assert(static_cast<std::uint32_t>(QuiesceState::Draining) == KSM_QUIESCE_STATE_DRAINING);
@@ -87,9 +94,9 @@ int execute(unsigned long cmd, void* arg) {
     }
     if (cmd != KSM_IOC_GET_VERSION && !s_protocol_checked) {
         int version = 0;
-        if (ioctl(fd, KSM_IOC_GET_VERSION, &version) != 0 || version != KSM_PROTOCOL_VERSION) {
-            const int saved_errno =
-                version != KSM_PROTOCOL_VERSION ? EPROTO : (errno != 0 ? errno : EIO);
+        const int version_result = ioctl(fd, KSM_IOC_GET_VERSION, &version);
+        if (version_result != 0 || !protocol_supported(version)) {
+            const int saved_errno = version_result != 0 ? (errno != 0 ? errno : EIO) : EPROTO;
             close(s_kasumi_fd);
             s_kasumi_fd = -1;
             s_protocol_checked = false;
@@ -126,6 +133,372 @@ bool ioctl_arg_ok(int rc, int arg_err) {
     return true;
 }
 }  // namespace
+
+static_assert(sizeof(kasumi_capabilities) == 64);
+static_assert(sizeof(kasumi_transaction) == 64);
+static_assert(sizeof(kasumi_transaction_rule) == 24);
+static_assert(sizeof(kasumi_transaction_stage) == 24);
+static_assert(sizeof(kasumi_transaction_configuration) == 112);
+static_assert(sizeof(kasumi_transaction_maps_rule) == 296);
+
+namespace {
+int control_request(int fd, unsigned long command, void* argument) {
+#if defined(__linux__)
+    if (fd >= 0)
+        return ioctl(fd, command, argument);
+#else
+    (void)fd;
+#endif
+    return execute(command, argument);
+}
+
+ControlCapabilities read_control_capabilities(int fd) {
+    ControlCapabilities result;
+    if (control_request(fd, KSM_IOC_GET_VERSION, &result.protocol) != 0) {
+        result.last_errno = errno != 0 ? errno : EIO;
+        return result;
+    }
+    if (!protocol_supported(result.protocol)) {
+        result.last_errno = EPROTO;
+        return result;
+    }
+    kasumi_capabilities capabilities{};
+    capabilities.size = sizeof(capabilities);
+    capabilities.version = KSM_CAPABILITIES_VERSION;
+    if (control_request(fd, KSM_IOC_GET_CAPABILITIES, &capabilities) != 0) {
+        result.last_errno = errno != 0 ? errno : EIO;
+        return result;
+    }
+    if (capabilities.size != sizeof(capabilities) ||
+        capabilities.version != KSM_CAPABILITIES_VERSION ||
+        ((capabilities.capabilities & KSM_CAP_ATOMIC_PATH_RULES) &&
+         (!capabilities.max_stage || !capabilities.max_operations || !capabilities.max_bytes))) {
+        result.last_errno = EPROTO;
+        return result;
+    }
+    result.ok = true;
+    result.capabilities = capabilities.capabilities;
+    result.generation = capabilities.generation;
+    result.operations = capabilities.operations;
+    result.max_stage = capabilities.max_stage;
+    result.max_operations = capabilities.max_operations;
+    result.max_bytes = capabilities.max_bytes;
+    return result;
+}
+
+int open_transaction_fd() {
+#if defined(__linux__)
+    int fd = -1;
+    errno = 0;
+    syscall(SYS_reboot, KSM_MAGIC1, KSM_MAGIC2, KSM_CMD_GET_FD, &fd);
+    if (fd < 0 && errno == 0)
+        errno = ENODEV;
+    return fd;
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+class RuleTransaction {
+public:
+    explicit RuleTransaction(int fd) : fd_(fd) {}
+    RuleTransaction(const RuleTransaction&) = delete;
+    RuleTransaction& operator=(const RuleTransaction&) = delete;
+    RuleTransaction(RuleTransaction&&) = delete;
+    RuleTransaction& operator=(RuleTransaction&&) = delete;
+    ~RuleTransaction() {
+        const int saved_errno = errno;
+        if (started_ && !committed_) {
+            if (!status_.id)
+                (void)query();
+            if (status_.id)
+                (void)control_request(fd_, KSM_IOC_ABORT_TRANSACTION, &status_);
+        }
+#if defined(__linux__)
+        close(fd_);
+#endif
+        errno = saved_errno;
+    }
+
+    bool begin(std::uint64_t generation, std::uint32_t flags) {
+        status_.size = sizeof(status_);
+        status_.flags = flags;
+        status_.expected_generation = generation;
+        started_ = true;
+        const int result = control_request(fd_, KSM_IOC_BEGIN_TRANSACTION, &status_);
+        const int error = errno != 0 ? errno : EIO;
+        if (result != 0 && !query(true)) {
+            errno = error;
+            return false;
+        }
+        if (!status_.id || status_.state != KSM_TX_STATE_STAGING) {
+            errno = status_.error ? -status_.error : EPROTO;
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool stage(const std::vector<PathRule>& rules, std::uint32_t maximum) const {
+        const auto chunk_size = std::min(maximum, KSM_TX_MAX_STAGE);
+        std::vector<kasumi_transaction_rule> chunk;
+        chunk.reserve(chunk_size);
+        for (std::size_t offset = 0; offset < rules.size(); offset += chunk.size()) {
+            chunk.clear();
+            const auto count = std::min<std::size_t>(chunk_size, rules.size() - offset);
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& rule = rules[offset + i];
+                chunk.push_back({static_cast<__u32>(rule.operation), rule.flags,
+                                 reinterpret_cast<std::uintptr_t>(rule.path.c_str()),
+                                 rule.source.empty()
+                                     ? 0
+                                     : reinterpret_cast<std::uintptr_t>(rule.source.c_str())});
+            }
+            kasumi_transaction_stage request{};
+            request.size = sizeof(request);
+            request.count = static_cast<__u32>(chunk.size());
+            request.id = status_.id;
+            request.rules = reinterpret_cast<std::uintptr_t>(chunk.data());
+            if (control_request(fd_, KSM_IOC_STAGE_TRANSACTION, &request) != 0)
+                return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool configure(const TransactionConfiguration& configuration) const {
+        if (!configuration.fields)
+            return true;
+        std::vector<kasumi_transaction_maps_rule> maps;
+        maps.reserve(configuration.maps.size());
+        for (const auto& rule : configuration.maps) {
+            kasumi_transaction_maps_rule entry{};
+            entry.fields = rule.fields;
+            entry.match_flags = rule.match_flags;
+            entry.target_ino = rule.target_ino;
+            entry.target_dev = rule.target_dev;
+            entry.spoofed_ino = rule.spoofed_ino;
+            entry.spoofed_dev = rule.spoofed_dev;
+            std::memcpy(entry.spoofed_pathname, rule.spoofed_path.c_str(),
+                        rule.spoofed_path.size() + 1);
+            maps.push_back(entry);
+        }
+        std::vector<kasumi_transaction_kstat_rule> kstat;
+        kstat.reserve(configuration.kstat.size());
+        for (const auto& rule : configuration.kstat) {
+            kasumi_transaction_kstat_rule entry{};
+            entry.fields = rule.fields;
+            entry.match_flags = rule.match_flags;
+            entry.target_ino = rule.target_ino;
+            entry.target_dev = rule.target_dev;
+            entry.spoofed_ino = rule.spoofed_ino;
+            entry.spoofed_dev = rule.spoofed_dev;
+            entry.spoofed_nlink = rule.spoofed_nlink;
+            entry.spoofed_size = rule.spoofed_size;
+            entry.spoofed_atime_sec = rule.spoofed_atime_sec;
+            entry.spoofed_atime_nsec = rule.spoofed_atime_nsec;
+            entry.spoofed_mtime_sec = rule.spoofed_mtime_sec;
+            entry.spoofed_mtime_nsec = rule.spoofed_mtime_nsec;
+            entry.spoofed_ctime_sec = rule.spoofed_ctime_sec;
+            entry.spoofed_ctime_nsec = rule.spoofed_ctime_nsec;
+            entry.spoofed_blksize = rule.spoofed_blksize;
+            entry.spoofed_blocks = rule.spoofed_blocks;
+            std::memcpy(entry.target_pathname, rule.target_path.c_str(),
+                        rule.target_path.size() + 1);
+            kstat.push_back(entry);
+        }
+        kasumi_transaction_configuration request{};
+        request.size = sizeof(request);
+        request.id = status_.id;
+        request.fields = configuration.fields;
+        request.enabled = configuration.enabled;
+        request.features = configuration.features;
+        request.stealth = configuration.stealth;
+        request.debug = configuration.debug;
+        request.policy_owner = configuration.policy_owner;
+        request.policy_flags = configuration.policy_flags;
+        request.allow_count = static_cast<__u32>(configuration.allow_uids.size());
+        request.deny_count = static_cast<__u32>(configuration.deny_uids.size());
+        request.allow_uids =
+            configuration.allow_uids.empty()
+                ? 0
+                : reinterpret_cast<std::uintptr_t>(configuration.allow_uids.data());
+        request.deny_uids = configuration.deny_uids.empty()
+                                ? 0
+                                : reinterpret_cast<std::uintptr_t>(configuration.deny_uids.data());
+        request.maps_count = static_cast<__u32>(maps.size());
+        request.maps_rules = maps.empty() ? 0 : reinterpret_cast<std::uintptr_t>(maps.data());
+        request.kstat_count = static_cast<__u32>(kstat.size());
+        request.kstat_rules = kstat.empty() ? 0 : reinterpret_cast<std::uintptr_t>(kstat.data());
+        return control_request(fd_, KSM_IOC_STAGE_CONFIGURATION, &request) == 0;
+    }
+
+    bool commit() {
+        const int result = control_request(fd_, KSM_IOC_COMMIT_TRANSACTION, &status_);
+        const int error = errno != 0 ? errno : EIO;
+        if (result != 0 && !query(true)) {
+            errno = error;
+            return false;
+        }
+        committed_ = status_.state == KSM_TX_STATE_COMMITTED;
+        if (!committed_) {
+            const int fallback = result != 0 ? error : EPROTO;
+            errno = status_.error ? -status_.error : fallback;
+        }
+        return committed_;
+    }
+
+private:
+    bool query(bool latest = false) {
+        kasumi_transaction request{};
+        request.size = sizeof(request);
+        request.id = latest ? 0 : status_.id;
+        if (control_request(fd_, KSM_IOC_QUERY_TRANSACTION, &request) != 0)
+            return false;
+        if (request.size != sizeof(request) || !request.id) {
+            errno = EPROTO;
+            return false;
+        }
+        status_ = request;
+        return true;
+    }
+
+    int fd_;
+    kasumi_transaction status_{};
+    bool started_ = false;
+    bool committed_ = false;
+};
+}  // namespace
+
+ControlCapabilities control_capabilities() {
+    return read_control_capabilities(-1);
+}
+
+namespace {
+bool commit_transaction_once(const std::vector<PathRule>& rules,
+                                    const TransactionConfiguration& configuration,
+                                    std::uint32_t flags) {
+    const int fd = open_transaction_fd();
+    if (fd < 0)
+        return false;
+    RuleTransaction transaction(fd);
+    const auto capabilities = read_control_capabilities(fd);
+    std::uint64_t required = 0;
+    if (!rules.empty() || flags)
+        required |= KSM_CAP_ATOMIC_PATH_RULES;
+    if (configuration.fields & KSM_TX_CONFIG_SETTINGS)
+        required |= KSM_CAP_ATOMIC_SETTINGS;
+    if (configuration.fields & (KSM_TX_CONFIG_POLICY | KSM_TX_CONFIG_RESET_POLICY))
+        required |= KSM_CAP_ATOMIC_POLICY;
+    if (configuration.fields & KSM_TX_CONFIG_MAPS)
+        required |= KSM_CAP_ATOMIC_MAPS;
+    if (configuration.fields & KSM_TX_CONFIG_KSTAT)
+        required |= KSM_CAP_ATOMIC_KSTAT;
+    if (!capabilities.ok || capabilities.protocol != KSM_PROTOCOL_VERSION ||
+        (capabilities.capabilities & required) != required) {
+        errno = capabilities.ok ? EOPNOTSUPP : capabilities.last_errno;
+        return false;
+    }
+    if ((flags & ~(KSM_TX_REPLACE_PATH_RULES | KSM_TX_REPLACE_XATTR_RULES)) ||
+        (configuration.fields &
+         ~(KSM_TX_CONFIG_SETTINGS | KSM_TX_CONFIG_POLICY | KSM_TX_CONFIG_MAPS |
+           KSM_TX_CONFIG_KSTAT | KSM_TX_CONFIG_RESET_POLICY))) {
+        errno = EINVAL;
+        return false;
+    }
+    if (configuration.allow_uids.size() > UINT32_MAX ||
+        configuration.deny_uids.size() > UINT32_MAX || configuration.maps.size() > UINT32_MAX ||
+        configuration.kstat.size() > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return false;
+    }
+    for (const auto& rule : configuration.maps) {
+        if ((rule.fields & ~KSM_MAPS_FIELDS_ALL) || (rule.match_flags & ~KSM_MATCH_ANY_DEVICE) ||
+            rule.spoofed_path.size() >= KSM_MAX_LEN_PATHNAME ||
+            rule.spoofed_path.find('\0') != std::string::npos) {
+            errno = EINVAL;
+            return false;
+        }
+    }
+    if (!configuration.kstat.empty() && !(configuration.fields & KSM_TX_CONFIG_KSTAT)) {
+        errno = EINVAL;
+        return false;
+    }
+    for (const auto& rule : configuration.kstat) {
+        if ((rule.target_path.empty() && !rule.target_ino) ||
+            (!rule.target_path.empty() && rule.target_path.front() != '/') ||
+            rule.target_path.size() >= KSM_MAX_LEN_PATHNAME ||
+            rule.target_path.find('\0') != std::string::npos ||
+            (rule.fields & ~KSM_KSTAT_FIELDS_ALL) || (rule.match_flags & ~KSM_MATCH_ANY_DEVICE) ||
+            rule.target_dev > UINT32_MAX || rule.spoofed_dev > UINT32_MAX ||
+            rule.spoofed_nlink > UINT32_MAX || rule.spoofed_blksize > UINT32_MAX ||
+            ((rule.fields & KSM_KSTAT_FIELD_ATIME) && rule.spoofed_atime_nsec >= 1000000000) ||
+            ((rule.fields & KSM_KSTAT_FIELD_MTIME) && rule.spoofed_mtime_nsec >= 1000000000) ||
+            ((rule.fields & KSM_KSTAT_FIELD_CTIME) && rule.spoofed_ctime_nsec >= 1000000000)) {
+            errno = EINVAL;
+            return false;
+        }
+    }
+    if (configuration.maps.size() > capabilities.max_operations ||
+        configuration.kstat.size() > capabilities.max_operations ||
+        configuration.allow_uids.size() > 1024 || configuration.deny_uids.size() > 1024) {
+        errno = E2BIG;
+        return false;
+    }
+    std::uint64_t bytes = 0;
+    if (configuration.fields & KSM_TX_CONFIG_POLICY)
+        bytes += (configuration.allow_uids.size() + configuration.deny_uids.size()) * sizeof(__u32);
+    if (configuration.fields & KSM_TX_CONFIG_MAPS)
+        bytes += configuration.maps.size() * sizeof(kasumi_transaction_maps_rule);
+    if (configuration.fields & KSM_TX_CONFIG_KSTAT)
+        bytes += configuration.kstat.size() * sizeof(kasumi_transaction_kstat_rule);
+    if (bytes > capabilities.max_bytes) {
+        errno = E2BIG;
+        return false;
+    }
+    if (rules.size() > capabilities.max_operations) {
+        errno = E2BIG;
+        return false;
+    }
+    for (const auto& rule : rules) {
+        const bool source_required =
+            rule.operation == PathOperation::Redirect || rule.operation == PathOperation::Merge;
+        if (rule.path.empty() || rule.path.front() != '/' ||
+            rule.path.find('\0') != std::string::npos || source_required != !rule.source.empty() ||
+            (!rule.source.empty() &&
+             (rule.source.front() != '/' || rule.source.find('\0') != std::string::npos)) ||
+            (rule.flags & ~KSM_RULE_FLAGS_MASK) ||
+            (rule.flags && (rule.operation == PathOperation::Delete ||
+                            rule.operation == PathOperation::HideXattrs))) {
+            errno = EINVAL;
+            return false;
+        }
+        const auto operation = static_cast<std::uint32_t>(rule.operation);
+        if (operation >= 64 || !(capabilities.operations & (1ULL << operation))) {
+            errno = EOPNOTSUPP;
+            return false;
+        }
+    }
+    return transaction.begin(capabilities.generation, flags) &&
+           transaction.configure(configuration) &&
+           transaction.stage(rules, capabilities.max_stage) && transaction.commit();
+}
+
+}  // namespace
+
+bool commit_transaction(const std::vector<PathRule>& rules,
+                        const TransactionConfiguration& configuration, std::uint32_t flags) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (commit_transaction_once(rules, configuration, flags))
+            return true;
+        if (errno != EAGAIN)
+            return false;
+    }
+    return false;
+}
+
+bool replace_path_rules(const std::vector<PathRule>& rules) {
+    return commit_transaction(rules, {}, KSM_TX_REPLACE_PATH_RULES);
+}
 
 VersionInfo version_info() {
     VersionInfo info;
@@ -227,8 +600,8 @@ ActiveRulesSnapshot decode_active_rules(const std::string& text) {
         return result;
     }
     const std::string header = "Kasumi Protocol: " + std::to_string(KSM_PROTOCOL_VERSION) + "\n";
-    if (text.empty() || text.back() != '\n' || text.find('\0') != std::string::npos ||
-        text.compare(0, header.size(), header) != 0) {
+    if (text.compare(0, header.size(), header) != 0 || text.empty() || text.back() != '\n' ||
+        text.find('\0') != std::string::npos) {
         result.last_errno = EPROTO;
         return result;
     }
@@ -303,8 +676,12 @@ int features() {
 
 std::vector<std::string> feature_names(int bitmask) {
     std::vector<std::string> names;
+    if (bitmask & KSM_FEATURE_SAFE_RULE_RETIRE)
+        names.emplace_back("safe_rule_retire");
     if (bitmask & KSM_FEATURE_RULE_BYPASS)
         names.emplace_back("rule_bypass");
+    if (bitmask & KSM_FEATURE_MANAGED_HIDE)
+        names.emplace_back("managed_hide");
     if (bitmask & KSM_FEATURE_MOUNT_HIDE)
         names.emplace_back("mount_hide");
     if (bitmask & KSM_FEATURE_MAPS_SPOOF)
@@ -317,6 +694,8 @@ std::vector<std::string> feature_names(int bitmask) {
         names.emplace_back("merge_dir");
     if (bitmask & KSM_FEATURE_SELINUX_BYPASS)
         names.emplace_back("selinux_bypass");
+    if (bitmask & KSM_FEATURE_OVERLAY_XATTR_HIDE)
+        names.emplace_back("overlay_xattr_hide");
     if (bitmask & KSM_FEATURE_FAKE_MOUNTINFO)
         names.emplace_back("fake_mountinfo");
     if (bitmask & KSM_FEATURE_SELINUX_FIX)
@@ -617,29 +996,31 @@ bool replace_policy(PolicyOwner owner, std::uint32_t flags, bounded::Span<std::u
         errno = EOVERFLOW;
         return false;
     }
-    kasumi_policy_replace_arg arg = {};
-    arg.version = KSM_POLICY_API_VERSION;
-    arg.size = sizeof(arg);
-    arg.owner = static_cast<std::uint32_t>(owner);
-    arg.flags = flags;
-    arg.allow_count = static_cast<std::uint32_t>(allow_uids.size());
-    arg.deny_count = static_cast<std::uint32_t>(deny_uids.size());
-    arg.allow_uids =
-        allow_uids.empty()
-            ? 0
-            : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(allow_uids.data()));
-    arg.deny_uids =
-        deny_uids.empty()
-            ? 0
-            : static_cast<__aligned_u64>(reinterpret_cast<std::uintptr_t>(deny_uids.data()));
-    return ioctl_arg_ok(execute(KSM_IOC_REPLACE_POLICY, &arg), arg.err);
+    const auto capabilities = control_capabilities();
+    if (!capabilities.ok) {
+        errno = capabilities.last_errno;
+        return false;
+    }
+    TransactionConfiguration configuration;
+    configuration.fields = KSM_TX_CONFIG_POLICY;
+    configuration.policy_owner = static_cast<std::uint32_t>(owner);
+    configuration.policy_flags = flags;
+    if (!allow_uids.empty())
+        configuration.allow_uids.assign(allow_uids.begin(), allow_uids.end());
+    if (!deny_uids.empty())
+        configuration.deny_uids.assign(deny_uids.begin(), deny_uids.end());
+    return commit_transaction({}, configuration, 0);
 }
 
 bool reset_policy() {
-    kasumi_policy_config_arg arg = {};
-    arg.version = KSM_POLICY_API_VERSION;
-    arg.size = sizeof(arg);
-    return ioctl_arg_ok(execute(KSM_IOC_RESET_POLICY, &arg), arg.err);
+    const auto capabilities = control_capabilities();
+    if (!capabilities.ok) {
+        errno = capabilities.last_errno;
+        return false;
+    }
+    TransactionConfiguration configuration;
+    configuration.fields = KSM_TX_CONFIG_RESET_POLICY;
+    return commit_transaction({}, configuration, 0);
 }
 
 }  // namespace kagami::kasumi

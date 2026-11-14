@@ -786,20 +786,27 @@ bool unmount_all(const Config& config) {
     return ok;
 }
 
-bool restore_xattr_hiding(const Config& config) {
+bool xattr_hiding_paths(const Config& config, std::vector<std::string>& paths) {
+    paths.clear();
     std::vector<fsutil::MountRecord> records;
     bool legacy;
     if (!fsutil::read_mount_journal(overlay_journal(), records, legacy) || legacy)
         return false;
-    if (!config.enable_overlay_xattr_hide) {
+    if (!config.enable_overlay_xattr_hide)
         return true;
-    }
-    if (!config.kasumi_enabled || !::kagami::kasumi::is_available()) {
+    if (!config.kasumi_enabled || !::kagami::kasumi::is_available())
         return false;
-    }
+    paths = our_overlays(config.mount_source);
+    return true;
+}
+
+bool restore_xattr_hiding(const Config& config) {
+    std::vector<std::string> paths;
+    if (!xattr_hiding_paths(config, paths))
+        return false;
 
     bool ok = true;
-    for (const auto& target : our_overlays(config.mount_source)) {
+    for (const auto& target : paths) {
         if (!::kagami::kasumi::hide_overlay_xattrs(target)) {
             mlog("overlay: failed to restore xattr hiding for " + target, logging::Level::Error);
             ok = false;

@@ -4,6 +4,7 @@
 #include "mount/kasumi.hpp"
 #include "mount/module_runtime.hpp"
 
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -20,6 +21,13 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+extern "C" int __wrap_mount(const char* source, const char* target, const char* type,
+                            unsigned long flags, const void* data) {
+    if (source || std::string(target) != "/" || type || flags != (MS_REC | MS_PRIVATE) || data)
+        std::abort();
+    return 0;
+}
 
 namespace fs = std::filesystem;
 namespace runtime = kagami::mount::module_runtime;
@@ -51,6 +59,13 @@ struct Kernel {
     std::vector<std::string> add_requests;
     std::string rejected_source;
     bool enabled = true;
+    bool atomic = true;
+    int transactions = 0;
+    std::vector<std::string> xattrs;
+    kagami::kasumi::TransactionConfiguration configuration;
+    int available_features =
+        KSM_FEATURE_MOUNT_HIDE | KSM_FEATURE_MAPS_SPOOF | KSM_FEATURE_STATFS_SPOOF;
+    bool configuration_failure = false;
 } kernel;
 
 std::string resolved(const std::string& path) {
@@ -241,13 +256,15 @@ void test_failed_alias_replacement() {
     fs::create_symlink("real", fixture.stock / "alias");
     file(fixture.payload("a", "alias"));
     file(fixture.payload("z", "real"));
+    require(fixture.mount({"z"}), "publish original generation");
     kernel.rejected_source = fixture.payload("a", "alias").string();
     require(!fixture.mount({"a", "z"}), "report replacement failure");
     require(kernel.adds.size() == 1 &&
                 kernel.adds.begin()->second == fixture.payload("z", "real").string(),
             "prior rule survives failure");
-    state("a", "unmounted");
-    state("z", "mounted");
+    require(kernel.transactions == 1, "failed batch does not publish a generation");
+    state("a", "unknown");
+    state("z", "unknown");
 }
 void test_merge_and_hide_aliases() {
     Fixture fixture;
@@ -596,7 +613,79 @@ ModuleModes load_module_modes(int& error, const char* name) {
 }
 }  // namespace kagami::mount
 
+namespace kagami::mount::overlay {
+bool xattr_hiding_paths(const Config& config, std::vector<std::string>& paths) {
+    paths = config.enable_overlay_xattr_hide ? std::vector<std::string>{"/fixture-overlay"}
+                                             : std::vector<std::string>{};
+    return true;
+}
+}  // namespace kagami::mount::overlay
+
 namespace kagami::kasumi {
+ControlCapabilities control_capabilities() {
+    ControlCapabilities result;
+    result.ok = kernel.atomic;
+    result.last_errno = kernel.atomic ? 0 : EPROTO;
+    result.protocol = kernel.atomic ? KSM_PROTOCOL_VERSION : 18;
+    result.capabilities = kernel.atomic ? KSM_CAP_ATOMIC_PATH_RULES | KSM_CAP_ATOMIC_SETTINGS |
+                                              KSM_CAP_ATOMIC_POLICY | KSM_CAP_ATOMIC_MAPS |
+                                              KSM_CAP_ATOMIC_KSTAT
+                                        : 0;
+    return result;
+}
+
+FeatureCapabilities feature_capabilities() {
+    FeatureCapabilities result;
+    result.ok = true;
+    result.bitmask = kernel.available_features;
+    return result;
+}
+std::vector<std::string> feature_names(int) {
+    return {"unsupported-fixture-feature"};
+}
+bool commit_transaction(const std::vector<PathRule>& rules,
+                        const TransactionConfiguration& configuration, std::uint32_t flags) {
+    const auto previous = kernel;
+    if (kernel.configuration_failure) {
+        errno = ENOMEM;
+        return false;
+    }
+    if (flags & KSM_TX_REPLACE_PATH_RULES)
+        clear_rules();
+    if (flags & (KSM_TX_REPLACE_PATH_RULES | KSM_TX_REPLACE_XATTR_RULES))
+        kernel.xattrs.clear();
+    for (const auto& rule : rules) {
+        bool ok = false;
+        switch (rule.operation) {
+        case PathOperation::Redirect:
+            ok = add_rule(rule.path, rule.source, rule.flags);
+            break;
+        case PathOperation::Merge:
+            ok = add_merge_rule(rule.path, rule.source, rule.flags);
+            break;
+        case PathOperation::Hide:
+            ok = hide_path(rule.path, rule.flags);
+            break;
+        case PathOperation::Delete:
+            ok = delete_rule(rule.path);
+            break;
+        case PathOperation::HideXattrs:
+            kernel.xattrs.push_back(rule.path);
+            ok = true;
+            break;
+        }
+        if (!ok) {
+            kernel = previous;
+            return false;
+        }
+    }
+    kernel.configuration = configuration;
+    if (configuration.fields & KSM_TX_CONFIG_SETTINGS)
+        kernel.enabled = configuration.enabled;
+    ++kernel.transactions;
+    return true;
+}
+
 bool is_available() {
     return true;
 }
@@ -668,6 +757,99 @@ bool delete_rule(const std::string& path) {
 }
 }  // namespace kagami::kasumi
 
+namespace {
+void test_atomic_rebuild() {
+    Fixture fixture;
+    const auto target = fixture.stock / "entry";
+    const auto payload = fixture.payload("module", "entry");
+    file(target);
+    file(payload);
+    require(fixture.mount({"module"}), "publish initial API 19 mapping");
+    bool atomic = true;
+    std::string error;
+    require(backend::prepare_rebuild(fixture.config, error, atomic) && atomic, "negotiate atomic rebuild");
+    require(kernel.enabled && kernel.adds.size() == 1, "prepare retains current view");
+    kernel.rejected_source = payload.string();
+    require(!fixture.mount({"module"}), "reject failed atomic replacement");
+    require(kernel.enabled && kernel.adds.at(target.string()) == payload.string() &&
+                backend::is_active() && kernel.transactions == 1,
+            "failed transaction retains old rules and active marker");
+
+    kernel.rejected_source.clear();
+    fixture.config.enable_overlay_xattr_hide = true;
+    std::ofstream(fixture.root / "user_hide_rules.json")
+        << '[' << kagami::json_quote(target.string()) << ']';
+    require(fixture.mount({"module"}), "commit mappings, hides and xattrs together");
+    require(kernel.transactions == 2 && kernel.hides.count(target.string()) == 1 &&
+                kernel.xattrs == std::vector<std::string>{"/fixture-overlay"},
+            "atomic publication includes persisted hides and overlay xattrs");
+    require(kernel.configuration.fields == (KSM_TX_CONFIG_SETTINGS | KSM_TX_CONFIG_POLICY |
+                                            KSM_TX_CONFIG_MAPS | KSM_TX_CONFIG_KSTAT),
+            "full rebuild publishes settings, policy and clears maps");
+    require(kernel.configuration.enabled == fixture.config.kasumi_enabled &&
+                !(kernel.configuration.features & KSM_FEATURE_SELINUX_FIX),
+            "settings include desired enable state and supported feature mask");
+    kasumi_transaction_kstat_rule kstat{};
+    kstat.fields = KSM_KSTAT_FIELDS_ALL;
+    kstat.match_flags = KSM_MATCH_ANY_DEVICE;
+    kstat.target_ino = UINT64_C(9007199254740993);
+    kstat.spoofed_ino = UINT64_MAX;
+    fixture.config.kasumi_kstat_rules = {&kstat, 1};
+    bool applied = false;
+    fixture.config.enable_overlay_xattr_hide = false;
+    fixture.config.enable_kernel_debug = true;
+    require(backend::apply_atomic_config(fixture.config, error, applied) && applied,
+            "configuration-only atomic publication");
+    require(kernel.adds.at(target.string()) == payload.string() && kernel.xattrs.empty() &&
+                kernel.configuration.debug &&
+                !(kernel.configuration.fields & KSM_TX_CONFIG_MAPS) &&
+                (kernel.configuration.fields & KSM_TX_CONFIG_KSTAT),
+            "configuration-only keeps module mappings and maps while clearing xattrs");
+    require(kernel.configuration.kstat.size() == 1 &&
+                kernel.configuration.kstat[0].fields == KSM_KSTAT_FIELDS_ALL &&
+                kernel.configuration.kstat[0].match_flags == KSM_MATCH_ANY_DEVICE &&
+                kernel.configuration.kstat[0].target_ino == kstat.target_ino &&
+                kernel.configuration.kstat[0].spoofed_ino == UINT64_MAX &&
+                kernel.configuration.kstat[0].spoofed_size == 0,
+            "configuration apply carries nonempty exact kstat fields and explicit zeros");
+    kernel.configuration_failure = true;
+    fixture.config.enable_kernel_debug = false;
+    fixture.config.kasumi_kstat_rules = {};
+    require(!backend::apply_atomic_config(fixture.config, error, applied) && applied,
+            "configuration failure propagates");
+    require(kernel.configuration.debug && kernel.configuration.kstat.size() == 1 &&
+                kernel.adds.at(target.string()) == payload.string(),
+            "configuration failure keeps complete previous generation");
+    kernel.configuration_failure = false;
+    require(fixture.mount({}), "commit empty module set");
+    require(kernel.transactions == 4 && kernel.adds.empty() && kernel.merges.empty() &&
+                kernel.hides.count(target.string()) == 1,
+            "empty replacement retires mappings and preserves persisted hides");
+
+    require(kernel.configuration.kstat.empty(), "successful full rebuild clears configured kstat table");
+    fixture.config.kasumi_kstat_rules = {&kstat, 1};
+    require(fixture.mount({}), "full rebuild installs nonempty kstat table");
+    require(kernel.configuration.kstat.size() == 1 &&
+                kernel.configuration.kstat[0].target_ino == kstat.target_ino,
+            "full rebuild preserves nonempty kstat values");
+    kernel.atomic = false;
+    const auto transactions = kernel.transactions;
+    require(!backend::prepare_rebuild(fixture.config, error, atomic) && errno == EPROTO &&
+                !atomic && kernel.enabled && kernel.transactions == transactions,
+            "API 18 preflight rejects nonempty kstat before reset");
+    require(!backend::apply_atomic_config(fixture.config, error, applied) && errno == EPROTO &&
+                !applied && kernel.enabled,
+            "API 18 config apply rejects nonempty kstat before legacy changes");
+    require(!backend::mount_modules({}, fixture.config, {}) && errno == EPROTO && kernel.enabled,
+            "API 18 direct rebuild rejects nonempty kstat before legacy changes");
+    fixture.config.kasumi_kstat_rules = {};
+    require(!backend::prepare_rebuild(fixture.config, error, atomic) && !atomic && errno == EPROTO,
+            "API 18 rejects empty configuration too");
+    require(kernel.enabled && kernel.transactions == transactions,
+            "protocol mismatch preserves state");
+}
+}  // namespace
+
 int main() {
     try {
         test_bypass_scope();
@@ -685,6 +867,7 @@ int main() {
         test_whiteout_alias_priority();
         test_whiteout_special_siblings();
         test_virtual_whiteouts_in_lower_merge();
+        test_atomic_rebuild();
         std::cout << "Kasumi runtime alias fixtures passed\n";
         return 0;
     } catch (const std::exception& error) {
