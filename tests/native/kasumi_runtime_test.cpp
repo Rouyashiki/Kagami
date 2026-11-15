@@ -767,7 +767,8 @@ void test_atomic_rebuild() {
     require(fixture.mount({"module"}), "publish initial API 19 mapping");
     bool atomic = true;
     std::string error;
-    require(backend::prepare_rebuild(fixture.config, error, atomic) && atomic, "negotiate atomic rebuild");
+    require(backend::prepare_rebuild(fixture.config, error, atomic) && atomic,
+            "negotiate atomic rebuild");
     require(kernel.enabled && kernel.adds.size() == 1, "prepare retains current view");
     kernel.rejected_source = payload.string();
     require(!fixture.mount({"module"}), "reject failed atomic replacement");
@@ -801,8 +802,7 @@ void test_atomic_rebuild() {
     require(backend::apply_atomic_config(fixture.config, error, applied) && applied,
             "configuration-only atomic publication");
     require(kernel.adds.at(target.string()) == payload.string() && kernel.xattrs.empty() &&
-                kernel.configuration.debug &&
-                !(kernel.configuration.fields & KSM_TX_CONFIG_MAPS) &&
+                kernel.configuration.debug && !(kernel.configuration.fields & KSM_TX_CONFIG_MAPS) &&
                 (kernel.configuration.fields & KSM_TX_CONFIG_KSTAT),
             "configuration-only keeps module mappings and maps while clearing xattrs");
     require(kernel.configuration.kstat.size() == 1 &&
@@ -826,7 +826,8 @@ void test_atomic_rebuild() {
                 kernel.hides.count(target.string()) == 1,
             "empty replacement retires mappings and preserves persisted hides");
 
-    require(kernel.configuration.kstat.empty(), "successful full rebuild clears configured kstat table");
+    require(kernel.configuration.kstat.empty(),
+            "successful full rebuild clears configured kstat table");
     fixture.config.kasumi_kstat_rules = {&kstat, 1};
     require(fixture.mount({}), "full rebuild installs nonempty kstat table");
     require(kernel.configuration.kstat.size() == 1 &&
