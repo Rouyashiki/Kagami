@@ -98,6 +98,7 @@ jobs:
           - android14-6.1
           - android15-6.6
           - android16-6.12
+          - android17-6.18
     steps:
       - name: Checkout Kagami
         uses: actions/checkout@v5
@@ -164,7 +165,7 @@ jobs:
           mkdir -p module/kasumi
           for kmi in \
             android12-5.10 android13-5.10 android13-5.15 android14-5.15 \
-            android14-6.1 android15-6.6 android16-6.12; do
+            android14-6.1 android15-6.6 android16-6.12 android17-6.18; do
             asset="lkm/${kmi}_arm64_kasumi_lkm.ko"
             test -s "$asset"
             cp "$asset" module/kasumi/
