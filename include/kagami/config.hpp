@@ -48,6 +48,7 @@ struct Config {
     // writable upper/work layer is opt-in: it breaks early-boot vendor/system init
     // on some devices (SELinux-denied writes through the overlay -> RIL fails).
     bool overlay_writable = false;
+    bool enable_nuke = true;
     Arguments partitions;
     bool debug = false;
     bool verbose = false;

@@ -96,6 +96,17 @@ bool make_ext4_image(const std::string& img, int size_mb) {
     return true;
 }
 
+bool nuke_ext4_sysfs(const std::string& path) {
+    for (const char* ksud : {"/data/adb/ksud", "/data/adb/ksu/bin/ksud"}) {
+        if (access(ksud, X_OK) == 0) {
+            return run_tool({ksud, "kernel", "nuke-ext4-sysfs", path});
+        }
+    }
+    mlog("storage: ksud unavailable; ext4 sysfs remains visible for " + path,
+         logging::Level::Warning);
+    return true;
+}
+
 // Make a mount private and register it with KernelSU for per-app unmount.
 bool finalize(const std::string& dir) {
     return ::mount("none", dir.c_str(), nullptr, MS_PRIVATE, nullptr) == 0 &&
@@ -414,6 +425,10 @@ Handle setup(const Config& config) {
     }
     if (!finalize(h.content_dir))
         return Handle{};
+    if (config.enable_nuke && !nuke_ext4_sysfs(h.content_dir)) {
+        mlog("storage: nuke ext4 sysfs failed for " + h.content_dir, logging::Level::Error);
+        return Handle{};
+    }
     h.mode = Mode::Ext4;
     if (!record_mirror(config, base, h.mode == Mode::Erofs ? h.rw_dir : ""))
         return Handle{};

@@ -213,6 +213,7 @@ void apply_config_document(json::Value root, Config& config) {
             ? json_int_or(root, "mirror_img_size_mb", config.mirror_img_size_mb)
             : json_int_or(root, "overlay_img_size_mb", config.mirror_img_size_mb);
     config.overlay_writable = json_bool_or(root, "overlay_writable", config.overlay_writable);
+    config.enable_nuke = json_bool_or(root, "enable_nuke", config.enable_nuke);
     config.fs_type = json_string_or(root, "fs_type", config.fs_type);
     config.debug = json_bool_or(root, "debug", config.debug);
     config.verbose = json_bool_or(root, "verbose", config.verbose);
