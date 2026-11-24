@@ -70,6 +70,33 @@ fs::path modules_dir() {
     return runtime_modules_dir();
 }
 
+fs::path module_update_root(const fs::path& root) {
+    // KernelSU promotes staged modules into its own module directory.
+    const auto managed = modules_dir();
+    std::error_code ec;
+    if ((root / ".").lexically_normal() != (managed / ".").lexically_normal() &&
+        !fs::equivalent(root, managed, ec))
+        return {};
+    return (managed / ".." / "modules_update").lexically_normal();
+}
+
+bool has_staged_module(const fs::path& update_root, std::string_view id, int& error) {
+    if (update_root.empty())
+        return false;
+    char bytes[PATH_MAX];
+    bounded::Writer path(bytes, sizeof(bytes));
+    if (!path.write(update_root.native(), '/', id, "/module.prop", '\0')) {
+        error = ENAMETOOLONG;
+        return false;
+    }
+    struct stat prop{};
+    if (stat(bytes, &prop) == 0)
+        return S_ISREG(prop.st_mode);
+    if (errno != ENOENT && errno != ENOTDIR)
+        error = errno;
+    return false;
+}
+
 fs::path config_file() {
     return runtime_config_file();
 }
@@ -1173,13 +1200,14 @@ int handle_module(output::Context& destination, Arguments args) {
         const auto cfg = current_config();
         const fs::path module_root =
             cfg.module_dir.empty() ? modules_dir() : fs::path(std::string_view(cfg.module_dir));
+        const fs::path update_root =
+            include_inactive ? module_update_root(module_root) : fs::path{};
         const auto snapshot = module_runtime_snapshot();
         mount::ModuleInventory candidates;
         int inventory_error = 0;
-        if (!candidates.prepare_inventory(module_root.c_str(),
-                                          include_inactive ? snapshot.modules.size() : 0,
-                                          inventory_error) ||
-            !candidates.read_directory(inventory_error)) {
+        if (!candidates.read_inventory(
+                module_root.c_str(), update_root.empty() ? nullptr : update_root.c_str(),
+                include_inactive ? snapshot.modules.size() : 0, inventory_error)) {
             errno = inventory_error;
             output::err(destination,
                         "failed to read module directory: ", std::strerror(inventory_error), '\n');
@@ -1213,13 +1241,6 @@ int handle_module(output::Context& destination, Arguments args) {
         bool first = true;
         for (const auto& candidate : candidates) {
             const std::string_view id = candidate.id;
-            module_path.reset();
-            if (!module_path.write(module_root.native(),
-                                   module_root.native().back() == '/' ? "" : "/", id, '\0')) {
-                errno = ENAMETOOLONG;
-                output::err(destination, "module path exceeds filesystem capacity\n");
-                return 1;
-            }
             const auto mode = modes.find(id);
             const auto plan = candidate.kasumi_boot
                                   ? mount::BackendPlan{"kasumi", "kasumi", false}
@@ -1228,11 +1249,33 @@ int handle_module(output::Context& destination, Arguments args) {
             const bool has_runtime = recorded != snapshot.modules.end();
             const bool retain_runtime =
                 include_inactive && has_runtime && recorded->second.has_contributions;
-            mount::ModuleFacts facts;
+            mount::ModuleFacts live;
+            mount::ModuleFacts staged;
             mount::ModuleProperties props;
             int scan_error = 0;
-            if (!scanner.observe(module_path_bytes, facts, props, scan_error,
-                                 !candidate.kasumi_boot && plan.inspect_root_files, false)) {
+            const auto observe = [&](const fs::path& root, mount::ModuleFacts& facts,
+                                     bool inspect_root_files) {
+                module_path.reset();
+                if (!module_path.write(root.native(), root.native().back() == '/' ? "" : "/", id,
+                                       '\0')) {
+                    scan_error = ENAMETOOLONG;
+                    return false;
+                }
+                return scanner.observe(module_path_bytes, facts, props, scan_error,
+                                       inspect_root_files, false);
+            };
+            const bool inspect_live = !candidate.kasumi_boot && plan.inspect_root_files;
+            bool has_update = candidate.staged && has_staged_module(update_root, id, scan_error);
+            bool scanned = !scan_error && observe(module_root, live, inspect_live);
+            if (scanned && has_update) {
+                scanned = observe(update_root, staged, false);
+                if (scanned && !staged.has_prop) {
+                    // The installer may have promoted the staged tree during this listing.
+                    has_update = false;
+                    scanned = observe(module_root, live, inspect_live);
+                }
+            }
+            if (!scanned) {
                 errno = scan_error;
                 output::err(destination, "failed to inspect module ", id, ": ",
                             std::strerror(scan_error), '\n');
@@ -1242,11 +1285,14 @@ int handle_module(output::Context& destination, Arguments args) {
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
             struct stat marker;
             const bool inactive =
-                facts.inactive ||
+                live.inactive() ||
                 (hot_markers.get() >= 0 &&
                  fstatat(hot_markers.get(), candidate.id.c_str(), &marker, 0) == 0);
-            if ((!include_inactive && inactive) || (!facts.has_prop && !retain_runtime) ||
-                (!facts.visible_content && !retain_runtime))
+            const auto& facts = has_update ? staged : live;
+            const bool mountable =
+                facts.has_prop && facts.visible_content &&
+                !(has_update && (live.removed || staged.removed || staged.skip_mount));
+            if ((!include_inactive && inactive) || (!mountable && !retain_runtime))
                 continue;
             if (!scanner.observed_properties(props, scan_error)) {
                 errno = scan_error;
@@ -1255,7 +1301,11 @@ int handle_module(output::Context& destination, Arguments args) {
                 return 1;
             }
             const auto module_rules = rule_map.find(id);
-            const std::string_view strategy = candidate.kasumi_boot ? "kasumi" : plan.select(facts);
+            std::string_view strategy = candidate.kasumi_boot ? "kasumi" : plan.select(live);
+            if (has_update && retain_runtime && !recorded->second.backend.empty())
+                strategy = recorded->second.backend;
+            else if (has_update && (inactive || !live.has_prop))
+                strategy = "none";
             if (!first) {
                 output::out(destination, ',');
             }
@@ -1267,6 +1317,7 @@ int handle_module(output::Context& destination, Arguments args) {
                         ",\"description\":", bounded::quoted(props.description),
                         ",\"mode\":", bounded::quoted(mode),
                         ",\"bypass\":", (bypasses.find(id) == "on") ? "true" : "false",
+                        has_update ? ",\"pending\":true" : "",
                         ",\"strategy\":", bounded::quoted(strategy), ",\"runtime\":");
             const auto& summary = has_runtime ? recorded->second : snapshot.missing;
             output::out(destination, "{\"backend\":");
@@ -1306,7 +1357,7 @@ int handle_module(output::Context& destination, Arguments args) {
     }
     if (sub == "apply") {
         const std::string id = arg_or_default(args, 2, "");
-        if (args.size() != 3 || !valid_module_id(id)) {
+        if (args.size() != 3 || !valid_module_id(id) || id == "." || id == "..") {
             output::err(destination, "usage: kagamid module apply <id>\n");
             return 1;
         }
@@ -1318,6 +1369,17 @@ int handle_module(output::Context& destination, Arguments args) {
         }
         const fs::path root =
             cfg.module_dir.empty() ? modules_dir() : fs::path(std::string_view(cfg.module_dir));
+        int staged_error = 0;
+        if (has_staged_module(module_update_root(root), id, staged_error)) {
+            output::out(destination, "{\"applied\":false}\n");
+            return 0;
+        }
+        if (staged_error) {
+            errno = staged_error;
+            output::err(destination,
+                        "failed to inspect staged module: ", std::strerror(staged_error), '\n');
+            return 1;
+        }
         std::error_code directory_error;
         if (!fs::is_directory(root, directory_error)) {
             output::err(destination, "module directory is unavailable: ", root.string(), '\n');

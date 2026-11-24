@@ -1,12 +1,15 @@
 #include "core/command.hpp"
 #include "core/json_value.hpp"
+#include "mount/kasumi.hpp"
 #include "mount/module_runtime.hpp"
 #include "mount/partition_scan.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -52,18 +55,30 @@ struct Fixture {
     }
 };
 
-std::set<std::string> listed(bool inactive) {
-    const kagami::Argument args[] = {"module", "list", "--include-inactive"};
+std::string command(std::initializer_list<kagami::Argument> args) {
     std::vector<char> out(1024 * 1024), err(4096);
     kagami::output::Context destination{{out.data(), out.size()}, {err.data(), err.size()}};
-    const auto result = kagami::run_command_capture({args, inactive ? 3U : 2U}, destination);
-    require(result.exit_code == 0, "module list failed: " + std::string(result.stderr_text));
+    const auto result = kagami::run_command_capture({args.begin(), args.size()}, destination);
+    require(result.exit_code == 0, std::string(result.stderr_text));
+    return std::string(result.stdout_text);
+}
+std::map<std::string, kagami::JsonValue> module_rows(bool inactive) {
+    const auto output =
+        inactive ? command({"module", "list", "--include-inactive"}) : command({"module", "list"});
     kagami::JsonValue json;
     std::string error;
-    require(kagami::parse_json(std::string(result.stdout_text), json, error), error);
+    require(kagami::parse_json(output, json, error), error);
+    std::map<std::string, kagami::JsonValue> rows;
+    for (auto& module : json.object_value.at("modules").array_value) {
+        const auto id = module.object_value.at("id").string_value;
+        require(rows.emplace(id, std::move(module)).second, "duplicate module " + id);
+    }
+    return rows;
+}
+std::set<std::string> listed(bool inactive) {
     std::set<std::string> ids;
-    for (const auto& module : json.object_value.at("modules").array_value)
-        ids.insert(module.object_value.at("id").string_value);
+    for (const auto& row : module_rows(inactive))
+        ids.insert(row.first);
     return ids;
 }
 void test_inventory() {
@@ -96,6 +111,82 @@ void test_inventory() {
     require(listed(true) ==
                 std::set<std::string>{"payload", "disabled", "removed", "skipped", "hot_unmounted"},
             "payload inventory remains usable with a missing runtime record");
+}
+
+void test_staged_modules() {
+    Fixture fixture;
+    const auto live = fixture.path / "custom-modules";
+    const auto updates = fixture.path / "modules_update";
+    require(setenv("KAGAMI_MODULES_DIR", live.c_str(), 1) == 0, "managed module directory");
+    file(fixture.path / "config.json", "{\"moduledir\":\"" + live.string() + "/\"}");
+    const auto stage = [&](const std::string& id, const std::string& partition) {
+        file(updates / id / "module.prop", "id=declared-id\nname=Staged " + id + "\nversion=2\n");
+        if (!partition.empty())
+            file(updates / id / partition / "etc/payload", "next version");
+    };
+    stage("fresh", "vendor");
+    require(listed(false).empty() && listed(true) == std::set<std::string>{"fresh"},
+            "a staged-only module is configurable before a live directory exists");
+    require(command({"module", "apply", "fresh"}) == "{\"applied\":false}\n",
+            "a staged-only module waits for activation");
+
+    fixture.module("fresh", "", "update");
+    fixture.module("upgrade", "system");
+    fixture.module("dropped", "system");
+    fixture.module("incomplete", "product");
+    fixture.module("removing", "", "remove");
+    stage("upgrade", "vendor");
+    stage("dropped", "");
+    stage("removing", "system");
+    stage("optout", "system");
+    file(updates / "optout/skip_mount", "");
+    file(updates / "incomplete/system/etc/payload", "partial install");
+    require(listed(false) == std::set<std::string>{"dropped", "incomplete", "upgrade"},
+            "the default list uses only live module contents");
+    require(listed(true) == std::set<std::string>{"fresh", "incomplete", "upgrade"},
+            "staged eligibility wins, ignoring incomplete replacements and pending removal");
+    {
+        runtime::Operation operation;
+        require(runtime::assign_modules({{"upgrade", "magic"}}), "assign the live module");
+        const auto attachment = runtime::capture_mount("/proc", {"upgrade"});
+        require(attachment.captured && runtime::record_mounts("magic", {attachment}, true),
+                "capture live mount evidence");
+        operation.finish();
+    }
+    command({"module", "set-mode", "fresh", "magic"});
+    command({"module", "add-rule", "fresh", "/vendor/etc/item", "overlay"});
+    const auto rows = module_rows(true);
+    const auto& fresh = rows.at("fresh").object_value;
+    require(
+        fresh.at("pending").bool_value && fresh.at("name").string_value == "Staged fresh" &&
+            fresh.at("path").string_value == (updates / "fresh").string() &&
+            fresh.at("mode").string_value == "magic" &&
+            fresh.at("strategy").string_value == "none" &&
+            fresh.at("rules").array_value.at(0).object_value.at("mode").string_value == "overlay",
+        "read back staged settings by directory ID without reporting a live backend");
+    const auto& upgrade = rows.at("upgrade").object_value;
+    require(upgrade.at("version").string_value == "2" &&
+                upgrade.at("runtime").object_value.at("state").string_value == "mounted" &&
+                upgrade.at("strategy").string_value == "magic",
+            "staged properties preserve the running version's mount evidence");
+    require(kagami::mount::kasumi::record_replayable_mappings({{"upgrade", live / "upgrade"}}),
+            "record a replayable module");
+    require(command({"module", "apply", "upgrade"}) == "{\"applied\":false}\n",
+            "saving staged rules must not replay the old module");
+
+    fs::remove_all(live / "fresh");
+    fs::rename(updates / "fresh", live / "fresh");
+    const auto active = module_rows(false).at("fresh").object_value;
+    require(active.count("pending") == 0 && active.at("mode").string_value == "magic" &&
+                active.at("strategy").string_value == "magic" &&
+                active.at("rules").array_value.size() == 1,
+            "the activated module keeps its preselected mode and rules");
+    file(fixture.path / "config.json",
+         "{\"moduledir\":\"" + (fixture.path / "another").string() + "\"}");
+    stage("unrelated", "system");
+    require(listed(true).count("unrelated") == 0,
+            "a custom root excludes KernelSU's staged modules");
+    require(unsetenv("KAGAMI_MODULES_DIR") == 0, "restore managed module directory");
 }
 
 void test_partition_scan() {
@@ -258,6 +349,7 @@ void test_module_apply() {
 int main() {
     try {
         test_inventory();
+        test_staged_modules();
         test_invalid_settings();
         test_partition_scan();
         test_partition_command();

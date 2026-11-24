@@ -12,10 +12,14 @@ namespace kagami::mount {
 
 struct ModuleFacts {
     bool has_prop = false;
-    bool inactive = false;
+    bool disabled = false;
+    bool removed = false;
+    bool skip_mount = false;
     bool visible_content = false;
     bool backend_content = false;
     bool needs_magic = false;
+
+    bool inactive() const noexcept { return disabled || removed || skip_mount; }
 };
 
 struct ModuleProperties {

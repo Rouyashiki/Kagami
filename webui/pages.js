@@ -58,13 +58,14 @@ export function setting(s, key) {
 function settings(s, keys) { return `<div class="setting-list">${keys.map(key => setting(s, key)).join('')}</div>`; }
 function viewRow(view, title, subtitle, symbol) { return row({ title: title || t(VIEW_LABELS[view]), subtitle, symbol, action: 'open-view', data: { 'data-view': view }, key: `link-${view}` }); }
 const isMounted = module => !module.runtime?.error && ['mounted', 'partial'].includes(module.runtime?.state);
-function runtimeBadge(module, readFailed = false) {
+function moduleBadges(module, readFailed = false) {
   const runtime = module.runtime;
   const failed = readFailed || Boolean(runtime?.error);
   const state = failed ? 'unknown' : runtime?.state || 'unknown';
   const label = failed ? t('ui.mountReadFailed') : state === 'unknown' ? t('ui.mountUnavailable')
     : `${runtime.backend && runtime.backend !== 'none' ? `${modeLabel(runtime.backend)} ` : ''}${t(state === 'mounted' ? 'ui.mounted' : state === 'partial' ? 'ui.partialMount' : 'ui.unmounted')}`;
-  return `<span data-key="runtime-status" data-runtime-state="${e(state)}">${badge(label, failed ? 'danger' : state === 'mounted' ? 'success' : state === 'partial' ? 'warning' : 'muted')}</span>`;
+  const pending = module.pending && !readFailed ? badge(t('ui.pendingActivation')) : '';
+  return `${pending}<span data-key="runtime-status" data-runtime-state="${e(state)}">${badge(label, failed ? 'danger' : state === 'mounted' ? 'success' : state === 'partial' ? 'warning' : 'muted')}</span>`;
 }
 function status(s) {
   const system = data(s, 'system'), storage = data(s, 'storage'), lkm = data(s, 'lkm');
@@ -90,7 +91,7 @@ export function moduleResults(s) {
     .filter(module => s.moduleFilter === 'all' || (s.moduleFilter === 'active' ? isMounted(module) : module.mode === s.moduleFilter));
   if (!s.resources.modules.ready) return '';
   if (!modules.length) return empty(t(s.moduleSearch || s.moduleFilter !== 'all' ? 'ui.noResults' : 'modules.noModules'));
-  return list(modules.map(module => `<button type="button" class="list-row module-row" data-action="module-detail" data-id="${e(module.id)}" data-key="${e(module.id)}"><span class="row-symbol">${icon('layers')}</span><span class="row-copy"><strong title="${e(module.name)}">${e(module.name)}</strong><small>${e(module.id)}${module.version ? ` · ${e(module.version)}` : ''}</small><span class="module-meta">${runtimeBadge(module, Boolean(s.resources.modules.error))}</span></span>${icon('chevron-right', 'chevron')}<md-ripple></md-ripple></button>`).join(''));
+  return list(modules.map(module => `<button type="button" class="list-row module-row" data-action="module-detail" data-id="${e(module.id)}" data-key="${e(module.id)}"><span class="row-symbol">${icon('layers')}</span><span class="row-copy"><strong title="${e(module.name)}">${e(module.name)}</strong><small>${e(module.id)}${module.version ? ` · ${e(module.version)}` : ''}</small><span class="module-meta">${moduleBadges(module, Boolean(s.resources.modules.error))}</span></span>${icon('chevron-right', 'chevron')}<md-ripple></md-ripple></button>`).join(''));
 }
 function modules(s) {
   return `<div class="toolbar" data-key="module-toolbar">${search('module-search', s.moduleSearch, t('modules.search'))}${iconButton('module-filter', 'filter', t('ui.filter'))}</div>
@@ -108,7 +109,7 @@ function moduleDetail(s) {
   const disabled = Boolean(s.resources.modules.error) || Object.entries(s.mutations).some(([key, value]) => key.startsWith(`module:${module.id}:`) && value.phase === 'saving');
   const runtime = module.runtime;
   const backend = s.resources.modules.error || runtime?.error ? t('ui.mountReadFailed') : runtime?.backend === 'none' ? t('ui.none') : modeLabel(runtime?.backend);
-  return `${error(s, 'modules')}<div class="module-intro" data-key="module-intro"><span class="large-symbol">${icon('layers')}</span><h2>${e(module.name)}</h2><p>${e(module.description)}</p><div class="badges">${badge(module.version || '—')}${runtimeBadge(module, Boolean(s.resources.modules.error))}</div></div>
+  return `${error(s, 'modules')}<div class="module-intro" data-key="module-intro"><span class="large-symbol">${icon('layers')}</span><h2>${e(module.name)}</h2><p>${e(module.description)}</p><div class="badges">${badge(module.version || '—')}${moduleBadges(module, Boolean(s.resources.modules.error))}</div></div>
     ${section(t('ui.mounting'), `${list(row({ title: t('ui.configMode'), subtitle: modeLabel(module.mode), symbol: 'git-branch', action: 'module-mode', data: { 'data-id': module.id }, disabled }))}${mutation(s, `module:${module.id}:mode`)}${bypassSwitch(s, module.bypass, 'module_bypass', `data-id="${e(module.id)}"`, disabled)}${mutation(s, `module:${module.id}:bypass`)}<p class="supporting">${e(t('ui.mountBackendNextBoot'))}</p>${info([[t('ui.runtimeMode'), backend], ...(runtime?.error ? [[t('ui.lastError'), runtime.error.message]] : [])])}`, { key: 'module-mode' })}
     ${section(t('modules.rules'), `${module.rules.length ? `<div class="row-list">${module.rules.map(rule => `<div class="rule-row" data-key="${e(rule.path)}"><button class="rule-content" data-action="rule-edit" data-id="${e(module.id)}" data-path="${e(rule.path)}" ${disabled ? 'disabled' : ''}><code dir="ltr">${e(rule.path)}</code><span>${e(modeLabel(rule.mode))}${module.bypass || rule.bypass ? ` · ${e(t('bypass.title'))}` : ''}</span></button>${iconButton('rule-remove', 'trash-2', t('ui.remove'), { 'data-id': module.id, 'data-path': rule.path, disabled })}</div>`).join('')}</div>` : empty(t('ui.empty'), 'list')}${Object.keys(s.mutations).filter(key => key.startsWith(`module:${module.id}:rule`)).map(key => mutation(s, key)).join('')}`, { key: 'module-rules', action: button('rule-add', t('modules.addRule'), { 'data-id': module.id, disabled }, 'tonal', 'plus') })}
     ${section(t('ui.moduleInfo'), info([[t('ui.id'), module.id, true], [t('ui.author'), module.author || '—'], [t('modules.path'), module.path, true]]), { key: 'module-info' })}`;

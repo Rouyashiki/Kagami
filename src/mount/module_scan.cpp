@@ -86,8 +86,9 @@ void ModuleScanner::probe_unlisted(int fd, ModuleFacts& facts) noexcept {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     struct stat st;
     facts.has_prop = fstatat(fd, "module.prop", &st, 0) == 0;
-    facts.inactive = fstatat(fd, "disable", &st, 0) == 0 || fstatat(fd, "remove", &st, 0) == 0 ||
-                     fstatat(fd, "skip_mount", &st, 0) == 0;
+    facts.disabled = fstatat(fd, "disable", &st, 0) == 0;
+    facts.removed = fstatat(fd, "remove", &st, 0) == 0;
+    facts.skip_mount = fstatat(fd, "skip_mount", &st, 0) == 0;
     for (const auto& part : builtin) {
         if (fstatat(fd, part.c_str(), &st, 0) != 0 || !S_ISDIR(st.st_mode))
             continue;
@@ -118,8 +119,12 @@ bool ModuleScanner::observe(const char* path, ModuleFacts& facts, ModuleProperti
     while (listed && entries.next(entry, error)) {
         if (entry.name == "module.prop")
             facts.has_prop = posix::exists(module.get(), entry);
-        if (entry.name == "disable" || entry.name == "remove" || entry.name == "skip_mount")
-            facts.inactive = facts.inactive || posix::exists(module.get(), entry);
+        if (entry.name == "disable")
+            facts.disabled = posix::exists(module.get(), entry);
+        if (entry.name == "remove")
+            facts.removed = posix::exists(module.get(), entry);
+        if (entry.name == "skip_mount")
+            facts.skip_mount = posix::exists(module.get(), entry);
         if (partition(entry.name, false) && posix::is_directory(module.get(), entry)) {
             facts.visible_content = facts.visible_content || partition(entry.name, true);
             facts.backend_content = true;

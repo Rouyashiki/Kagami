@@ -29,6 +29,7 @@ const strings = [
   ['ui.outcomeUnknown', 'Operation outcome unknown · refresh to check', '操作结果未知 · 请刷新确认'],
   ['ui.applyUnknown', 'Configuration saved · runtime result unknown', '配置已保存 · 运行时结果未知'],
   ['ui.nextBoot', 'Saved changes are used at the next boot.', '保存的修改将在下次启动时使用。'],
+  ['ui.pendingActivation', 'Pending activation', '待激活'],
   ['ui.runtimeApplied', 'Saved and applied', '已保存并应用'],
   ['ui.empty', 'Nothing here yet', '暂无内容'], ['ui.noResults', 'No matching results', '没有匹配结果'],
   ['ui.filter', 'Filter', '筛选'], ['ui.all', 'All', '全部'], ['ui.edit', 'Edit', '编辑'],

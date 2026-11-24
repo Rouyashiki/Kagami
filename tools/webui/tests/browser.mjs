@@ -441,6 +441,25 @@ try {
       assert.equal(new URL(page.url()).searchParams.get("tab"), "modules");
     }, { query: "?tab=modules&view=module&id=beta_audio" });
 
+    await runCase(project, "pending-module-mode", async (page) => {
+      const fresh = page.locator(`${selector("module-detail")}[data-id="fresh"]`);
+      await fresh.getByText("Pending activation", { exact: true }).waitFor();
+      const upgrade = page.locator(`${selector("module-detail")}[data-id="upgrade"]`);
+      await upgrade.getByText("Pending activation", { exact: true }).waitFor();
+      assert.equal(await upgrade.locator("[data-runtime-state]").innerText(), "OverlayFS Mounted");
+      await fresh.click();
+      await page.getByText("Pending activation", { exact: true }).waitFor();
+      await page.locator(selector("module-mode")).click();
+      await page.locator('#editor input[name="value"][value="magic"]').check();
+      await page.locator(selector("dialog-save")).click();
+      await page.locator("#editor").waitFor({ state: "hidden" });
+      await page.locator(selector("module-mode")).getByText("Magic Mount", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__kagamiFixture.commands.some(cmd => cmd.includes("module apply"))), false);
+    }, { query: "?tab=modules", fixture: { modules: [
+      { id: "fresh", mode: "auto", pending: true, rules: [] },
+      { id: "upgrade", mode: "auto", pending: true, rules: [], runtime: { state: "mounted", backend: "overlay" } },
+    ] } });
+
     await runCase(project, "module-dialog-save-cancel", async (page) => {
       const opener = page.locator(`${selector("module-mode")}[data-id="alpha_fonts"]`);
       await opener.click();

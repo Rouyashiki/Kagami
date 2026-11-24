@@ -565,6 +565,7 @@ const realApi = {
         author: item.author || "",
         description: item.description || "",
         mode: item.mode || "auto",
+        pending: item.pending === true,
         bypass: item.bypass === true,
         strategy: item.strategy || "unknown",
         runtime: moduleRuntime(item.runtime),
